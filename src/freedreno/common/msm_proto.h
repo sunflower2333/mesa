@@ -6,6 +6,8 @@
 #ifndef MSM_PROTO_H_
 #define MSM_PROTO_H_
 
+#define MSM_PROTO_ALIGN_4 __attribute__((__packed__, __aligned__(4)))
+
 /**
  * General protocol notes:
  * 1) Request (req) messages are generally sent over DRM_VIRTGPU_EXECBUFFER
@@ -120,8 +122,20 @@ struct msm_ccmd_gem_new_req {
    uint64_t size;
    uint32_t flags;
    uint32_t blob_id;
-};
+} MSM_PROTO_ALIGN_4;
 DEFINE_CAST(vdrm_ccmd_req, msm_ccmd_gem_new_req)
+
+/* Optional DroidVM arena-v2 extension carried after GEM_NEW. */
+struct msm_gem_new_run {
+   uint64_t arena_off;
+   uint64_t len;
+} MSM_PROTO_ALIGN_4;
+
+struct msm_ccmd_gem_new_run_list {
+   uint32_t nr_runs;
+   uint32_t pad;
+   struct msm_gem_new_run runs[];
+};
 
 /*
  * GUEST-ALLOC (DroidVM): the guest already owns this BO's pages.
@@ -147,7 +161,8 @@ struct msm_ccmd_gem_set_iova_req {
 
    uint64_t iova;
    uint32_t res_id;
-};
+   uint32_t __pad;
+} MSM_PROTO_ALIGN_4;
 DEFINE_CAST(vdrm_ccmd_req, msm_ccmd_gem_set_iova_req)
 
 /*
@@ -325,5 +340,7 @@ struct msm_ccmd_set_debuginfo_req {
    int8_t   payload[];
 };
 DEFINE_CAST(vdrm_ccmd_req, msm_ccmd_set_debuginfo_req)
+
+#undef MSM_PROTO_ALIGN_4
 
 #endif /* MSM_PROTO_H_ */

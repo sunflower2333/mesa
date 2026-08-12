@@ -20,6 +20,7 @@
 #define VIRTGPU_CAP_BOOL_UNSUPPORTED_BY_HOST  0
 #define VIRTGPU_CAP_BOOL_FALSE               ~0
 #define VIRTGPU_CAP_BOOL_TRUE                 1
+#define VIRTGPU_DRM_WIRE_FORMAT_VERSION       2
 
 
 struct virgl_renderer_capset_drm {
