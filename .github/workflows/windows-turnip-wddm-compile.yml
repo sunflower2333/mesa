@@ -1,0 +1,84 @@
+name: Windows Turnip WDDM transport compile
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - wip/windows-turnip-wddm
+    paths:
+      - "src/freedreno/vulkan/tu_wddm_abi.h"
+      - "src/freedreno/vulkan/tu_wddm_dispatch.h"
+      - "src/freedreno/vulkan/tu_wddm_dispatch.cc"
+      - "src/freedreno/vulkan/tu_knl_wddm.h"
+      - "src/freedreno/vulkan/tu_knl_wddm.cc"
+      - "src/freedreno/vulkan/tests/tu_wddm_abi_layout.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_abi_manifest.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_abi_manifest_entries.h"
+      - "src/freedreno/vulkan/tests/tu_wddm_abi_expected.txt"
+      - "src/freedreno/vulkan/tests/tu_wddm_transport_compile.cpp"
+      - ".github/workflows/windows-turnip-wddm-compile.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: ${{ matrix.arch }} SDK/WDK compile
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC and WDK
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Verify required SDK headers
+        shell: pwsh
+        run: |
+          $headers = @('windows.h', 'dxgi1_2.h', 'd3dkmthk.h')
+          foreach ($header in $headers) {
+            $found = Get-ChildItem -Path ($env:INCLUDE -split ';') -Filter $header -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -eq $found) {
+              throw "required SDK/WDK header not found: $header"
+            }
+            Write-Host "$header -> $($found.FullName)"
+          }
+
+      - name: Compile WDDM transport
+        shell: cmd
+        run: >-
+          cl /nologo /std:c++17 /W4 /WX /EHsc /c
+          /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C
+          /I src\freedreno\vulkan
+          src\freedreno\vulkan\tu_wddm_dispatch.cc
+          src\freedreno\vulkan\tu_knl_wddm.cc
+          src\freedreno\vulkan\tests\tu_wddm_transport_compile.cpp
+
+      - name: Run x64 ABI fixture
+        if: matrix.arch == 'x64'
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /W4 /WX /EHsc /I src\freedreno\vulkan src\freedreno\vulkan\tests\tu_wddm_abi_layout.cpp /Fe:%TEMP%\tu-wddm-abi-layout.exe
+          if errorlevel 1 exit /b 1
+          %TEMP%\tu-wddm-abi-layout.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /W4 /WX /EHsc /I src\freedreno\vulkan src\freedreno\vulkan\tests\tu_wddm_abi_manifest.cpp /Fe:%TEMP%\tu-wddm-abi-manifest.exe
+          if errorlevel 1 exit /b 1
+          %TEMP%\tu-wddm-abi-manifest.exe > %TEMP%\tu-wddm-abi-manifest.txt
+          if errorlevel 1 exit /b 1
+          fc /b src\freedreno\vulkan\tests\tu_wddm_abi_expected.txt %TEMP%\tu-wddm-abi-manifest.txt
+
+      - name: Assert compile-only artifact policy
+        shell: pwsh
+        run: |
+          if (Test-Path -PathType Leaf -Path "*.sys") {
+            throw "compile-only job produced a driver artifact"
+          }
+          Write-Host "No driver, INF, package, or installation step is part of this gate."
