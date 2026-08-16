@@ -28,7 +28,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include:
+          - arch: x64
+            msvc_arch: x64
+          - arch: arm64
+            msvc_arch: x64_arm64
 
     steps:
       - name: Checkout
@@ -37,7 +41,7 @@ jobs:
       - name: Set up MSVC and WDK
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.arch }}
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Verify required SDK headers
         shell: pwsh
