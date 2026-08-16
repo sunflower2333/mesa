@@ -244,6 +244,24 @@ if with_symbols_check
   )
 endif
 
+if get_option('build-tests')
+  tu_wddm_abi_layout_test = executable(
+    'tu-wddm-abi-layout',
+    files('tests/tu_wddm_abi_layout.cpp'),
+    include_directories : libtu_includes,
+    dependencies : [idep_mesautil],
+  )
+  test('tu WDDM private ABI layout', tu_wddm_abi_layout_test, suite : ['freedreno'])
+
+  tu_wddm_abi_manifest_test = executable(
+    'tu-wddm-abi-manifest',
+    files('tests/tu_wddm_abi_manifest.cpp'),
+    include_directories : libtu_includes,
+    dependencies : [idep_mesautil],
+  )
+  test('tu WDDM private ABI manifest', tu_wddm_abi_manifest_test, suite : ['freedreno'])
+endif
+
 icd_file_name = libname_prefix + 'vulkan_freedreno.' + libname_suffix
 
 freedreno_icd = custom_target(
