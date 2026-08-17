@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * Windows Turnip kernel-interface transport.  This file owns only the
- * WDDM/D3DKMT object and private-ABI plumbing.  It intentionally does not
- * submit a command stream or manufacture a fence completion; those operations
- * remain behind the KMD guest-backed allocation/retirement gates.
+ * WDDM/D3DKMT object and private-ABI plumbing.  Native submits stay behind the
+ * KMD guest-backed allocation and VidSch retirement gates; this code never
+ * bypasses those gates or manufactures a fence completion.
  */
 
 #include "tu_knl_wddm.h"
@@ -19,6 +19,56 @@ tu_wddm_sizeof()
    static_assert(sizeof(T) <= UINT32_MAX, "WDDM size field overflow");
    return static_cast<uint32_t>(sizeof(T));
 }
+
+enum : uint32_t {
+   TU_WDDM_MSM_CCMD_GEM_SUBMIT = 7,
+   TU_WDDM_MSM_PIPE_3D0 = 0x10,
+   TU_WDDM_MSM_SUBMIT_NO_IMPLICIT = 0x80000000,
+   TU_WDDM_MSM_SUBMIT_BO_READ = 0x0001,
+   TU_WDDM_MSM_SUBMIT_BO_WRITE = 0x0002,
+   TU_WDDM_MSM_SUBMIT_BO_DUMP = 0x0004,
+   TU_WDDM_MSM_SUBMIT_BO_NO_IMPLICIT = 0x0008,
+   TU_WDDM_MSM_SUBMIT_CMD_BUF = 0x0001,
+   TU_WDDM_MSM_SUBMIT_CMD_IB_TARGET_BUF = 0x0002,
+};
+
+#pragma pack(push, 1)
+struct tu_wddm_msm_submit_request {
+   uint32_t command;
+   uint32_t length;
+   uint32_t sequence;
+   uint32_t response_offset;
+   uint32_t flags;
+   uint32_t queue_id;
+   uint32_t bo_count;
+   uint32_t command_count;
+   uint32_t fence;
+};
+
+struct tu_wddm_msm_submit_bo {
+   uint32_t flags;
+   uint32_t handle;
+   uint64_t presumed;
+};
+
+struct tu_wddm_msm_submit_command {
+   uint32_t type;
+   uint32_t submit_index;
+   uint32_t submit_offset;
+   uint32_t size;
+   uint32_t padding;
+   uint32_t relocation_count;
+   uint64_t iova;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(tu_wddm_msm_submit_request) == 36, "MSM submit request layout changed");
+static_assert(offsetof(tu_wddm_msm_submit_request, flags) == 16, "MSM submit flags offset changed");
+static_assert(offsetof(tu_wddm_msm_submit_request, fence) == 32, "MSM submit fence offset changed");
+static_assert(sizeof(tu_wddm_msm_submit_bo) == 16, "MSM submit BO layout changed");
+static_assert(offsetof(tu_wddm_msm_submit_bo, presumed) == 8, "MSM submit presumed offset changed");
+static_assert(sizeof(tu_wddm_msm_submit_command) == 32, "MSM submit command layout changed");
+static_assert(offsetof(tu_wddm_msm_submit_command, iova) == 24, "MSM submit command IOVA offset changed");
 
 static void
 tu_wddm_init_header(VIOGPU_WDDM_ABI_HEADER *header, uint32_t size)
@@ -400,7 +450,8 @@ tu_wddm_allocation_desc_valid(const struct tu_wddm_context *context,
    if (context == NULL || context->device == NULL || context->device->adapter.runtime == NULL ||
        context->device->handle == 0 || context->handle == 0 || desc == NULL || desc->size == 0 ||
        desc->alignment != 4096 || (desc->flags & ~valid_flags) != 0 ||
-       desc->size > UINT64_MAX - 4095)
+       desc->size > UINT64_MAX - 4095 ||
+       !tu_wddm_validate_context_info(&context->info, context->device->adapter.private_info.ResetGeneration))
       return false;
 
    if (has_surface && (desc->width == 0 || desc->height == 0 || desc->pitch == 0 ||
@@ -425,10 +476,12 @@ tu_wddm_allocation_desc_valid(const struct tu_wddm_context *context,
 
    if (native) {
       const uint64_t aligned_size = (desc->size + UINT64_C(4095)) & ~UINT64_C(4095);
-      if (desc->requested_iova == 0 || (desc->requested_iova & 4095) != 0 ||
+      if ((desc->flags & VIOGPU_WDDM_ALLOCATION_PRIMARY) != 0 ||
+          desc->requested_iova == 0 || (desc->requested_iova & 4095) != 0 ||
           context->info.ResetGeneration == 0 || context->info.ContextId == 0 ||
           aligned_size > UINT32_MAX ||
-          desc->requested_iova > UINT64_MAX - (aligned_size - 1))
+          desc->requested_iova < context->info.VaStart || aligned_size > context->info.VaSize ||
+          desc->requested_iova > context->info.VaStart + context->info.VaSize - aligned_size)
          return false;
    } else if (desc->requested_iova != 0 || (desc->flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0) {
       return false;
@@ -524,6 +577,7 @@ tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation,
    lock.hDevice = allocation->context->device->handle;
    lock.hAllocation = allocation->handle;
    lock.Flags.ReadOnly = read_only ? 1 : 0;
+   lock.Flags.LockEntire = 1;
 
    NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.Lock(&lock);
    if (!NT_SUCCESS(status) || lock.pData == NULL)
@@ -565,6 +619,11 @@ tu_wddm_render_reference_valid(const struct tu_wddm_context *context,
 {
    if (context == NULL || reference == NULL || reference->allocation == NULL ||
        reference->allocation->context != context || reference->allocation->handle == 0 ||
+       !tu_wddm_header_is_current(&reference->allocation->private_info.Header,
+                                  tu_wddm_sizeof<VIOGPU_WDDM_ALLOCATION_INFO>()) ||
+       (reference->allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_NATIVE) == 0 ||
+       reference->allocation->private_info.ExpectedResetGeneration != context->info.ResetGeneration ||
+       reference->allocation->private_info.ContextId != context->info.ContextId ||
        reference->flags == 0 ||
        (reference->flags & ~(VIOGPU_WDDM_REFERENCE_READ | VIOGPU_WDDM_REFERENCE_WRITE)) != 0 ||
        reference->length == 0 || reference->allocation_offset > UINT32_MAX ||
@@ -573,10 +632,79 @@ tu_wddm_render_reference_valid(const struct tu_wddm_context *context,
                                    ? reference->allocation_offset
                                    : reference->allocation->private_info.Size) ||
        reference->patch_offset > command_stream_size - sizeof(uint64_t) ||
-       (reference->patch_offset & (sizeof(uint64_t) - 1)) != 0 ||
-       (reference->allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0 &&
-          (reference->flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0)
+       ((reference->allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0 &&
+          (reference->flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0))
       return false;
+
+   return true;
+}
+
+static bool
+tu_wddm_native_submit_valid(const void *command_stream,
+                            uint32_t command_stream_size,
+                            const struct tu_wddm_render_reference *references,
+                            uint32_t reference_count)
+{
+   if (command_stream == NULL || references == NULL || command_stream_size < sizeof(tu_wddm_msm_submit_request) ||
+       (command_stream_size & (sizeof(uint32_t) - 1)) != 0)
+      return false;
+
+   const BYTE *stream = static_cast<const BYTE *>(command_stream);
+   tu_wddm_msm_submit_request request = {};
+   memcpy(&request, stream, sizeof(request));
+
+   const uint32_t valid_submit_flags = TU_WDDM_MSM_PIPE_3D0 | TU_WDDM_MSM_SUBMIT_NO_IMPLICIT;
+   if (request.command != TU_WDDM_MSM_CCMD_GEM_SUBMIT || request.length != command_stream_size ||
+       request.sequence == 0 || request.response_offset != 0 || request.flags == 0 ||
+       (request.flags & ~valid_submit_flags) != 0 || (request.flags & TU_WDDM_MSM_PIPE_3D0) != TU_WDDM_MSM_PIPE_3D0 ||
+       request.queue_id == 0 || request.fence == 0 || request.bo_count != reference_count || request.bo_count == 0 ||
+       request.command_count == 0)
+      return false;
+
+   const uint64_t bo_bytes = static_cast<uint64_t>(request.bo_count) * sizeof(tu_wddm_msm_submit_bo);
+   const uint64_t command_bytes = static_cast<uint64_t>(request.command_count) * sizeof(tu_wddm_msm_submit_command);
+   const uint64_t expected_size = sizeof(request) + bo_bytes + command_bytes;
+   if (expected_size != command_stream_size)
+      return false;
+
+   const uint32_t valid_bo_flags = TU_WDDM_MSM_SUBMIT_BO_READ | TU_WDDM_MSM_SUBMIT_BO_WRITE |
+                                   TU_WDDM_MSM_SUBMIT_BO_DUMP | TU_WDDM_MSM_SUBMIT_BO_NO_IMPLICIT;
+   for (uint32_t i = 0; i < request.bo_count; i++) {
+      tu_wddm_msm_submit_bo bo = {};
+      const uint64_t bo_offset = sizeof(request) + static_cast<uint64_t>(i) * sizeof(tu_wddm_msm_submit_bo);
+      memcpy(&bo, stream + bo_offset, sizeof(bo));
+
+      uint32_t expected_access = 0;
+      if ((references[i].flags & VIOGPU_WDDM_REFERENCE_READ) != 0)
+         expected_access |= TU_WDDM_MSM_SUBMIT_BO_READ;
+      if ((references[i].flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0)
+         expected_access |= TU_WDDM_MSM_SUBMIT_BO_WRITE;
+
+      const uint32_t expected_patch_offset =
+         static_cast<uint32_t>(bo_offset + offsetof(tu_wddm_msm_submit_bo, presumed));
+      if (bo.handle != 0 || bo.presumed != 0 || bo.flags == 0 || (bo.flags & ~valid_bo_flags) != 0 ||
+          (bo.flags & (TU_WDDM_MSM_SUBMIT_BO_READ | TU_WDDM_MSM_SUBMIT_BO_WRITE)) != expected_access ||
+          references[i].patch_offset != expected_patch_offset)
+         return false;
+   }
+
+   const uint64_t commands_offset = sizeof(request) + bo_bytes;
+   for (uint32_t i = 0; i < request.command_count; i++) {
+      tu_wddm_msm_submit_command command = {};
+      const uint64_t command_offset = commands_offset + static_cast<uint64_t>(i) * sizeof(tu_wddm_msm_submit_command);
+      memcpy(&command, stream + command_offset, sizeof(command));
+
+      if ((command.type != TU_WDDM_MSM_SUBMIT_CMD_BUF && command.type != TU_WDDM_MSM_SUBMIT_CMD_IB_TARGET_BUF) ||
+          command.submit_index >= request.bo_count || command.size == 0 ||
+          (command.size & (sizeof(uint32_t) - 1)) != 0 || command.padding != 0 || command.relocation_count != 0 ||
+          command.iova != 0)
+         return false;
+
+      const struct tu_wddm_allocation *allocation = references[command.submit_index].allocation;
+      if (command.submit_offset > allocation->private_info.Size ||
+          command.size > allocation->private_info.Size - command.submit_offset)
+         return false;
+   }
 
    return true;
 }
@@ -594,7 +722,7 @@ tu_wddm_context_render(struct tu_wddm_context *context,
        command_stream == NULL || command_stream_size < sizeof(uint64_t) ||
        command_stream_size > TU_WDDM_MAX_RENDER_COMMAND_SIZE || references == NULL ||
        reference_count == 0 || reference_count > TU_WDDM_MAX_RENDER_ALLOCATIONS ||
-       context->info.ResetGeneration == 0 || context->info.ContextId == 0)
+       !tu_wddm_validate_context_info(&context->info, context->device->adapter.private_info.ResetGeneration))
       return false;
 
    const uint64_t references_size = static_cast<uint64_t>(reference_count) *
@@ -611,12 +739,18 @@ tu_wddm_context_render(struct tu_wddm_context *context,
       if (!tu_wddm_render_reference_valid(context, &references[i], command_stream_size))
          return false;
       for (uint32_t j = 0; j < i; j++) {
+         if (references[i].allocation->handle == references[j].allocation->handle)
+            return false;
+
          const uint32_t a = references[i].patch_offset;
          const uint32_t b = references[j].patch_offset;
          if (a < b + sizeof(uint64_t) && b < a + sizeof(uint64_t))
             return false;
       }
    }
+
+   if (!tu_wddm_native_submit_valid(command_stream, command_stream_size, references, reference_count))
+      return false;
 
    BYTE *packet = static_cast<BYTE *>(context->command_buffer);
    memset(packet, 0, static_cast<size_t>(command_length));
@@ -650,7 +784,7 @@ tu_wddm_context_render(struct tu_wddm_context *context,
 
       context->patch_location_list[i] = {};
       context->patch_location_list[i].AllocationIndex = i;
-      context->patch_location_list[i].SlotId = i + 1;
+      context->patch_location_list[i].SlotId = 0;
       context->patch_location_list[i].AllocationOffset =
          static_cast<UINT>(reference->allocation_offset);
       context->patch_location_list[i].PatchOffset =
@@ -663,25 +797,19 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    render.CommandLength = static_cast<UINT>(command_length);
    render.AllocationCount = reference_count;
    render.PatchLocationCount = reference_count;
-   render.pNewCommandBuffer = context->command_buffer;
    render.NewCommandBufferSize = context->command_buffer_size;
-   render.pNewAllocationList = context->allocation_list;
    render.NewAllocationListSize = context->allocation_list_size;
-   render.pNewPatchLocationList = context->patch_location_list;
    render.NewPatchLocationListSize = context->patch_location_list_size;
 
    NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
-   if (!NT_SUCCESS(status) || render.pNewCommandBuffer == NULL ||
-       render.pNewAllocationList == NULL || render.pNewPatchLocationList == NULL ||
-       render.NewCommandBufferSize == 0 || render.NewAllocationListSize == 0 ||
-       render.NewPatchLocationListSize == 0)
-      return false;
-
    context->command_buffer = render.pNewCommandBuffer;
    context->command_buffer_size = render.NewCommandBufferSize;
    context->allocation_list = render.pNewAllocationList;
    context->allocation_list_size = render.NewAllocationListSize;
    context->patch_location_list = render.pNewPatchLocationList;
    context->patch_location_list_size = render.NewPatchLocationListSize;
-   return true;
+
+   return NT_SUCCESS(status) && context->command_buffer != NULL && context->allocation_list != NULL &&
+          context->patch_location_list != NULL && context->command_buffer_size != 0 &&
+          context->allocation_list_size != 0 && context->patch_location_list_size != 0;
 }
