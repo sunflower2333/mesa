@@ -669,7 +669,6 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    render.NewAllocationListSize = context->allocation_list_size;
    render.pNewPatchLocationList = context->patch_location_list;
    render.NewPatchLocationListSize = context->patch_location_list_size;
-   render.Flags.Value = 0;
 
    NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
    if (!NT_SUCCESS(status) || render.pNewCommandBuffer == NULL ||
