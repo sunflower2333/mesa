@@ -383,3 +383,306 @@ tu_wddm_context_close(struct tu_wddm_context *context)
    memset(context, 0, sizeof(*context));
    return true;
 }
+
+static bool
+tu_wddm_allocation_desc_valid(const struct tu_wddm_context *context,
+                              const struct tu_wddm_allocation_desc *desc)
+{
+   const uint32_t valid_flags = VIOGPU_WDDM_ALLOCATION_PRIMARY |
+                                VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE |
+                                VIOGPU_WDDM_ALLOCATION_NATIVE |
+                                VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY;
+   const bool native = desc != NULL && (desc->flags & VIOGPU_WDDM_ALLOCATION_NATIVE) != 0;
+   const bool has_surface = desc != NULL &&
+                            (desc->width != 0 || desc->height != 0 || desc->pitch != 0 ||
+                             desc->format != VIOGPU_WDDM_FORMAT_NONE);
+
+   if (context == NULL || context->device == NULL || context->device->adapter.runtime == NULL ||
+       context->device->handle == 0 || context->handle == 0 || desc == NULL || desc->size == 0 ||
+       desc->alignment != 4096 || (desc->flags & ~valid_flags) != 0 ||
+       desc->size > UINT64_MAX - 4095)
+      return false;
+
+   if (has_surface && (desc->width == 0 || desc->height == 0 || desc->pitch == 0 ||
+                       (desc->format != VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM &&
+                        desc->format != VIOGPU_WDDM_FORMAT_B8G8R8X8_UNORM) ||
+                       desc->width > UINT32_MAX / 4 || desc->pitch < desc->width * 4 ||
+                       static_cast<uint64_t>(desc->pitch) * desc->height > desc->size))
+      return false;
+
+   if (!has_surface && (desc->refresh_rate_numerator != 0 ||
+                        desc->refresh_rate_denominator != 0))
+      return false;
+
+   if ((desc->flags & VIOGPU_WDDM_ALLOCATION_PRIMARY) != 0 &&
+       (!has_surface || (desc->flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE) != 0 ||
+        desc->refresh_rate_numerator == 0 || desc->refresh_rate_denominator == 0))
+      return false;
+
+   if ((desc->flags & VIOGPU_WDDM_ALLOCATION_PRIMARY) == 0 &&
+       (desc->refresh_rate_numerator != 0 || desc->refresh_rate_denominator != 0))
+      return false;
+
+   if (native) {
+      const uint64_t aligned_size = (desc->size + UINT64_C(4095)) & ~UINT64_C(4095);
+      if (desc->requested_iova == 0 || (desc->requested_iova & 4095) != 0 ||
+          context->info.ResetGeneration == 0 || context->info.ContextId == 0 ||
+          aligned_size > UINT32_MAX ||
+          desc->requested_iova > UINT64_MAX - (aligned_size - 1))
+         return false;
+   } else if (desc->requested_iova != 0 || (desc->flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0) {
+      return false;
+   }
+
+   return true;
+}
+
+bool
+tu_wddm_allocation_create(struct tu_wddm_context *context,
+                          const struct tu_wddm_allocation_desc *desc,
+                          struct tu_wddm_allocation *allocation)
+{
+   if (allocation == NULL || !tu_wddm_allocation_desc_valid(context, desc))
+      return false;
+
+   memset(allocation, 0, sizeof(*allocation));
+
+   VIOGPU_WDDM_ALLOCATION_INFO private_data = {};
+   tu_wddm_init_header(&private_data.Header, tu_wddm_sizeof<VIOGPU_WDDM_ALLOCATION_INFO>());
+   private_data.Size = desc->size;
+   private_data.Alignment = desc->alignment;
+   private_data.Flags = desc->flags;
+   private_data.Format = desc->format;
+   private_data.Width = desc->width;
+   private_data.Height = desc->height;
+   private_data.Pitch = desc->pitch;
+   private_data.RefreshRateNumerator = desc->refresh_rate_numerator;
+   private_data.RefreshRateDenominator = desc->refresh_rate_denominator;
+   if ((desc->flags & VIOGPU_WDDM_ALLOCATION_NATIVE) != 0) {
+      private_data.RequestedIova = desc->requested_iova;
+      private_data.ExpectedResetGeneration = context->info.ResetGeneration;
+      private_data.ContextId = context->info.ContextId;
+   }
+
+   D3DDDI_ALLOCATIONINFO allocation_info = {};
+   allocation_info.pPrivateDriverData = &private_data;
+   allocation_info.PrivateDriverDataSize = tu_wddm_sizeof<VIOGPU_WDDM_ALLOCATION_INFO>();
+
+   D3DKMT_CREATEALLOCATION create = {};
+   create.hDevice = context->device->handle;
+   create.NumAllocations = 1;
+   create.pAllocationInfo = &allocation_info;
+   create.Flags.NonSecure = 1;
+
+   NTSTATUS status = context->device->adapter.runtime->dispatch.CreateAllocation(&create);
+   if (!NT_SUCCESS(status) || allocation_info.hAllocation == 0)
+      return false;
+
+   allocation->context = context;
+   allocation->handle = allocation_info.hAllocation;
+   allocation->private_info = private_data;
+   return true;
+}
+
+bool
+tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
+{
+   if (allocation == NULL || allocation->context == NULL || allocation->handle == 0 ||
+       allocation->locked || allocation->context->device == NULL ||
+       allocation->context->device->adapter.runtime == NULL ||
+       allocation->context->device->handle == 0)
+      return false;
+
+   D3DKMT_HANDLE handle = allocation->handle;
+   D3DKMT_DESTROYALLOCATION destroy = {};
+   destroy.hDevice = allocation->context->device->handle;
+   destroy.phAllocationList = &handle;
+   destroy.AllocationCount = 1;
+
+   NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
+   if (!NT_SUCCESS(status))
+      return false;
+
+   memset(allocation, 0, sizeof(*allocation));
+   return true;
+}
+
+bool
+tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation,
+                        bool read_only,
+                        void **map)
+{
+   if (map != NULL)
+      *map = NULL;
+   if (allocation == NULL || allocation->context == NULL || allocation->handle == 0 ||
+       allocation->locked || allocation->context->device == NULL ||
+       allocation->context->device->adapter.runtime == NULL || map == NULL ||
+       (allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE) == 0)
+      return false;
+
+   D3DKMT_LOCK lock = {};
+   lock.hDevice = allocation->context->device->handle;
+   lock.hAllocation = allocation->handle;
+   lock.Flags.ReadOnly = read_only ? 1 : 0;
+
+   NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.Lock(&lock);
+   if (!NT_SUCCESS(status) || lock.pData == NULL)
+      return false;
+
+   allocation->map = lock.pData;
+   allocation->locked = true;
+   *map = lock.pData;
+   return true;
+}
+
+bool
+tu_wddm_allocation_unlock(struct tu_wddm_allocation *allocation)
+{
+   if (allocation == NULL || allocation->context == NULL || allocation->handle == 0 ||
+       !allocation->locked || allocation->context->device == NULL ||
+       allocation->context->device->adapter.runtime == NULL)
+      return false;
+
+   D3DKMT_HANDLE handle = allocation->handle;
+   D3DKMT_UNLOCK unlock = {};
+   unlock.hDevice = allocation->context->device->handle;
+   unlock.NumAllocations = 1;
+   unlock.phAllocations = &handle;
+
+   NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.Unlock(&unlock);
+   if (!NT_SUCCESS(status))
+      return false;
+
+   allocation->map = NULL;
+   allocation->locked = false;
+   return true;
+}
+
+static bool
+tu_wddm_render_reference_valid(const struct tu_wddm_context *context,
+                               const struct tu_wddm_render_reference *reference,
+                               uint32_t command_stream_size)
+{
+   if (context == NULL || reference == NULL || reference->allocation == NULL ||
+       reference->allocation->context != context || reference->allocation->handle == 0 ||
+       reference->flags == 0 ||
+       (reference->flags & ~(VIOGPU_WDDM_REFERENCE_READ | VIOGPU_WDDM_REFERENCE_WRITE)) != 0 ||
+       reference->length == 0 || reference->allocation_offset > UINT32_MAX ||
+       reference->length > reference->allocation->private_info.Size -
+                               (reference->allocation_offset <= reference->allocation->private_info.Size
+                                   ? reference->allocation_offset
+                                   : reference->allocation->private_info.Size) ||
+       reference->patch_offset > command_stream_size - sizeof(uint64_t) ||
+       (reference->patch_offset & (sizeof(uint64_t) - 1)) != 0 ||
+       (reference->allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0 &&
+          (reference->flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0)
+      return false;
+
+   return true;
+}
+
+bool
+tu_wddm_context_render(struct tu_wddm_context *context,
+                       const void *command_stream,
+                       uint32_t command_stream_size,
+                       const struct tu_wddm_render_reference *references,
+                       uint32_t reference_count)
+{
+   if (context == NULL || context->device == NULL || context->handle == 0 ||
+       context->device->adapter.runtime == NULL || context->command_buffer == NULL ||
+       context->allocation_list == NULL || context->patch_location_list == NULL ||
+       command_stream == NULL || command_stream_size < sizeof(uint64_t) ||
+       command_stream_size > TU_WDDM_MAX_RENDER_COMMAND_SIZE || references == NULL ||
+       reference_count == 0 || reference_count > TU_WDDM_MAX_RENDER_ALLOCATIONS ||
+       context->info.ResetGeneration == 0 || context->info.ContextId == 0)
+      return false;
+
+   const uint64_t references_size = static_cast<uint64_t>(reference_count) *
+                                    sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE);
+   const uint64_t command_offset = sizeof(VIOGPU_WDDM_RENDER_COMMAND) + references_size;
+   const uint64_t command_length = command_offset + command_stream_size;
+   if (command_length > TU_WDDM_MAX_RENDER_COMMAND_SIZE ||
+       command_length > context->command_buffer_size ||
+       reference_count > context->allocation_list_size ||
+       reference_count > context->patch_location_list_size)
+      return false;
+
+   for (uint32_t i = 0; i < reference_count; i++) {
+      if (!tu_wddm_render_reference_valid(context, &references[i], command_stream_size))
+         return false;
+      for (uint32_t j = 0; j < i; j++) {
+         const uint32_t a = references[i].patch_offset;
+         const uint32_t b = references[j].patch_offset;
+         if (a < b + sizeof(uint64_t) && b < a + sizeof(uint64_t))
+            return false;
+      }
+   }
+
+   BYTE *packet = static_cast<BYTE *>(context->command_buffer);
+   memset(packet, 0, static_cast<size_t>(command_length));
+
+   VIOGPU_WDDM_RENDER_COMMAND *header = reinterpret_cast<VIOGPU_WDDM_RENDER_COMMAND *>(packet);
+   tu_wddm_init_header(&header->Header, static_cast<uint32_t>(command_length));
+   header->Opcode = VIOGPU_WDDM_RENDER_NATIVE_SUBMIT;
+   header->Flags = VIOGPU_WDDM_RENDER_FLAGS_NONE;
+   header->ExpectedResetGeneration = context->info.ResetGeneration;
+   header->AllocationReferencesOffset = sizeof(*header);
+   header->AllocationReferenceCount = reference_count;
+   header->CommandStreamOffset = static_cast<uint32_t>(command_offset);
+   header->CommandStreamSize = command_stream_size;
+
+   VIOGPU_WDDM_ALLOCATION_REFERENCE *wire_references =
+      reinterpret_cast<VIOGPU_WDDM_ALLOCATION_REFERENCE *>(packet + sizeof(*header));
+   memcpy(packet + command_offset, command_stream, command_stream_size);
+
+   for (uint32_t i = 0; i < reference_count; i++) {
+      const struct tu_wddm_render_reference *reference = &references[i];
+      wire_references[i].AllocationIndex = i;
+      wire_references[i].Flags = reference->flags;
+      wire_references[i].AllocationOffset = reference->allocation_offset;
+      wire_references[i].Length = reference->length;
+      wire_references[i].PatchOffset = reference->patch_offset;
+
+      context->allocation_list[i] = {};
+      context->allocation_list[i].hAllocation = reference->allocation->handle;
+      context->allocation_list[i].WriteOperation =
+         (reference->flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0;
+
+      context->patch_location_list[i] = {};
+      context->patch_location_list[i].AllocationIndex = i;
+      context->patch_location_list[i].SlotId = i + 1;
+      context->patch_location_list[i].AllocationOffset =
+         static_cast<UINT>(reference->allocation_offset);
+      context->patch_location_list[i].PatchOffset =
+         static_cast<UINT>(command_offset + reference->patch_offset);
+   }
+
+   D3DKMT_RENDER render = {};
+   render.hContext = context->handle;
+   render.CommandOffset = 0;
+   render.CommandLength = static_cast<UINT>(command_length);
+   render.AllocationCount = reference_count;
+   render.PatchLocationCount = reference_count;
+   render.pNewCommandBuffer = context->command_buffer;
+   render.NewCommandBufferSize = context->command_buffer_size;
+   render.pNewAllocationList = context->allocation_list;
+   render.NewAllocationListSize = context->allocation_list_size;
+   render.pNewPatchLocationList = context->patch_location_list;
+   render.NewPatchLocationListSize = context->patch_location_list_size;
+   render.Flags.Value = 0;
+
+   NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
+   if (!NT_SUCCESS(status) || render.pNewCommandBuffer == NULL ||
+       render.pNewAllocationList == NULL || render.pNewPatchLocationList == NULL ||
+       render.NewCommandBufferSize == 0 || render.NewAllocationListSize == 0 ||
+       render.NewPatchLocationListSize == 0)
+      return false;
+
+   context->command_buffer = render.pNewCommandBuffer;
+   context->command_buffer_size = render.NewCommandBufferSize;
+   context->allocation_list = render.pNewAllocationList;
+   context->allocation_list_size = render.NewAllocationListSize;
+   context->patch_location_list = render.pNewPatchLocationList;
+   context->patch_location_list_size = render.NewPatchLocationListSize;
+   return true;
+}

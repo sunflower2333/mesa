@@ -68,6 +68,43 @@ struct tu_wddm_context {
    VIOGPU_WDDM_CONTEXT_INFO info;
 };
 
+/* These limits mirror the compile-only KMD contract.  They are deliberately
+ * smaller than the WDDM wire fields so arithmetic stays bounded before a
+ * D3DKMT call is made. */
+enum {
+   TU_WDDM_MAX_RENDER_ALLOCATIONS = 64,
+   TU_WDDM_MAX_RENDER_COMMAND_SIZE = 64 * 1024,
+};
+
+struct tu_wddm_allocation_desc {
+   uint64_t size;
+   uint64_t alignment;
+   uint64_t requested_iova;
+   uint32_t flags;
+   uint32_t format;
+   uint32_t width;
+   uint32_t height;
+   uint32_t pitch;
+   uint32_t refresh_rate_numerator;
+   uint32_t refresh_rate_denominator;
+};
+
+struct tu_wddm_allocation {
+   struct tu_wddm_context *context;
+   D3DKMT_HANDLE handle;
+   VIOGPU_WDDM_ALLOCATION_INFO private_info;
+   void *map;
+   bool locked;
+};
+
+struct tu_wddm_render_reference {
+   struct tu_wddm_allocation *allocation;
+   uint32_t flags;
+   uint64_t allocation_offset;
+   uint64_t length;
+   uint32_t patch_offset;
+};
+
 typedef bool (*tu_wddm_adapter_callback)(const struct tu_wddm_adapter_info *info,
                                          void *data);
 
@@ -97,6 +134,24 @@ bool tu_wddm_context_open(struct tu_wddm_device *device,
                           struct tu_wddm_context *context);
 bool tu_wddm_context_get_info(struct tu_wddm_context *context);
 bool tu_wddm_context_close(struct tu_wddm_context *context);
+
+bool tu_wddm_allocation_create(struct tu_wddm_context *context,
+                               const struct tu_wddm_allocation_desc *desc,
+                               struct tu_wddm_allocation *allocation);
+bool tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation);
+bool tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation,
+                             bool read_only,
+                             void **map);
+bool tu_wddm_allocation_unlock(struct tu_wddm_allocation *allocation);
+
+/* Build one bounded Native Context packet in the KMD-provided DMA buffers.
+ * This only prepares the WDDM Render call; fence submission/retirement stays
+ * with VidSch and the KMD. */
+bool tu_wddm_context_render(struct tu_wddm_context *context,
+                            const void *command_stream,
+                            uint32_t command_stream_size,
+                            const struct tu_wddm_render_reference *references,
+                            uint32_t reference_count);
 
 #ifdef __cplusplus
 }
