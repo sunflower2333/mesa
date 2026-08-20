@@ -190,7 +190,7 @@ jobs:
             -Dplatforms=windows `
             -Dvulkan-drivers=freedreno `
             -Dfreedreno-kmds=wddm `
-            -Dgallium-drivers=[] `
+            '-Dgallium-drivers=[]' `
             -Dopengl=false `
             -Dgles1=disabled `
             -Dgles2=disabled `
@@ -201,7 +201,7 @@ jobs:
             -Dshader-cache=disabled `
             -Dzlib=disabled `
             -Dzstd=disabled `
-            -Dtools=[] `
+            '-Dtools=[]' `
             -Dbuild-tests=false `
             -Dwerror=false `
             "-Dprefix=$installDir"
