@@ -325,6 +325,18 @@ with_any_llvmpipe = with_gallium_llvmpipe or with_swrast_vk
 with_gallium_or_lvp = with_gallium or with_swrast_vk
 
 freedreno_kmds = get_option('freedreno-kmds')
+if freedreno_kmds.contains('wddm')
+  if host_machine.system() != 'windows'
+    error('The Freedreno WDDM KMD is only supported on Windows')
+  elif freedreno_kmds.length() != 1
+    error('The Freedreno WDDM KMD cannot be combined with another KMD')
+  elif not with_freedreno_vk
+    error('The Freedreno WDDM KMD is only supported by Turnip')
+  elif with_gallium_freedreno
+    error('The Freedreno WDDM KMD is not supported by Freedreno Gallium')
+  endif
+endif
+
 if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedreno_vk
   if freedreno_kmds.contains('msm')
       warning('Turnip with the DRM KMD will require libdrm to always be present at runtime which may not always be the case on platforms such as Android.')

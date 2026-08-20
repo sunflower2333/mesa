@@ -342,11 +342,13 @@ queue_submit_sparse(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    struct tu_queue *queue = list_entry(_queue, struct tu_queue, vk);
    struct tu_device *device = queue->device;
 
-   pthread_mutex_lock(&device->submit_mutex);
+   mtx_lock(&device->submit_mutex);
 
    void *submit = tu_submit_create(device);
-   if (!submit)
+   if (!submit) {
+      mtx_unlock(&device->submit_mutex);
       return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
 
    for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++) {
       const VkSparseBufferMemoryBindInfo *bind = &vk_submit->buffer_binds[i];
@@ -395,14 +397,14 @@ queue_submit_sparse(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
                       NULL);
 
    if (result != VK_SUCCESS) {
-      pthread_mutex_unlock(&device->submit_mutex);
+      mtx_unlock(&device->submit_mutex);
       goto out;
    }
 
    device->submit_count++;
 
-   pthread_mutex_unlock(&device->submit_mutex);
-   pthread_cond_broadcast(&queue->device->timeline_cond);
+   mtx_unlock(&device->submit_mutex);
+   u_cnd_monotonic_broadcast(&queue->device->timeline_cond);
 
 out:
    tu_submit_finish(device, submit);
@@ -433,7 +435,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    if (TU_DEBUG(LOG_SKIP_GMEM_OPS))
       tu_dbg_log_gmem_load_store_skips(device);
 
-   pthread_mutex_lock(&device->submit_mutex);
+   mtx_lock(&device->submit_mutex);
 
    struct tu_cmd_buffer **cmd_buffers =
       (struct tu_cmd_buffer **) vk_submit->command_buffers;
@@ -441,8 +443,10 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 
    VkResult result =
       tu_insert_dynamic_cmdbufs(device, &cmd_buffers, &cmdbuf_count);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      mtx_unlock(&device->submit_mutex);
       return result;
+   }
 
    bool has_trace_points = false;
    static_assert(offsetof(struct tu_cmd_buffer, vk) == 0,
@@ -455,19 +459,26 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
 
    void *submit = tu_submit_create(device);
-   if (!submit)
+   if (!submit) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      mtx_unlock(&device->submit_mutex);
       goto fail_create_submit;
+   }
 
    result = resolve_vis_stream_patchpoints(queue, submit, &dump_cmds,
                                            cmd_buffers, cmdbuf_count);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      mtx_unlock(&device->submit_mutex);
       goto out;
+   }
 
    result = resolve_cb_control_patchpoints(queue, submit, &dump_cmds,
                                            cmd_buffers, cmdbuf_count);
 
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      mtx_unlock(&device->submit_mutex);
       goto out;
+   }
 
    if (has_trace_points) {
       tu_u_trace_submission_data_create(
@@ -488,11 +499,25 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       submit_add_entries(device, submit, &dump_cmds, cs->entries,
                          cs->entry_count);
 
+      /* Command streams retain references to descriptor, image, and scratch
+       * BOs in these arrays.  Some backends already maintain a kernel-global
+       * BO table; WDDM needs the explicit access set for its allocation list. */
+      tu_submit_add_bos(device, submit, cs->read_only.bos,
+                        cs->read_only.bo_count, TU_SUBMIT_BO_ACCESS_READ);
+      tu_submit_add_bos(device, submit, cs->read_write.bos,
+                        cs->read_write.bo_count,
+                        TU_SUBMIT_BO_ACCESS_READ | TU_SUBMIT_BO_ACCESS_WRITE);
+
       if (u_trace_submission_data &&
           u_trace_submission_data->timestamp_copy_data) {
          struct tu_cs *cs = &u_trace_submission_data->timestamp_copy_data->cs;
          submit_add_entries(device, submit, &dump_cmds, cs->entries,
                             cs->entry_count);
+         tu_submit_add_bos(device, submit, cs->read_only.bos,
+                           cs->read_only.bo_count, TU_SUBMIT_BO_ACCESS_READ);
+         tu_submit_add_bos(device, submit, cs->read_write.bos,
+                           cs->read_write.bo_count,
+                           TU_SUBMIT_BO_ACCESS_READ | TU_SUBMIT_BO_ACCESS_WRITE);
       }
    }
 
@@ -500,6 +525,11 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    if (autotune_cs) {
       submit_add_entries(device, submit, &dump_cmds, autotune_cs->entries,
                          autotune_cs->entry_count);
+      tu_submit_add_bos(device, submit, autotune_cs->read_only.bos,
+                        autotune_cs->read_only.bo_count, TU_SUBMIT_BO_ACCESS_READ);
+      tu_submit_add_bos(device, submit, autotune_cs->read_write.bos,
+                        autotune_cs->read_write.bo_count,
+                        TU_SUBMIT_BO_ACCESS_READ | TU_SUBMIT_BO_ACCESS_WRITE);
    }
 
    if (cmdbuf_count && FD_RD_DUMP(ENABLE) &&
@@ -559,7 +589,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
                       u_trace_submission_data);
 
    if (result != VK_SUCCESS) {
-      pthread_mutex_unlock(&device->submit_mutex);
+      mtx_unlock(&device->submit_mutex);
       goto out;
    }
 
@@ -588,8 +618,8 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 
    device->submit_count++;
 
-   pthread_mutex_unlock(&device->submit_mutex);
-   pthread_cond_broadcast(&queue->device->timeline_cond);
+   mtx_unlock(&device->submit_mutex);
+   u_cnd_monotonic_broadcast(&queue->device->timeline_cond);
 
    u_trace_context_process(&device->trace_context, false);
 
@@ -664,4 +694,3 @@ tu_queue_finish(struct tu_queue *queue)
    if (!emulated)
       tu_drm_submitqueue_close(queue->device, queue);
 }
-

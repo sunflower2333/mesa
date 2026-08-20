@@ -817,27 +817,27 @@ kgsl_syncobj_wait(struct tu_device *device,
       if (abs_timeout_ns == 0)
          return VK_TIMEOUT; // If this is a simple poll then we can return early
 
-      pthread_mutex_lock(&device->submit_mutex);
+      mtx_lock(&device->submit_mutex);
       struct timespec abstime;
       timespec_from_nsec(&abstime, abs_timeout_ns);
 
       while (s->state == KGSL_SYNCOBJ_STATE_UNSIGNALED) {
          int ret;
          if (abs_timeout_ns == UINT64_MAX) {
-            ret = pthread_cond_wait(&device->timeline_cond,
-                                    &device->submit_mutex);
+            ret = u_cnd_monotonic_wait(&device->timeline_cond,
+                                       &device->submit_mutex);
          } else {
-            ret = pthread_cond_timedwait(&device->timeline_cond,
-                                         &device->submit_mutex, &abstime);
+            ret = u_cnd_monotonic_timedwait(&device->timeline_cond,
+                                            &device->submit_mutex, &abstime);
          }
-         if (ret != 0) {
-            assert(ret == ETIMEDOUT);
-            pthread_mutex_unlock(&device->submit_mutex);
+         if (ret != thrd_success) {
+            assert(ret == thrd_timedout);
+            mtx_unlock(&device->submit_mutex);
             return VK_TIMEOUT;
          }
       }
 
-      pthread_mutex_unlock(&device->submit_mutex);
+      mtx_unlock(&device->submit_mutex);
    }
 
    switch (s->state) {

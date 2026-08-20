@@ -17,6 +17,9 @@ on:
       - "src/freedreno/vulkan/tests/tu_wddm_abi_expected.txt"
       - "src/freedreno/vulkan/tests/tu_wddm_render_test.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_transport_compile.cpp"
+      - "src/freedreno/vulkan/**"
+      - "meson.build"
+      - "meson.options"
       - ".github/workflows/windows-turnip-wddm-compile.yml"
 
 permissions:
@@ -92,7 +95,135 @@ jobs:
       - name: Assert compile-only artifact policy
         shell: pwsh
         run: |
-          if (Test-Path -PathType Leaf -Path "*.sys") {
+          if (Get-ChildItem -Path . -Recurse -File -Include *.sys,*.inf,*.cat -ErrorAction SilentlyContinue) {
             throw "compile-only job produced a driver artifact"
           }
           Write-Host "No driver, INF, package, or installation step is part of this gate."
+
+  full-target:
+    name: ${{ matrix.arch }} full Turnip WDDM link
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            msvc_arch: x64
+            machine: "8664"
+          - arch: arm64
+            msvc_arch: x64_arm64
+            machine: "AA64"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC and WDK
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Set up Python build tools
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson generators
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade `
+            "meson>=1.4.0" mako packaging pyyaml
+
+      - name: Locate shader compiler
+        shell: pwsh
+        run: |
+          $candidate = Get-Command glslangValidator.exe -ErrorAction SilentlyContinue
+          if ($null -eq $candidate) {
+            $roots = @("C:\VulkanSDK", "$env:ProgramFiles\VulkanSDK")
+            foreach ($root in $roots) {
+              if (Test-Path $root) {
+                $candidate = Get-ChildItem -Path $root -Filter glslangValidator.exe -Recurse -File -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+                if ($null -ne $candidate) { break }
+              }
+            }
+          }
+          if ($null -eq $candidate) {
+            $version = "1.4.304.0"
+            $installer = Join-Path $env:RUNNER_TEMP "vulkan-sdk.exe"
+            $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+            Invoke-WebRequest -Uri $url -OutFile $installer
+            $process = Start-Process -FilePath $installer -ArgumentList "--am --al -c in" -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "Vulkan SDK installer failed with exit code $($process.ExitCode)"
+            }
+            $candidate = Get-ChildItem -Path "C:\VulkanSDK\$version\Bin" -Filter glslangValidator.exe -File -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+          }
+          if ($null -eq $candidate) {
+            throw "glslangValidator.exe is required to generate the Turnip shader headers"
+          }
+          $shaderBin = Split-Path -Parent $candidate.Source
+          if ([string]::IsNullOrEmpty($shaderBin)) {
+            $shaderBin = Split-Path -Parent $candidate.FullName
+          }
+          Write-Host "glslangValidator -> $($candidate.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $shaderBin
+
+      - name: Configure full Turnip target
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-${{ matrix.arch }}"
+          $installDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-install-${{ matrix.arch }}"
+          if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+          if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
+          meson setup $buildDir . `
+            --backend=ninja `
+            --buildtype=release `
+            -Dplatforms=windows `
+            -Dvulkan-drivers=freedreno `
+            -Dfreedreno-kmds=wddm `
+            -Dgallium-drivers=[] `
+            -Dopengl=false `
+            -Dgles1=disabled `
+            -Dgles2=disabled `
+            -Degl=disabled `
+            -Dglx=disabled `
+            -Dgbm=disabled `
+            -Dllvm=disabled `
+            -Dshader-cache=disabled `
+            -Dzlib=disabled `
+            -Dzstd=disabled `
+            -Dtools=[] `
+            -Dbuild-tests=false `
+            -Dwerror=false `
+            "-Dprefix=$installDir"
+
+      - name: Compile and link full Turnip target
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-${{ matrix.arch }}"
+          meson compile -C $buildDir vulkan_freedreno
+          $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "vulkan_freedreno.dll" |
+            Select-Object -First 1
+          if ($null -eq $library) {
+            throw "full Turnip target did not produce vulkan_freedreno.dll"
+          }
+          Write-Host "Linked target: $($library.FullName)"
+          $headers = & dumpbin /headers $library.FullName 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for linked target" }
+          $headers | Select-String "machine" | Select-Object -First 1
+          $expectedMachine = "${{ matrix.machine }} machine"
+          if (-not ($headers -match $expectedMachine)) {
+            throw "linked target machine type does not match ${{ matrix.arch }}"
+          }
+
+      - name: Assert full-target compile-only policy
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-${{ matrix.arch }}"
+          $forbidden = Get-ChildItem -Path $buildDir -Recurse -File -Include *.sys,*.inf,*.cat,*.msix,*.appx -ErrorAction SilentlyContinue
+          if ($null -ne $forbidden -and $forbidden.Count -ne 0) {
+            throw "full-target gate produced a driver/package artifact"
+          }
+          Write-Host "Full Turnip link completed without install, packaging, signing, or loading."

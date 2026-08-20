@@ -16,6 +16,7 @@ constexpr uint32_t kContextId = 11;
 constexpr uint32_t kSubmitQueueId = 17;
 constexpr uint64_t kVaStart = UINT64_C(0x100000000);
 constexpr uint64_t kVaSize = UINT64_C(0x01000000);
+constexpr D3DKMT_HANDLE kAdapterHandle = 1;
 constexpr D3DKMT_HANDLE kDeviceHandle = 2;
 constexpr D3DKMT_HANDLE kContextHandle = 3;
 constexpr D3DKMT_HANDLE kAllocationHandle = 4;
@@ -108,15 +109,26 @@ struct test_fixture {
    BYTE allocation_map[4096];
    VIOGPU_WDDM_ALLOCATION_INFO created_private_info;
    NTSTATUS render_status;
+   NTSTATUS escape_status;
+   NTSTATUS create_allocation_status;
    D3DKMT_HANDLE next_allocation_handle;
    uint32_t expected_allocation_count;
    uint32_t next_command_buffer_size;
    uint32_t next_allocation_list_size;
    uint32_t next_patch_list_size;
    unsigned create_calls;
+   unsigned destroy_allocation_calls;
    unsigned lock_calls;
    unsigned unlock_calls;
    unsigned render_calls;
+   unsigned escape_calls;
+   uint32_t completed_fence;
+   uint32_t returned_context_id;
+   bool lock_returns_null_data;
+   bool render_returns_null_replacements;
+   bool render_returns_partial_replacements;
+   bool render_returns_oversized_replacements;
+   bool render_leaves_replacements_untouched;
 };
 
 test_fixture *current_fixture;
@@ -156,6 +168,24 @@ fake_create_allocation(D3DKMT_CREATEALLOCATION *create)
 
    memcpy(&fixture->created_private_info, allocation_info->pPrivateDriverData, sizeof(fixture->created_private_info));
    allocation_info->hAllocation = fixture->next_allocation_handle++;
+   return fixture->create_allocation_status;
+}
+
+NTSTATUS APIENTRY
+fake_destroy_allocation(const D3DKMT_DESTROYALLOCATION *destroy)
+{
+   test_fixture *fixture = current_fixture;
+   CHECK(fixture != NULL);
+   CHECK(destroy != NULL);
+   if (fixture == NULL || destroy == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->destroy_allocation_calls++;
+   CHECK(destroy->hDevice == kDeviceHandle);
+   CHECK(destroy->AllocationCount == 1);
+   CHECK(destroy->phAllocationList != NULL);
+   if (destroy->AllocationCount == 1 && destroy->phAllocationList != NULL)
+      CHECK(destroy->phAllocationList[0] == kAllocationHandle);
    return kStatusSuccess;
 }
 
@@ -176,7 +206,8 @@ fake_lock(D3DKMT_LOCK *lock)
    CHECK(lock->Flags.ReadOnly == 1);
    CHECK(lock->Flags.LockEntire == 1);
    CHECK((lock->Flags.Value & ~(UINT32_C(1) | UINT32_C(0x10))) == 0);
-   lock->pData = fixture->allocation_map;
+   if (!fixture->lock_returns_null_data)
+      lock->pData = fixture->allocation_map;
    return kStatusSuccess;
 }
 
@@ -206,9 +237,9 @@ check_render_packet(const D3DKMT_RENDER *render)
    CHECK(render->CommandOffset == 0);
    CHECK(render->AllocationCount == 1);
    CHECK(render->PatchLocationCount == 1);
-   CHECK(render->pNewCommandBuffer == NULL);
-   CHECK(render->pNewAllocationList == NULL);
-   CHECK(render->pNewPatchLocationList == NULL);
+   CHECK(render->pNewCommandBuffer == fixture->context.command_buffer);
+   CHECK(render->pNewAllocationList == fixture->context.allocation_list);
+   CHECK(render->pNewPatchLocationList == fixture->context.patch_location_list);
    CHECK(render->NewCommandBufferSize == sizeof(fixture->command_buffer));
    CHECK(render->NewAllocationListSize == TU_WDDM_MAX_RENDER_ALLOCATIONS);
    CHECK(render->NewPatchLocationListSize == TU_WDDM_MAX_RENDER_ALLOCATIONS);
@@ -324,13 +355,80 @@ fake_render(D3DKMT_RENDER *render)
       check_two_bo_render_packet(render);
    else
       CHECK(false);
-   render->pNewCommandBuffer = fixture->next_command_buffer;
-   render->NewCommandBufferSize = fixture->next_command_buffer_size;
-   render->pNewAllocationList = fixture->next_allocation_list;
-   render->NewAllocationListSize = fixture->next_allocation_list_size;
-   render->pNewPatchLocationList = fixture->next_patch_list;
-   render->NewPatchLocationListSize = fixture->next_patch_list_size;
+   if (!fixture->render_leaves_replacements_untouched) {
+      render->pNewCommandBuffer = fixture->next_command_buffer;
+      render->NewCommandBufferSize = fixture->next_command_buffer_size;
+      render->pNewAllocationList = fixture->next_allocation_list;
+      render->NewAllocationListSize = fixture->next_allocation_list_size;
+      render->pNewPatchLocationList = fixture->next_patch_list;
+      render->NewPatchLocationListSize = fixture->next_patch_list_size;
+      if (fixture->render_returns_null_replacements) {
+         render->pNewCommandBuffer = NULL;
+         render->NewCommandBufferSize = 0;
+         render->pNewAllocationList = NULL;
+         render->NewAllocationListSize = 0;
+         render->pNewPatchLocationList = NULL;
+         render->NewPatchLocationListSize = 0;
+      }
+      if (fixture->render_returns_partial_replacements) {
+         render->pNewAllocationList = NULL;
+         render->NewAllocationListSize = fixture->next_allocation_list_size;
+      }
+      if (fixture->render_returns_oversized_replacements) {
+         render->NewCommandBufferSize = TU_WDDM_MAX_RENDER_COMMAND_SIZE + 1;
+      }
+   }
    return fixture->render_status;
+}
+
+NTSTATUS APIENTRY
+fake_escape(const D3DKMT_ESCAPE *escape)
+{
+   test_fixture *fixture = current_fixture;
+   CHECK(fixture != NULL);
+   CHECK(escape != NULL);
+   if (fixture == NULL || escape == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->escape_calls++;
+   CHECK(escape->hAdapter == kAdapterHandle);
+   CHECK(escape->hDevice == kDeviceHandle);
+   CHECK(escape->hContext == kContextHandle);
+   CHECK(escape->Type == D3DKMT_ESCAPE_DRIVERPRIVATE);
+   CHECK(escape->Flags.Value == 0);
+   CHECK(escape->pPrivateDriverData != NULL);
+   CHECK(escape->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_FENCE_INFO));
+   if (escape->pPrivateDriverData == NULL ||
+       escape->PrivateDriverDataSize != sizeof(VIOGPU_WDDM_FENCE_INFO))
+      return kStatusInvalidParameter;
+
+   VIOGPU_WDDM_FENCE_INFO *info =
+      static_cast<VIOGPU_WDDM_FENCE_INFO *>(escape->pPrivateDriverData);
+   CHECK(info->Header.Magic == VIOGPU_WDDM_ABI_MAGIC);
+   CHECK(info->Header.Version == VIOGPU_WDDM_ABI_VERSION);
+   CHECK(info->Header.Size == sizeof(*info));
+   CHECK(info->Header.Reserved == 0);
+   CHECK(info->Opcode == VIOGPU_WDDM_ESCAPE_GET_COMPLETED_FENCE);
+   CHECK(info->Flags == VIOGPU_WDDM_ESCAPE_FLAGS_NONE);
+   CHECK(info->ExpectedResetGeneration == kResetGeneration);
+   CHECK(info->CompletedFence == 0);
+   CHECK(info->ResetGeneration == 0);
+   CHECK(info->ContextId == 0);
+   CHECK(info->Reserved == 0);
+
+   if (fixture->escape_status != kStatusSuccess)
+      return fixture->escape_status;
+
+   VIOGPU_WDDM_FENCE_INFO response = {};
+   init_header(&response.Header, sizeof(response));
+   response.Opcode = VIOGPU_WDDM_ESCAPE_GET_COMPLETED_FENCE;
+   response.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+   response.ExpectedResetGeneration = kResetGeneration;
+   response.CompletedFence = fixture->completed_fence;
+   response.ResetGeneration = kResetGeneration;
+   response.ContextId = fixture->returned_context_id;
+   *info = response;
+   return kStatusSuccess;
 }
 
 void
@@ -339,17 +437,23 @@ init_fixture(test_fixture *fixture)
    memset(fixture, 0, sizeof(*fixture));
    current_fixture = fixture;
    fixture->runtime.dispatch.CreateAllocation = fake_create_allocation;
+   fixture->runtime.dispatch.DestroyAllocation = fake_destroy_allocation;
    fixture->runtime.dispatch.Lock = fake_lock;
    fixture->runtime.dispatch.Unlock = fake_unlock;
    fixture->runtime.dispatch.Render = fake_render;
+   fixture->runtime.dispatch.Escape = fake_escape;
    fixture->render_status = kStatusSuccess;
+   fixture->escape_status = kStatusSuccess;
+   fixture->create_allocation_status = kStatusSuccess;
    fixture->next_allocation_handle = kAllocationHandle;
    fixture->expected_allocation_count = 1;
    fixture->next_command_buffer_size = sizeof(fixture->next_command_buffer);
    fixture->next_allocation_list_size = TU_WDDM_MAX_RENDER_ALLOCATIONS;
    fixture->next_patch_list_size = TU_WDDM_MAX_RENDER_ALLOCATIONS;
+   fixture->returned_context_id = kContextId;
 
    fixture->device.adapter.runtime = &fixture->runtime;
+   fixture->device.adapter.handle = kAdapterHandle;
    fixture->device.adapter.private_info.ResetGeneration = kResetGeneration;
    fixture->device.handle = kDeviceHandle;
    fixture->context.device = &fixture->device;
@@ -472,6 +576,42 @@ test_allocation_range_rejected()
 }
 
 void
+test_failed_allocation_creation_compensates()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.create_allocation_status = kStatusInvalidParameter;
+
+   tu_wddm_allocation allocation = {};
+   tu_wddm_allocation_desc desc = native_allocation_desc();
+   CHECK(!tu_wddm_allocation_create(&fixture.context, &desc, &allocation));
+   CHECK(fixture.create_calls == 1);
+   CHECK(fixture.destroy_allocation_calls == 1);
+   CHECK(allocation.handle == 0);
+   CHECK(allocation.context == NULL);
+}
+
+void
+test_null_lock_data_is_rolled_back()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.lock_returns_null_data = true;
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   void *map = reinterpret_cast<void *>(UINTPTR_MAX);
+   CHECK(!tu_wddm_allocation_lock(&allocation, true, &map));
+   CHECK(map == NULL);
+   CHECK(!allocation.locked);
+   CHECK(allocation.map == NULL);
+   CHECK(fixture.lock_calls == 1);
+   CHECK(fixture.unlock_calls == 1);
+}
+
+void
 test_valid_render()
 {
    test_fixture fixture;
@@ -490,6 +630,66 @@ test_valid_render()
    CHECK(fixture.context.allocation_list_size == fixture.next_allocation_list_size);
    CHECK(fixture.context.patch_location_list == fixture.next_patch_list);
    CHECK(fixture.context.patch_location_list_size == fixture.next_patch_list_size);
+   CHECK(fixture.context.last_submitted_fence == submit.request.fence);
+}
+
+void
+test_submission_retirement_snapshot()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   CHECK(fixture.context.last_submitted_fence == 0);
+   CHECK(tu_wddm_context_wait_submissions(&fixture.context, 0));
+   CHECK(fixture.escape_calls == 0);
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   submit.request.sequence = 9;
+   submit.request.fence = 9;
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                &reference, 1));
+   CHECK(fixture.context.last_submitted_fence == 9);
+
+   submit.request.sequence = 8;
+   submit.request.fence = 8;
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                &reference, 1));
+   CHECK(fixture.context.last_submitted_fence == 9);
+
+   fixture.completed_fence = 8;
+   CHECK(!tu_wddm_context_wait_submissions(&fixture.context, 0));
+   fixture.completed_fence = 9;
+   CHECK(tu_wddm_context_wait_submissions(&fixture.context, 0));
+}
+
+void
+test_context_render_fence_wrap()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   test_msm_submit_one_bo submit = valid_submit();
+   submit.request.sequence = UINT32_MAX;
+   submit.request.fence = UINT32_MAX;
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                &reference, 1));
+   CHECK(fixture.context.last_submitted_fence == UINT32_MAX);
+
+   /* Fence 1 is the next serial value after UINT32_MAX.  This must remain
+    * ordered without treating the wrap as a device reset. */
+   submit.request.sequence = 1;
+   submit.request.fence = 1;
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                &reference, 1));
+   CHECK(fixture.context.last_submitted_fence == 1);
 }
 
 void
@@ -592,7 +792,7 @@ test_queue_id_mismatch_rejected()
 }
 
 void
-test_failed_render_rotates_buffers()
+test_failed_render_updates_buffers()
 {
    test_fixture fixture;
    init_fixture(&fixture);
@@ -609,11 +809,130 @@ test_failed_render_rotates_buffers()
    CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
    CHECK(fixture.render_calls == 1);
    CHECK(fixture.context.command_buffer == fixture.next_command_buffer);
-   CHECK(fixture.context.command_buffer_size == sizeof(fixture.command_buffer));
+   CHECK(fixture.context.command_buffer_size == fixture.next_command_buffer_size);
    CHECK(fixture.context.allocation_list == fixture.next_allocation_list);
-   CHECK(fixture.context.allocation_list_size == TU_WDDM_MAX_RENDER_ALLOCATIONS);
+   CHECK(fixture.context.allocation_list_size == fixture.next_allocation_list_size);
    CHECK(fixture.context.patch_location_list == fixture.next_patch_list);
-   CHECK(fixture.context.patch_location_list_size == TU_WDDM_MAX_RENDER_ALLOCATIONS);
+   CHECK(fixture.context.patch_location_list_size == fixture.next_patch_list_size);
+   CHECK(fixture.context.last_submitted_fence == 0);
+}
+
+void
+test_failed_render_with_untouched_replacements_is_retryable()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.render_status = kStatusInvalidParameter;
+   fixture.render_leaves_replacements_untouched = true;
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(fixture.context.command_buffer == fixture.command_buffer);
+   CHECK(fixture.context.allocation_list == fixture.allocation_list);
+   CHECK(fixture.context.patch_location_list == fixture.patch_list);
+   CHECK(fixture.context.last_submitted_fence == 0);
+}
+
+void
+test_successful_render_with_null_replacements_fails_closed()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.render_returns_null_replacements = true;
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(fixture.render_calls == 1);
+   CHECK(fixture.context.command_buffer == NULL);
+   CHECK(fixture.context.command_buffer_size == 0);
+   CHECK(fixture.context.allocation_list == NULL);
+   CHECK(fixture.context.allocation_list_size == 0);
+   CHECK(fixture.context.patch_location_list == NULL);
+   CHECK(fixture.context.patch_location_list_size == 0);
+   CHECK(fixture.context.last_submitted_fence == submit.request.fence);
+}
+
+void
+test_successful_render_with_partial_replacements_fails_closed()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.render_returns_partial_replacements = true;
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(fixture.context.command_buffer == NULL);
+   CHECK(fixture.context.allocation_list == NULL);
+   CHECK(fixture.context.patch_location_list == NULL);
+   CHECK(fixture.context.last_submitted_fence == submit.request.fence);
+}
+
+void
+test_successful_render_with_oversized_replacements_fails_closed()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.render_returns_oversized_replacements = true;
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(fixture.context.command_buffer == NULL);
+   CHECK(fixture.context.allocation_list == NULL);
+   CHECK(fixture.context.patch_location_list == NULL);
+   CHECK(fixture.context.last_submitted_fence == submit.request.fence);
+}
+
+void
+test_completed_fence_query_and_wait()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.completed_fence = 7;
+
+   uint32_t completed = 0;
+   CHECK(tu_wddm_context_get_completed_fence(&fixture.context, &completed));
+   CHECK(completed == 7);
+   CHECK(fixture.escape_calls == 1);
+   CHECK(tu_wddm_context_wait_fence(&fixture.context, 7, 0));
+   CHECK(!tu_wddm_context_wait_fence(&fixture.context, 8, 0));
+
+   /* Sequence one is after UINT32_MAX when the 32-bit queue fence wraps. */
+   fixture.completed_fence = 1;
+   CHECK(tu_wddm_context_wait_fence(&fixture.context, UINT32_MAX, 0));
+}
+
+void
+test_completed_fence_identity_rejected()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.completed_fence = 1;
+   fixture.returned_context_id++;
+
+   uint32_t completed = UINT32_MAX;
+   CHECK(!tu_wddm_context_get_completed_fence(&fixture.context, &completed));
+   CHECK(completed == 0);
+
+   fixture.returned_context_id = kContextId;
+   fixture.escape_status = kStatusInvalidParameter;
+   CHECK(!tu_wddm_context_get_completed_fence(&fixture.context, &completed));
+   CHECK(completed == 0);
 }
 
 } /* namespace */
@@ -636,11 +955,21 @@ main()
 {
    test_allocation_and_lock();
    test_allocation_range_rejected();
+   test_failed_allocation_creation_compensates();
+   test_null_lock_data_is_rolled_back();
    test_valid_render();
+   test_submission_retirement_snapshot();
+   test_context_render_fence_wrap();
    test_valid_two_bo_render();
    test_malformed_render_rejected();
    test_queue_id_mismatch_rejected();
-   test_failed_render_rotates_buffers();
+   test_failed_render_updates_buffers();
+   test_failed_render_with_untouched_replacements_is_retryable();
+   test_successful_render_with_null_replacements_fails_closed();
+   test_successful_render_with_partial_replacements_fails_closed();
+   test_successful_render_with_oversized_replacements_fails_closed();
+   test_completed_fence_query_and_wait();
+   test_completed_fence_identity_rejected();
    current_fixture = NULL;
 
    if (failures != 0)

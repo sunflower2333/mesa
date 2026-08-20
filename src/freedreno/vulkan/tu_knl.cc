@@ -7,19 +7,27 @@
  * Copyright © 2015 Intel Corporation
  */
 
+#if defined(TU_HAS_KGSL) || defined(TU_HAS_MSM) || defined(TU_HAS_VIRTIO)
 #include <fcntl.h>
+#endif
 
+#if defined(TU_HAS_MSM) || defined(TU_HAS_VIRTIO)
 #ifdef MAJOR_IN_MKDEV
 #include <sys/mkdev.h>
 #endif
 #ifdef MAJOR_IN_SYSMACROS
 #include <sys/sysmacros.h>
 #endif
+#endif
 
+#if !defined(_WIN32)
 #include <sys/mman.h>
+#endif
 
 #include "util/cache_ops.h"
+#if defined(TU_HAS_MSM) || defined(TU_HAS_VIRTIO)
 #include "util/libdrm.h"
+#endif
 #include "vk_debug_utils.h"
 
 #include "tu_device.h"
@@ -78,6 +86,7 @@ tu_bo_init_new_explicit_iova(struct tu_device *dev,
                              VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 
    (*out_bo)->dump = flags & TU_BO_ALLOC_ALLOW_DUMP;
+   (*out_bo)->gpu_read_only = flags & TU_BO_ALLOC_GPU_READ_ONLY;
 
    if (!(*out_bo)->unique_id)
       (*out_bo)->unique_id = (*out_bo)->gem_handle;
@@ -151,6 +160,13 @@ tu_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
 
    TU_RMV(bo_unmap, dev, bo);
 
+   if (dev->instance->knl->bo_unmap)
+      return dev->instance->knl->bo_unmap(dev, bo, reserve);
+
+#if DETECT_OS_WINDOWS
+   return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
+                    "Kernel backend does not support BO unmap");
+#else
    if (reserve) {
       void *map = mmap(bo->map, bo->size, PROT_NONE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -164,6 +180,7 @@ tu_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
    bo->map = NULL;
 
    return VK_SUCCESS;
+#endif
 }
 
 void
@@ -306,6 +323,16 @@ tu_submit_add_entries(struct tu_device *dev, void *submit,
 }
 
 void
+tu_submit_add_bos(struct tu_device *dev, void *submit,
+                  struct tu_bo **bos, unsigned num_bos,
+                  uint32_t access_flags)
+{
+   if (dev->instance->knl->submit_add_bos)
+      dev->instance->knl->submit_add_bos(dev, submit, bos, num_bos,
+                                         access_flags);
+}
+
+void
 tu_submit_add_bind(struct tu_device *dev,
                    void *_submit,
                    struct tu_sparse_vma *vma, uint64_t vma_offset,
@@ -336,7 +363,12 @@ tu_queue_submit(struct tu_queue *queue, void *submit,
 VkResult
 tu_enumerate_devices(struct vk_instance *vk_instance)
 {
-#ifdef TU_HAS_KGSL
+#ifdef TU_HAS_WDDM
+   struct tu_instance *instance =
+      container_of(vk_instance, struct tu_instance, vk);
+
+   return tu_knl_wddm_load(instance);
+#elif defined(TU_HAS_KGSL)
    struct tu_instance *instance =
       container_of(vk_instance, struct tu_instance, vk);
 
@@ -375,6 +407,7 @@ tu_physical_device_try_create(struct vk_instance *vk_instance,
                               struct _drmDevice *drm_device,
                               struct vk_physical_device **out)
 {
+#if defined(TU_HAS_MSM) || defined(TU_HAS_VIRTIO)
    struct tu_instance *instance =
       container_of(vk_instance, struct tu_instance, vk);
 
@@ -490,4 +523,10 @@ out:
    drmFreeVersion(version);
 
    return result;
+#else
+   (void) vk_instance;
+   (void) drm_device;
+   (void) out;
+   return VK_ERROR_INCOMPATIBLE_DRIVER;
+#endif
 }

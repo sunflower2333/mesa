@@ -47,6 +47,7 @@ typedef enum VIOGPU_WDDM_RENDER_OPCODE {
 
 typedef enum VIOGPU_WDDM_ESCAPE_OPCODE {
    VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO = 1,
+   VIOGPU_WDDM_ESCAPE_GET_COMPLETED_FENCE = 2,
 } VIOGPU_WDDM_ESCAPE_OPCODE;
 
 #pragma pack(push, 4)
@@ -115,6 +116,19 @@ typedef struct VIOGPU_WDDM_CONTEXT_INFO {
    VIOGPU_WDDM_UINT32 SubmitQueueId;
 } VIOGPU_WDDM_CONTEXT_INFO;
 
+/* Context-scoped completion snapshot.  CompletedFence is the UMD submit
+ * sequence endpoint, not the opaque VidSch fence id. */
+typedef struct VIOGPU_WDDM_FENCE_INFO {
+   VIOGPU_WDDM_ABI_HEADER Header;
+   VIOGPU_WDDM_UINT32 Opcode;
+   VIOGPU_WDDM_UINT32 Flags;
+   VIOGPU_WDDM_UINT64 ExpectedResetGeneration;
+   VIOGPU_WDDM_UINT64 CompletedFence;
+   VIOGPU_WDDM_UINT64 ResetGeneration;
+   VIOGPU_WDDM_UINT32 ContextId;
+   VIOGPU_WDDM_UINT32 Reserved;
+} VIOGPU_WDDM_FENCE_INFO;
+
 typedef struct VIOGPU_WDDM_RENDER_COMMAND {
    VIOGPU_WDDM_ABI_HEADER Header;
    VIOGPU_WDDM_UINT32 Opcode;
@@ -146,6 +160,7 @@ static_assert(sizeof(VIOGPU_WDDM_ADAPTER_INFO) == 128, "WDDM adapter ABI layout 
 static_assert(sizeof(VIOGPU_WDDM_ALLOCATION_INFO) == 80, "WDDM allocation ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_CONTEXT_CREATE) == 32, "WDDM context-create ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 64, "WDDM context-info ABI layout changed");
+static_assert(sizeof(VIOGPU_WDDM_FENCE_INFO) == 56, "WDDM fence-info ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) == 64, "WDDM render ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) == 32, "WDDM reference ABI layout changed");
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, VaStart) == 32, "WDDM context VA offset changed");
@@ -155,6 +170,12 @@ static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, ResetGeneration) == 48,
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, ContextId) == 56,
               "WDDM context id offset changed");
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, SubmitQueueId) == 60, "WDDM submit queue id offset changed");
+static_assert(offsetof(VIOGPU_WDDM_FENCE_INFO, CompletedFence) == 32,
+              "WDDM completed fence offset changed");
+static_assert(offsetof(VIOGPU_WDDM_FENCE_INFO, ResetGeneration) == 40,
+              "WDDM fence generation offset changed");
+static_assert(offsetof(VIOGPU_WDDM_FENCE_INFO, ContextId) == 48,
+              "WDDM fence context offset changed");
 #endif
 
 #endif /* TU_WDDM_ABI_H */

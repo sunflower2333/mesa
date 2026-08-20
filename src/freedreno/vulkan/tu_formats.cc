@@ -712,6 +712,16 @@ tu_get_external_image_format_properties(
    VkExternalMemoryHandleTypeFlagBits handleType,
    VkExternalImageFormatProperties *external_properties)
 {
+#ifdef TU_HAS_WDDM
+   if (physical_device->wddm_adapter.private_info.Header.Magic ==
+       VIOGPU_WDDM_ABI_MAGIC) {
+      if (external_properties)
+         external_properties->externalMemoryProperties =
+            (VkExternalMemoryProperties){};
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   }
+#endif
+
    BITMASK_ENUM(VkExternalMemoryFeatureFlagBits) flags = 0;
    VkExternalMemoryHandleTypeFlags export_flags = 0;
    VkExternalMemoryHandleTypeFlags compat_flags = 0;

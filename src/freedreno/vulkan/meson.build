@@ -149,6 +149,11 @@ if freedreno_kmds.contains('virtio')
   tu_deps += dep_libdrm
 endif
 
+if freedreno_kmds.contains('wddm')
+  tu_flags += '-DTU_HAS_WDDM'
+  libtu_files += files('tu_wddm_dispatch.cc', 'tu_knl_wddm.cc')
+endif
+
 tu_build_id = get_option('tu-build-id')
 if tu_build_id != ''
   tu_flags += '-DTU_BUILD_ID_OVERRIDE="' + tu_build_id + '"'

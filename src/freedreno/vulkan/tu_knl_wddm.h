@@ -34,6 +34,9 @@ struct tu_wddm_adapter_info {
    uint32_t device_id;
    uint32_t subsystem_id;
    uint32_t revision;
+   uint64_t dedicated_video_memory;
+   uint64_t dedicated_system_memory;
+   uint64_t shared_system_memory;
    char description[128];
    VIOGPU_WDDM_ADAPTER_INFO private_info;
 };
@@ -66,7 +69,10 @@ struct tu_wddm_context {
    D3DDDI_PATCHLOCATIONLIST *patch_location_list;
    uint32_t patch_location_list_size;
    VIOGPU_WDDM_CONTEXT_INFO info;
+   uint32_t last_submitted_fence;
 };
+
+struct tu_instance;
 
 /* These limits mirror the compile-only KMD contract.  They are deliberately
  * smaller than the WDDM wire fields so arithmetic stays bounded before a
@@ -93,6 +99,10 @@ struct tu_wddm_allocation {
    struct tu_wddm_context *context;
    D3DKMT_HANDLE handle;
    VIOGPU_WDDM_ALLOCATION_INFO private_info;
+   /* VidMm/KMD backs every native allocation to a page boundary.  Keep the
+    * reservation size separately from the logical Vulkan allocation size so
+    * adjacent requested IOVAs cannot overlap the rounded backing extent. */
+   uint64_t vma_size;
    void *map;
    bool locked;
 };
@@ -111,7 +121,14 @@ typedef bool (*tu_wddm_adapter_callback)(const struct tu_wddm_adapter_info *info
 bool tu_wddm_runtime_init(struct tu_wddm_runtime *runtime);
 void tu_wddm_runtime_finish(struct tu_wddm_runtime *runtime);
 
-/* Enumerates only adapters that claim the exact DroidVM private endpoint. */
+/* Close handles retained by a failed physical-adapter probe.  The owner is
+ * stored on tu_instance so a transient KMT close failure can be retried
+ * before the runtime dispatch table is unloaded. */
+bool tu_wddm_probe_cleanup(struct tu_instance *instance);
+
+/* Enumerates only adapters that claim the exact DroidVM private endpoint.
+ * The callback must return true to continue; false aborts enumeration and is
+ * reported as failure, even when the current adapter can be closed cleanly. */
 bool tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
                                       tu_wddm_adapter_callback callback,
                                       void *data);
@@ -119,6 +136,9 @@ bool tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
 bool tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info);
 bool tu_wddm_validate_context_info(const VIOGPU_WDDM_CONTEXT_INFO *info,
                                   uint64_t expected_reset_generation);
+bool tu_wddm_validate_fence_info(const VIOGPU_WDDM_FENCE_INFO *info,
+                                 uint64_t expected_reset_generation,
+                                 uint32_t expected_context_id);
 
 bool tu_wddm_adapter_open(struct tu_wddm_runtime *runtime,
                           const struct tu_wddm_adapter_info *identity,
@@ -133,6 +153,13 @@ bool tu_wddm_device_close(struct tu_wddm_device *device);
 bool tu_wddm_context_open(struct tu_wddm_device *device,
                           struct tu_wddm_context *context);
 bool tu_wddm_context_get_info(struct tu_wddm_context *context);
+bool tu_wddm_context_get_completed_fence(struct tu_wddm_context *context,
+                                         uint32_t *completed_fence);
+bool tu_wddm_context_wait_fence(struct tu_wddm_context *context,
+                                uint32_t fence,
+                                uint64_t timeout_ns);
+bool tu_wddm_context_wait_submissions(struct tu_wddm_context *context,
+                                      uint64_t timeout_ns);
 bool tu_wddm_context_close(struct tu_wddm_context *context);
 
 bool tu_wddm_allocation_create(struct tu_wddm_context *context,

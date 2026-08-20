@@ -19,6 +19,9 @@
 struct tu_u_trace_syncobj;
 struct tu_queue;
 struct vdrm_bo;
+#ifdef TU_HAS_WDDM
+struct tu_wddm_allocation;
+#endif
 
 enum tu_bo_alloc_flags {
    TU_BO_ALLOC_NO_FLAGS = 0,
@@ -34,6 +37,11 @@ enum tu_bo_alloc_flags {
 enum tu_mem_sync_op {
    TU_MEM_SYNC_CACHE_TO_GPU,
    TU_MEM_SYNC_CACHE_FROM_GPU,
+};
+
+enum tu_submit_bo_access {
+   TU_SUBMIT_BO_ACCESS_READ = 1u << 0,
+   TU_SUBMIT_BO_ACCESS_WRITE = 1u << 1,
 };
 
 /* See tu_bo::dump_bo_list_idx. */
@@ -70,6 +78,7 @@ struct tu_bo {
    bool never_unmap : 1;
    bool cached_non_coherent : 1;
    bool lazy : 1;
+   bool gpu_read_only : 1;
 
    bool dump;
 
@@ -85,6 +94,10 @@ struct tu_bo {
     * inode to provide a consistent ID across imports.
     */
    uint64_t unique_id;
+
+#ifdef TU_HAS_WDDM
+   struct tu_wddm_allocation *wddm_allocation;
+#endif
 };
 
 enum tu_sparse_vma_flags {
@@ -151,6 +164,7 @@ struct tu_knl {
    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
+   VkResult (*bo_unmap)(struct tu_device *dev, struct tu_bo *bo, bool reserve);
    void (*bo_allow_dump)(struct tu_device *dev, struct tu_bo *bo);
    void (*bo_finish)(struct tu_device *dev, struct tu_bo *bo);
    void (*bo_set_metadata)(struct tu_device *dev, struct tu_bo *bo,
@@ -162,6 +176,12 @@ struct tu_knl {
    void (*submit_add_entries)(struct tu_device *device, void *_submit,
                               struct tu_cs_entry *entries,
                               unsigned num_entries);
+   /* Add BOs which are referenced by a command stream but are not themselves
+    * command buffers.  Backends which derive their resource list from the
+    * kernel handle table may leave this unset. */
+   void (*submit_add_bos)(struct tu_device *device, void *_submit,
+                          struct tu_bo **bos, unsigned num_bos,
+                          uint32_t access_flags);
    void (*submit_add_bind)(struct tu_device *device,
                            void *_submit,
                            struct tu_sparse_vma *vma, uint64_t vma_offset,
@@ -271,6 +291,10 @@ void tu_sparse_vma_finish(struct tu_device *device,
 
 VkResult tu_knl_kgsl_load(struct tu_instance *instance, int fd);
 
+#ifdef TU_HAS_WDDM
+VkResult tu_knl_wddm_load(struct tu_instance *instance);
+#endif
+
 struct _drmVersion;
 VkResult tu_knl_drm_msm_load(struct tu_instance *instance,
                              int fd, struct _drmVersion *version,
@@ -322,6 +346,11 @@ void
 tu_submit_add_entries(struct tu_device *dev, void *submit,
                       struct tu_cs_entry *entries,
                       unsigned num_entries);
+
+void
+tu_submit_add_bos(struct tu_device *dev, void *submit,
+                  struct tu_bo **bos, unsigned num_bos,
+                  uint32_t access_flags);
 
 void
 tu_submit_add_bind(struct tu_device *device,

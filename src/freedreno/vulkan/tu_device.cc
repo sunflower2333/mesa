@@ -9,6 +9,11 @@
 
 #include "tu_device.h"
 
+#if DETECT_OS_WINDOWS
+#include <io.h>
+#define close _close
+#endif
+
 #include "drm-uapi/drm_fourcc.h"
 #include "git_sha1.h"
 #include "perfcntrs/freedreno_perfcntr.h"
@@ -199,6 +204,18 @@ is_kgsl(struct tu_instance *instance)
    return strcmp(instance->knl->name, "kgsl") == 0;
 }
 
+static bool
+is_wddm(struct tu_instance *instance)
+{
+#ifdef TU_HAS_WDDM
+   return instance != NULL && instance->knl != NULL &&
+          strcmp(instance->knl->name, "wddm") == 0;
+#else
+   (void)instance;
+   return false;
+#endif
+}
+
 static bool tu_has_multiview(const struct tu_physical_device *device)
 {
    return device->info->props.has_hw_multiview || TU_DEBUG(NOCONFORM);
@@ -230,7 +247,8 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_acceleration_structure = has_raytracing,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
-      .KHR_calibrated_timestamps = device->info->props.has_persistent_counter,
+      .KHR_calibrated_timestamps = device->info->props.has_persistent_counter &&
+                                   !is_wddm(device->instance),
       .KHR_compute_shader_derivatives = true,
       .KHR_copy_commands2 = true,
       // TODO workaround for https://github.com/KhronosGroup/VK-GL-CTS/issues/525
@@ -245,12 +263,12 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_driver_properties = true,
       .KHR_dynamic_rendering = true,
       .KHR_dynamic_rendering_local_read = true,
-      .KHR_external_fence = true,
-      .KHR_external_fence_fd = true,
-      .KHR_external_memory = true,
-      .KHR_external_memory_fd = true,
-      .KHR_external_semaphore = true,
-      .KHR_external_semaphore_fd = true,
+      .KHR_external_fence = !is_wddm(device->instance),
+      .KHR_external_fence_fd = !is_wddm(device->instance),
+      .KHR_external_memory = !is_wddm(device->instance),
+      .KHR_external_memory_fd = !is_wddm(device->instance),
+      .KHR_external_semaphore = !is_wddm(device->instance),
+      .KHR_external_semaphore_fd = !is_wddm(device->instance),
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shading_rate = device->info->props.has_attachment_shading_rate,
       .KHR_get_memory_requirements2 = true,
@@ -327,7 +345,8 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_attachment_feedback_loop_layout = true,
       .EXT_border_color_swizzle = true,
-      .EXT_calibrated_timestamps = device->info->props.has_persistent_counter,
+      .EXT_calibrated_timestamps = device->info->props.has_persistent_counter &&
+                                   !is_wddm(device->instance),
       .EXT_color_write_enable = true,
       .EXT_conditional_rendering = true,
       .EXT_conservative_rasterization = device->info->chip >= 7,
@@ -349,7 +368,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_extended_dynamic_state = true,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
-      .EXT_external_memory_dma_buf = true,
+      .EXT_external_memory_dma_buf = !is_wddm(device->instance),
       .EXT_filter_cubic = device->info->props.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
       .EXT_fragment_density_map_offset = true,
@@ -360,7 +379,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_host_image_copy = true,
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
-      .EXT_image_drm_format_modifier = true,
+      .EXT_image_drm_format_modifier = !is_wddm(device->instance),
       .EXT_image_robustness = true,
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
@@ -369,14 +388,15 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_legacy_vertex_attributes = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
-      .EXT_map_memory_placed = true,
+      .EXT_map_memory_placed = !is_wddm(device->instance),
       .EXT_memory_budget = true,
       .EXT_multi_draw = true,
       .EXT_multisampled_render_to_single_sampled = true,
       .EXT_mutable_descriptor_type = true,
       .EXT_nested_command_buffer = true,
       .EXT_non_seamless_cube_map = true,
-      .EXT_physical_device_drm = !is_kgsl(device->instance),
+      .EXT_physical_device_drm = !is_kgsl(device->instance) &&
+                                 !is_wddm(device->instance),
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
 #ifdef TU_USE_WSI_PLATFORM
@@ -387,7 +407,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_primitives_generated_query = true,
       .EXT_private_data = true,
       .EXT_provoking_vertex = true,
-      .EXT_queue_family_foreign = true,
+      .EXT_queue_family_foreign = !is_wddm(device->instance),
       .EXT_rasterization_order_attachment_access = true,
       .EXT_robustness2 = true,
       .EXT_sample_locations = device->info->props.has_sample_locations,
@@ -416,8 +436,9 @@ get_device_extensions(const struct tu_physical_device *device,
 
       /* For Graphics Flight Recorder (GFR) */
       .AMD_buffer_marker = true,
-      .ANDROID_external_memory_android_hardware_buffer = has_gralloc,
-      .ANDROID_native_buffer = has_gralloc,
+      .ANDROID_external_memory_android_hardware_buffer = has_gralloc &&
+                                                         !is_wddm(device->instance),
+      .ANDROID_native_buffer = has_gralloc && !is_wddm(device->instance),
       .ARM_rasterization_order_attachment_access = true,
       .GOOGLE_decorate_string = true,
 #ifdef TU_USE_WSI_PLATFORM
@@ -802,7 +823,7 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->legacyDithering = true;
 
    /* VK_EXT_map_memory_placed */
-   features->memoryMapPlaced = true;
+   features->memoryMapPlaced = !is_wddm(pdevice->instance);
    features->memoryMapRangePlaced = false;
    features->memoryUnmapReserve = true;
 
@@ -1192,7 +1213,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxMemoryAllocationCount = UINT32_MAX;
    props->maxSamplerAllocationCount = 64 * 1024;
    props->bufferImageGranularity = 64;          /* A cache line */
-   props->sparseAddressSpaceSize = pdevice->va_size;
+   props->sparseAddressSpaceSize = pdevice->has_sparse ? pdevice->va_size : 0;
    props->maxBoundDescriptorSets = pdevice->usable_sets;
    props->maxPerStageDescriptorSamplers = max_descriptor_set_size;
    props->maxPerStageDescriptorUniformBuffers = max_descriptor_set_size;
@@ -1431,11 +1452,11 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->lineSubPixelPrecisionBits = 8;
 
    /* VK_EXT_physical_device_drm */
-   props->drmHasPrimary = pdevice->has_master;
+   props->drmHasPrimary = !is_wddm(pdevice->instance) && pdevice->has_master;
    props->drmPrimaryMajor = pdevice->master_major;
    props->drmPrimaryMinor = pdevice->master_minor;
 
-   props->drmHasRender = pdevice->has_local;
+   props->drmHasRender = !is_wddm(pdevice->instance) && pdevice->has_local;
    props->drmRenderMajor = pdevice->local_major;
    props->drmRenderMinor = pdevice->local_minor;
 
@@ -1908,7 +1929,8 @@ tu_physical_device_finish(struct tu_physical_device *device)
    tu_wsi_finish(device);
 #endif
 
-   close(device->local_fd);
+   if (device->local_fd != -1)
+      close(device->local_fd);
    if (device->master_fd != -1)
       close(device->master_fd);
 
@@ -1985,8 +2007,10 @@ tu_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       return vk_error(NULL, result);
    }
 
+#if defined(TU_HAS_MSM) || defined(TU_HAS_VIRTIO)
    instance->vk.physical_devices.try_create_for_drm =
       tu_physical_device_try_create;
+#endif
    instance->vk.physical_devices.enumerate = tu_enumerate_devices;
    instance->vk.physical_devices.destroy = tu_destroy_physical_device;
 
@@ -2024,6 +2048,13 @@ tu_DestroyInstance(VkInstance _instance,
    driDestroyOptionInfo(&instance->drirc.available_options);
 
    vk_instance_finish(&instance->vk);
+#ifdef TU_HAS_WDDM
+   if (instance->wddm_runtime_initialized) {
+      if (!tu_wddm_probe_cleanup(instance))
+         mesa_loge("failed to close retained WDDM adapter probe handles");
+      tu_wddm_runtime_finish(&instance->wddm_runtime);
+   }
+#endif
    vk_free(&instance->vk.alloc, instance);
 }
 
@@ -2835,7 +2866,7 @@ tu_device_destroy_mutexes(struct tu_device *device)
 
    u_rwlock_destroy(&device->dma_bo_lock);
    u_rwlock_destroy(&device->vm_bind_fence_lock);
-   pthread_mutex_destroy(&device->submit_mutex);
+   mtx_destroy(&device->submit_mutex);
 
    if (device->physical_device->has_set_iova) {
       mtx_destroy(&device->vma_mutex);
@@ -2924,6 +2955,16 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    result = tu_drm_device_init(device);
    if (result != VK_SUCCESS) {
+#ifdef TU_HAS_WDDM
+      /* WDDM can return a KMT handle together with an initialization failure.
+       * Run its finish hook while the device object and dispatch table still
+       * exist so a failed close remains retryable instead of being orphaned
+       * by this early-return path. */
+      if (is_wddm(physical_device->instance))
+         tu_drm_device_finish(device);
+#endif
+      physical_device->device_count--;
+      vk_device_finish(&device->vk);
       vk_free(&device->vk.alloc, device);
       return result;
    }
@@ -2954,7 +2995,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    u_rwlock_init(&device->dma_bo_lock);
    u_rwlock_init(&device->vm_bind_fence_lock);
-   pthread_mutex_init(&device->submit_mutex, NULL);
+   mtx_init(&device->submit_mutex, mtx_plain);
    device->vm_bind_fence_fd = -1;
 
    if (physical_device->has_set_iova) {
@@ -3083,12 +3124,12 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    tu_bo_suballocator_init(&device->event_suballoc, device,
-      getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
+      os_page_size, TU_BO_ALLOC_INTERNAL_RESOURCE,
       "event_suballoc");
 
    tu_bo_suballocator_init(
       &device->vis_stream_suballocator, device,
-      getpagesize(),
+      os_page_size,
       (enum tu_bo_alloc_flags)(TU_BO_ALLOC_INTERNAL_RESOURCE |
                                TU_BO_ALLOC_ALLOW_DUMP),
       "vis_stream_suballoc");
@@ -3218,29 +3259,13 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    tu_init_dbg_reg_stomper(device);
 
-   /* Initialize a condition variable for timeline semaphore */
-   pthread_condattr_t condattr;
-   if (pthread_condattr_init(&condattr) != 0) {
+   /* Initialize a condition variable for timeline semaphore. */
+   if (u_cnd_monotonic_init(&device->timeline_cond) != thrd_success) {
       result = vk_startup_errorf(physical_device->instance,
                                  VK_ERROR_INITIALIZATION_FAILED,
-                                 "pthread condattr init");
+                                 "timeline condition init");
       goto fail_timeline_cond;
    }
-   if (pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC) != 0) {
-      pthread_condattr_destroy(&condattr);
-      result = vk_startup_errorf(physical_device->instance,
-                                 VK_ERROR_INITIALIZATION_FAILED,
-                                 "pthread condattr clock setup");
-      goto fail_timeline_cond;
-   }
-   if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
-      pthread_condattr_destroy(&condattr);
-      result = vk_startup_errorf(physical_device->instance,
-                                 VK_ERROR_INITIALIZATION_FAILED,
-                                 "pthread cond init");
-      goto fail_timeline_cond;
-   }
-   pthread_condattr_destroy(&condattr);
 
    device->use_z24uint_s8uint =
       physical_device->info->props.has_z24uint_s8uint &&
@@ -3319,11 +3344,7 @@ fail_null_accel_struct:
 fail_global_bo_map:
    TU_RMV(resource_destroy, device, device->global_bo);
    tu_bo_finish(device, device->global_bo);
-   vk_free(&device->vk.alloc, device->submit_bo_list);
-   util_dynarray_fini(&device->dump_bo_list);
 fail_global_bo:
-   if (physical_device->has_set_iova)
-      util_vma_heap_finish(&device->vma);
 fail_free_zombie_vma:
    util_sparse_array_finish(&device->bo_map);
    u_vector_finish(&device->zombie_vmas);
@@ -3341,8 +3362,12 @@ fail_queues:
 #ifdef HAVE_PERFETTO
    tu_perfetto_destroy_state(&device->perfetto);
 #endif
-   tu_device_destroy_mutexes(device);
    tu_drm_device_finish(device);
+   if (physical_device->has_set_iova)
+      util_vma_heap_finish(&device->vma);
+   tu_device_destroy_mutexes(device);
+   vk_free(&device->vk.alloc, device->submit_bo_list);
+   util_dynarray_fini(&device->dump_bo_list);
    vk_device_finish(&device->vk);
    vk_free(&device->vk.alloc, device);
    return result;
@@ -3457,7 +3482,7 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    u_vector_finish(&device->zombie_vmas);
 
-   pthread_cond_destroy(&device->timeline_cond);
+   u_cnd_monotonic_destroy(&device->timeline_cond);
    _mesa_hash_table_destroy(device->bo_sizes, NULL);
    vk_free(&device->vk.alloc, device->submit_bo_list);
    util_dynarray_fini(&device->dump_bo_list);
@@ -4446,6 +4471,9 @@ tu_GetMemoryFdKHR(VkDevice _device,
    VK_FROM_HANDLE(tu_device, device, _device);
    VK_FROM_HANDLE(tu_device_memory, memory, pGetFdInfo->memory);
 
+   if (is_wddm(device->physical_device->instance))
+      return vk_error(device, VK_ERROR_FEATURE_NOT_PRESENT);
+
    assert(pGetFdInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR);
 
    /* At the moment, we support only the below handle types. */
@@ -4489,6 +4517,8 @@ tu_GetMemoryFdPropertiesKHR(VkDevice _device,
                             VkMemoryFdPropertiesKHR *pMemoryFdProperties)
 {
    VK_FROM_HANDLE(tu_device, device, _device);
+   if (is_wddm(device->physical_device->instance))
+      return vk_error(device, VK_ERROR_FEATURE_NOT_PRESENT);
    assert(handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
    pMemoryFdProperties->memoryTypeBits =
       (1 << device->physical_device->memory.non_lazy_type_count) - 1;

@@ -15,6 +15,7 @@
 
 #include "radix_sort/radix_sort_vk.h"
 #include "util/rwlock.h"
+#include "util/cnd_monotonic.h"
 #include "util/u_vector.h"
 #include "util/vma.h"
 #include "vk_device_memory.h"
@@ -30,6 +31,10 @@
 #include "tu_queue.h"
 #include "tu_suballoc.h"
 #include "tu_util.h"
+
+#ifdef TU_HAS_WDDM
+#include "tu_knl_wddm.h"
+#endif
 
 /* queue types */
 #define TU_QUEUE_GENERAL 0
@@ -193,6 +198,13 @@ struct tu_physical_device
     * rather than from our own accounting. */
    uint64_t guest_pool_size;
 
+#ifdef TU_HAS_WDDM
+   /* Exact adapter identity retained for the logical-device open.  The
+    * private ABI is validated during enumeration and compared again when a
+    * device is opened. */
+   struct tu_wddm_adapter_info wddm_adapter;
+#endif
+
    struct vk_sync_type syncobj_type;
    /* virtio only: syncobj wrapped with a userspace-fence poll fast path;
     * installed as sync_types[0] so fences/binary semaphores use it while
@@ -215,6 +227,20 @@ struct tu_instance
    struct turnip_drirc drirc;
 
    const struct tu_knl *knl;
+
+#ifdef TU_HAS_WDDM
+   /* WDDM runtime objects outlive all physical devices.  They are initialized
+    * lazily by enumeration and finished after vk_instance_finish() destroys
+    * the physical-device list. */
+   struct tu_wddm_runtime wddm_runtime;
+   /* A probe can fail after KMT has returned a handle.  Keep those owners on
+    * the instance until the close succeeds so enumeration never loses a
+    * retryable context/device pair on a stack unwind. */
+   struct tu_wddm_device wddm_probe_device;
+   struct tu_wddm_context wddm_probe_context;
+   bool wddm_probe_pending;
+   bool wddm_runtime_initialized;
+#endif
 
    uint32_t instance_idx;
    uint32_t api_version;
@@ -462,8 +488,8 @@ struct tu_device
 
    /* Condition variable for timeline semaphore to notify waiters when a
     * new submit is executed. */
-   pthread_cond_t timeline_cond;
-   pthread_mutex_t submit_mutex;
+   struct u_cnd_monotonic timeline_cond;
+   mtx_t submit_mutex;
 
    struct fd_perfcntr_state *perfcntrs;
 
@@ -476,6 +502,17 @@ struct tu_device
 
 #ifdef TU_HAS_VIRTIO
    struct tu_virtio_device *vdev;
+#endif
+
+#ifdef TU_HAS_WDDM
+   struct tu_wddm_device wddm_device;
+   struct tu_wddm_context wddm_context;
+   struct tu_bo **wddm_bos;
+   uint32_t wddm_bo_count;
+   uint32_t wddm_bo_capacity;
+   uint32_t wddm_next_handle;
+   uint32_t wddm_next_fence;
+   bool wddm_initialized;
 #endif
 
    uint32_t submit_count;

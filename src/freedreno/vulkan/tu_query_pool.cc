@@ -9,8 +9,6 @@
 #include "tu_query_pool.h"
 #include "perfcntrs/freedreno_perfcntr.h"
 
-#include <fcntl.h>
-
 #include "nir/nir_builder.h"
 #include "util/os_time.h"
 #include "vk_acceleration_structure.h"
