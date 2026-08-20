@@ -134,6 +134,35 @@ jobs:
           python -m pip install --disable-pip-version-check --upgrade `
             "meson>=1.4.0" mako packaging pyyaml
 
+      - name: Install Windows flex and bison
+        shell: pwsh
+        run: |
+          $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+          $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
+          if ($null -eq $flex -or $null -eq $bison) {
+            winget install --silent --accept-source-agreements --accept-package-agreements `
+              --source winget --exact --id WinFlexBison.win_flex_bison --version 2.5.24
+            if ($LASTEXITCODE -ne 0) {
+              throw "WinFlexBison installation failed with exit code $LASTEXITCODE"
+            }
+            $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $env:Path = "$machinePath;$userPath;$env:Path"
+            $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+            $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
+          }
+          if ($null -eq $flex -or $null -eq $bison) {
+            throw "WinFlexBison binaries were not found after installation"
+          }
+          $flexItem = Get-Item -LiteralPath $flex.Path -Force
+          $flexBin = Split-Path -Parent $flex.Path
+          if ($flexItem.Target) {
+            $flexBin = Split-Path -Parent ([string]$flexItem.Target)
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $flexBin
+          Write-Host "win_flex -> $($flex.Path)"
+          Write-Host "win_bison -> $($bison.Path)"
+
       - name: Locate shader compiler
         shell: pwsh
         run: |
