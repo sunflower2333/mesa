@@ -30,6 +30,8 @@ FNR == 1 {
     }
 
     relpath = FILENAME
+    # Normalize Windows paths before applying the source-tree allowlist.
+    gsub(/\\/, "/", relpath)
     sub(/^.*src\/freedreno\//, "src/freedreno/", relpath)
     if (relpath in allowed) {
         nextfile
