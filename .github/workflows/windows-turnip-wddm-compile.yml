@@ -253,10 +253,18 @@ jobs:
           if ('${{ matrix.arch }}' -eq 'arm64') {
             # Meson must not execute ARM64 sanity binaries on the x64 runner.
             $crossFile = Join-Path $env:RUNNER_TEMP 'mesa-turnip-wddm-arm64-cross.ini'
+            # Keep --target inside one compiler command so Meson does not pass
+            # the clang option through to the Microsoft resource compiler.
+            $clangWrapper = Join-Path $env:RUNNER_TEMP 'clang-cl-arm64.cmd'
+            Set-Content -LiteralPath $clangWrapper -Encoding ascii -Value @(
+              '@echo off'
+              'clang-cl --target=aarch64-pc-windows-msvc %*'
+            )
+            $clangWrapper = $clangWrapper.Replace('\', '/')
             $crossFileLines = @(
               '[binaries]'
-              "c = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
-              "cpp = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
+              "c = '$clangWrapper'"
+              "cpp = '$clangWrapper'"
               "ar = 'llvm-lib'"
               ''
               '[host_machine]'
