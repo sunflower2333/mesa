@@ -1128,9 +1128,6 @@ struct tu_wddm_submit {
    bool failed;
 };
 
-static const struct vk_sync_type tu_wddm_sync_type;
-static const struct tu_knl wddm_knl_funcs;
-
 static inline struct tu_wddm_sync *
 tu_wddm_sync_from_vk(struct vk_sync *sync)
 {
@@ -1270,7 +1267,8 @@ tu_wddm_sync_wait_many(struct vk_device *device, uint32_t wait_count,
                continue;
             VkResult result = tu_wddm_sync_wait(device, waits[i].sync,
                                                 waits[i].wait_value,
-                                                wait_flags & ~VK_SYNC_WAIT_ANY,
+                                                static_cast<enum vk_sync_wait_flags>(
+                                                   wait_flags & ~VK_SYNC_WAIT_ANY),
                                                 0);
             if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST)
                return result;

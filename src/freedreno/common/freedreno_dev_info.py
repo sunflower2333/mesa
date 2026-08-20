@@ -199,6 +199,7 @@ template = """\
 #include "freedreno_dev_info.h"
 #include "util/u_debug.h"
 #include "util/log.h"
+#include "util/u_string.h"
 
 #include <stdlib.h>
 

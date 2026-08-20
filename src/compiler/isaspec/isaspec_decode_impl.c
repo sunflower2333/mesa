@@ -38,8 +38,10 @@
 #include "util/half_float.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
+#include "util/strndup.h"
 #include "util/u_debug.h"
 #include "util/u_math.h"
+#include "util/u_string.h"
 
 #include "isa.h"
 
