@@ -175,6 +175,44 @@ TEMPLATE_C = Template(COPYRIGHT + """
  * difficult.
  */
 
+% if tmpl_prefix:
+#ifdef _MSC_VER
+extern "C" {
+PFN_vkVoidFunction ${tmpl_prefix}_entrypoint_stub_ptr = vk_entrypoint_stub;
+% for e in device_entrypoints:
+  % if e.guard is not None:
+#ifdef ${e.guard}
+  % endif
+  % for v, entrypoint_v in zip(tmpl_variants, tmpl_variants_sanitized):
+extern decltype(&${tmpl_prefix}_${e.name}${v}) ${tmpl_prefix}_${e.name}_${entrypoint_v};
+  % endfor
+  % if e.guard is not None:
+#endif // ${e.guard}
+  % endif
+% endfor
+}
+
+% for e in device_entrypoints:
+  % if e.guard is not None:
+#ifdef ${e.guard}
+  % endif
+  % for entrypoint_v in tmpl_variants_sanitized:
+#ifdef _M_IX86
+#pragma comment(linker, "/alternatename:_${tmpl_prefix}_${e.name}_${entrypoint_v}=_${tmpl_prefix}_entrypoint_stub_ptr")
+#else
+#pragma comment(linker, "/alternatename:${tmpl_prefix}_${e.name}_${entrypoint_v}=${tmpl_prefix}_entrypoint_stub_ptr")
+#if defined(_M_ARM64EC)
+#pragma comment(linker, "/alternatename:#${tmpl_prefix}_${e.name}_${entrypoint_v}=#${tmpl_prefix}_entrypoint_stub_ptr")
+#endif
+#endif
+  % endfor
+  % if e.guard is not None:
+#endif // ${e.guard}
+  % endif
+% endfor
+#endif
+% endif
+
 <%def name="entrypoint_table(type, entrypoints, prefixes)">
 % if gen_weak:
   % for e in entrypoints:
@@ -232,7 +270,11 @@ const struct vk_${type}_entrypoint_table ${tmpl_prefix}_${type}_entrypoints_${en
     % if e.guard is not None:
 #ifdef ${e.guard}
     % endif
+#ifdef _MSC_VER
+    .${e.name} = ${tmpl_prefix}_${e.name}_${entrypoint_v},
+#else
     .${e.name} = ${tmpl_prefix}_${e.name}${v},
+#endif
     % if e.guard is not None:
 #elif defined(_MSC_VER)
     .${e.name} = (PFN_vkVoidFunction)vk_entrypoint_stub,

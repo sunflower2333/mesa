@@ -186,7 +186,20 @@ struct tu_rect2d_float {
 };
 
 
+#ifdef _MSC_VER
+#define TU_MSVC_GENX_PTR(FUNC_NAME, CHIP, SUFFIX)                            \
+   decltype(&FUNC_NAME<CHIP>) FUNC_NAME##_##SUFFIX = &FUNC_NAME<CHIP>;
+
+#define TU_GENX(FUNC_NAME)                                                   \
+   FD_GENX(FUNC_NAME)                                                        \
+   extern "C" {                                                             \
+   TU_MSVC_GENX_PTR(FUNC_NAME, A6XX, a6xx)                                  \
+   TU_MSVC_GENX_PTR(FUNC_NAME, A7XX, a7xx)                                  \
+   TU_MSVC_GENX_PTR(FUNC_NAME, A8XX, a8xx)                                  \
+   }
+#else
 #define TU_GENX(FUNC_NAME) FD_GENX(FUNC_NAME)
+#endif
 
 #define TU_CALLX(device, thing) FD_CALLX((device)->physical_device->info, thing)
 
