@@ -272,7 +272,7 @@ struct ir3_register {
  */
 #define DECLARE_ARRAY(type, name)                                              \
    unsigned name##_count, name##_sz;                                           \
-   type *name;
+   type *name
 
 #define array_insert(ctx, arr, ...)                                            \
    do {                                                                        \

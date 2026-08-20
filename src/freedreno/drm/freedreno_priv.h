@@ -69,7 +69,7 @@ grow(void **ptr, uint16_t nr, uint16_t *max, uint16_t sz)
 
 #define DECLARE_ARRAY(type, name)                                              \
    unsigned short nr_##name, max_##name;                                       \
-   type *name;
+   type *name
 
 #define APPEND(x, name, ...)                                                   \
    ({                                                                          \
