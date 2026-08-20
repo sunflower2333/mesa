@@ -43,6 +43,12 @@ TEMPLATE_H = Template(COPYRIGHT + """\
 #ifndef ${guard}
 #define ${guard}
 
+#ifdef __cplusplus
+#define VK_ENTRY_EXTERN_C extern "C"
+#else
+#define VK_ENTRY_EXTERN_C
+#endif
+
 % if not tmpl_prefix:
 #ifdef __cplusplus
 extern "C" {
@@ -98,7 +104,7 @@ extern const struct vk_device_entrypoint_table ${tmpl_prefix}_device_entrypoints
 #ifdef ${e.guard}
   % endif
   % for p in physical_device_prefixes:
-  VKAPI_ATTR ${e.return_type} VKAPI_CALL ${p}_${e.name}(${e.decl_params()}) VK_ENTRY_WEAK VK_ENTRY_HIDDEN;
+  VK_ENTRY_EXTERN_C VKAPI_ATTR ${e.return_type} VKAPI_CALL ${p}_${e.name}(${e.decl_params()}) VK_ENTRY_WEAK VK_ENTRY_HIDDEN;
   % endfor
   % if e.guard is not None:
 #endif // ${e.guard}
@@ -110,7 +116,7 @@ extern const struct vk_device_entrypoint_table ${tmpl_prefix}_device_entrypoints
 #ifdef ${e.guard}
   % endif
   % for p in physical_device_prefixes:
-  VKAPI_ATTR ${e.return_type} VKAPI_CALL ${p}_${e.name}(${e.decl_params()}) VK_ENTRY_WEAK VK_ENTRY_HIDDEN;
+  VK_ENTRY_EXTERN_C VKAPI_ATTR ${e.return_type} VKAPI_CALL ${p}_${e.name}(${e.decl_params()}) VK_ENTRY_WEAK VK_ENTRY_HIDDEN;
   % endfor
   % if e.guard is not None:
 #endif // ${e.guard}
@@ -122,7 +128,7 @@ extern const struct vk_device_entrypoint_table ${tmpl_prefix}_device_entrypoints
 #ifdef ${e.guard}
   % endif
   % for p in device_prefixes:
-  VKAPI_ATTR ${e.return_type} VKAPI_CALL ${p}_${e.name}(${e.decl_params()}) VK_ENTRY_WEAK VK_ENTRY_HIDDEN;
+  VK_ENTRY_EXTERN_C VKAPI_ATTR ${e.return_type} VKAPI_CALL ${p}_${e.name}(${e.decl_params()}) VK_ENTRY_WEAK VK_ENTRY_HIDDEN;
   % endfor
 
   % if tmpl_prefix:
@@ -144,6 +150,8 @@ extern const struct vk_device_entrypoint_table ${tmpl_prefix}_device_entrypoints
 }
 #endif
 % endif
+
+#undef VK_ENTRY_EXTERN_C
 
 #endif /* ${guard} */
 """)
