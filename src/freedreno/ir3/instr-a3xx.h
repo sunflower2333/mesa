@@ -6,17 +6,25 @@
 #ifndef INSTR_A3XX_H_
 #define INSTR_A3XX_H_
 
-#define PACKED __attribute__((__packed__))
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
+#include "util/macros.h"
+
+#ifdef HAVE_FUNC_ATTRIBUTE_WEAK
+#define IR3_WEAK __attribute__((weak))
+#else
+#define IR3_WEAK
+#endif
+
 /* clang-format off */
-void ir3_assert_handler(const char *expr, const char *file, int line,
-                        const char *func) __attribute__((weak)) __attribute__((__noreturn__));
+NORETURN void ir3_assert_handler(const char *expr, const char *file, int line,
+                                 const char *func) IR3_WEAK;
 /* clang-format on */
+
+#undef IR3_WEAK
 
 /* A wrapper for assert() that allows overriding handling of a failed
  * assert.  This is needed for tools like crashdec which can want to
