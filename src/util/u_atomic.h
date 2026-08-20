@@ -22,6 +22,9 @@
  */
 #if defined(__sun)
 #define PIPE_ATOMIC_OS_SOLARIS
+#elif defined(__clang__) && defined(USE_GCC_ATOMIC_BUILTINS)
+/* clang-cl defines _MSC_VER too, but supports the tested GCC-style builtins. */
+#define PIPE_ATOMIC_GCC_INTRINSIC
 #elif defined(_MSC_VER)
 #define PIPE_ATOMIC_MSVC_INTRINSIC
 #elif defined(__GNUC__)
