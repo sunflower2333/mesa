@@ -6,7 +6,13 @@
 #ifndef REDUMP_H_
 #define REDUMP_H_
 
+#ifdef _WIN32
+#include <io.h>
+#define RD_WRITE _write
+#else
 #include <unistd.h>
+#define RD_WRITE write
+#endif
 
 enum rd_sect_type {
    RD_NONE,
@@ -46,9 +52,11 @@ enum rd_param_type {
 static inline void
 rd_write_section(int fd, enum rd_sect_type type, const void *buf, int sz)
 {
-   write(fd, &type, 4);
-   write(fd, &sz, 4);
-   write(fd, buf, sz);
+   RD_WRITE(fd, &type, 4);
+   RD_WRITE(fd, &sz, 4);
+   RD_WRITE(fd, buf, sz);
 }
+
+#undef RD_WRITE
 
 #endif /* REDUMP_H_ */

@@ -4,6 +4,7 @@
  */
 
 #include "freedreno_rd_output.h"
+#include "util/detect_os.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -11,14 +12,24 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+
+#if DETECT_OS_WINDOWS
+#include <io.h>
+#define close _close
+#define lseek _lseek
+#define open _open
+#define read _read
+#define unlink _unlink
+#else
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include "c11/threads.h"
-#include "util/detect_os.h"
 #include "util/log.h"
 #include "util/u_atomic.h"
 #include "util/u_debug.h"
+#include "util/u_string.h"
 
 static const struct debug_control fd_rd_dump_options[] = {
    { "enable", FD_RD_DUMP_ENABLE },
@@ -49,11 +60,14 @@ fd_rd_dump_env_init_once(void)
 
    const char *output_path_value = os_get_option("FD_RD_DUMP_PATH");
    if (!output_path_value) {
-      output_path_value =
-#if DETECT_OS_ANDROID
-         "/data/local/tmp";
+#if DETECT_OS_WINDOWS
+      output_path_value = os_get_option("TEMP");
+      if (!output_path_value)
+         output_path_value = ".";
+#elif DETECT_OS_ANDROID
+      output_path_value = "/data/local/tmp";
 #else
-         "/tmp";
+      output_path_value = "/tmp";
 #endif
    }
    snprintf(fd_rd_dump_env.output_path, sizeof(fd_rd_dump_env.output_path),
@@ -196,8 +210,6 @@ fd_rd_output_init(struct fd_rd_output *output, const char* output_name)
 void
 fd_rd_output_fini(struct fd_rd_output *output)
 {
-   free(output->name);
-
    if (output->file != NULL) {
       assert(output->combine);
       gzclose(output->file);
@@ -215,8 +227,32 @@ fd_rd_output_fini(struct fd_rd_output *output)
       unlink(file_path);
    }
 
+   free(output->name);
    util_dynarray_fini(&output->frame_ranges);
    util_dynarray_fini(&output->submit_ranges);
+}
+
+static int64_t
+fd_rd_output_file_size(int fd)
+{
+#if DETECT_OS_WINDOWS
+   return _filelengthi64(fd);
+#else
+   struct stat stat;
+   if (fstat(fd, &stat) != 0)
+      return -1;
+   return stat.st_size;
+#endif
+}
+
+static int
+fd_rd_output_truncate(int fd)
+{
+#if DETECT_OS_WINDOWS
+   return _chsize_s(fd, 0) == 0 ? 0 : -1;
+#else
+   return ftruncate(fd, 0);
+#endif
 }
 
 static void
@@ -227,14 +263,14 @@ fd_rd_output_update_trigger_count(struct fd_rd_output *output)
    /* Retrieve the trigger file size, only attempt to update the trigger
     * value if anything was actually written to that file.
     */
-   struct stat stat;
-   if (fstat(output->trigger_fd, &stat) != 0) {
+   int64_t file_size = fd_rd_output_file_size(output->trigger_fd);
+   if (file_size < 0) {
       mesa_loge("[fd_rd_output] failed to acccess the %s trigger file",
                 output->name);
       return;
    }
 
-   if (stat.st_size == 0)
+   if (file_size == 0)
       return;
 
    char trigger_data[32];
@@ -256,7 +292,7 @@ fd_rd_output_update_trigger_count(struct fd_rd_output *output)
       return;
    }
 
-   if (ftruncate(output->trigger_fd, 0) < 0) {
+   if (fd_rd_output_truncate(output->trigger_fd) != 0) {
       mesa_loge("[fd_rd_output] failed to truncate the %s trigger file",
                 output->name);
       return;
