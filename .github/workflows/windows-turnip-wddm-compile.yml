@@ -230,7 +230,7 @@ jobs:
             '-Dgbm=disabled',
             '-Dllvm=disabled',
             '-Dshader-cache=disabled',
-            '-Dzlib=disabled',
+            '-Dzlib=enabled',
             '-Dzstd=disabled',
             '-Dtools=[]',
             '-Dbuild-tests=false',
