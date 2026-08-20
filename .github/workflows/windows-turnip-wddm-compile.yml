@@ -255,15 +255,9 @@ jobs:
             $crossFile = Join-Path $env:RUNNER_TEMP 'mesa-turnip-wddm-arm64-cross.ini'
             $crossFileLines = @(
               '[binaries]'
-              "c = 'clang-cl'"
-              "cpp = 'clang-cl'"
+              "c = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
+              "cpp = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
               "ar = 'llvm-lib'"
-              ''
-              '[built-in options]'
-              "c_args = ['--target=aarch64-pc-windows-msvc']"
-              "cpp_args = ['--target=aarch64-pc-windows-msvc']"
-              "c_link_args = ['--target=aarch64-pc-windows-msvc']"
-              "cpp_link_args = ['--target=aarch64-pc-windows-msvc']"
               ''
               '[host_machine]'
               "system = 'windows'"
