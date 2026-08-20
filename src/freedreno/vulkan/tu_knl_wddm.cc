@@ -797,9 +797,7 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
 }
 
 bool
-tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation,
-                        bool read_only,
-                        void **map)
+tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation, void **map)
 {
    if (map != NULL)
       *map = NULL;
@@ -812,7 +810,7 @@ tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation,
    D3DKMT_LOCK lock = {};
    lock.hDevice = allocation->context->device->handle;
    lock.hAllocation = allocation->handle;
-   lock.Flags.ReadOnly = read_only ? 1 : 0;
+   lock.Flags.ReadOnly = 0;
    lock.Flags.LockEntire = 1;
 
    NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.Lock(&lock);
@@ -1727,7 +1725,7 @@ tu_wddm_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
    if (placed_addr != NULL || !tu_wddm_bo_valid(bo))
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
    void *map = NULL;
-   if (!tu_wddm_allocation_lock(bo->wddm_allocation, bo->gpu_read_only, &map))
+   if (!tu_wddm_allocation_lock(bo->wddm_allocation, &map))
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
    bo->map = map;
    TU_RMV(bo_map, dev, bo);
@@ -1767,13 +1765,15 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       p_atomic_set(&bo->refcnt, 1);
    };
 
-   /* Serializing with queue submission makes last_submitted_fence and the
-    * live-BO residency snapshot stable until this allocation is gone. */
-   mtx_lock(&dev->submit_mutex);
+   /* Generic queue preparation already owns submit_mutex and can release a
+    * replaced internal BO.  Use the WDDM-specific lock to serialize this
+    * destruction with the live-BO residency snapshot and Render call without
+    * recursively acquiring submit_mutex. */
+   mtx_lock(&dev->wddm_mutex);
    if (!tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX)) {
       vk_device_set_lost(&dev->vk, "failed to retire WDDM queue work");
       restore_owner();
-      mtx_unlock(&dev->submit_mutex);
+      mtx_unlock(&dev->wddm_mutex);
       return;
    }
 
@@ -1781,7 +1781,7 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       if (!tu_wddm_allocation_unlock(bo->wddm_allocation)) {
          vk_device_set_lost(&dev->vk, "failed to unlock WDDM allocation");
          restore_owner();
-         mtx_unlock(&dev->submit_mutex);
+         mtx_unlock(&dev->wddm_mutex);
          return;
       }
       bo->map = NULL;
@@ -1796,7 +1796,7 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
    if (!tu_wddm_allocation_destroy(allocation)) {
       vk_device_set_lost(&dev->vk, "failed to destroy WDDM allocation");
       restore_owner();
-      mtx_unlock(&dev->submit_mutex);
+      mtx_unlock(&dev->wddm_mutex);
       return;
    }
 
@@ -1812,7 +1812,7 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
    util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
    mtx_unlock(&dev->vma_mutex);
    vk_free(&dev->vk.alloc, allocation);
-   mtx_unlock(&dev->submit_mutex);
+   mtx_unlock(&dev->wddm_mutex);
 }
 
 static void
@@ -2183,36 +2183,12 @@ tu_wddm_sync_signal_valid(struct vk_sync *base,
 }
 
 static VkResult
-tu_wddm_queue_submit(struct tu_queue *queue, void *_submit,
-                     struct vk_sync_wait *waits, uint32_t wait_count,
-                     struct vk_sync_signal *signals, uint32_t signal_count,
-                     struct tu_u_trace_submission_data *u_trace_submission_data)
+tu_wddm_queue_submit_locked(struct tu_queue *queue,
+                            struct tu_wddm_submit *submit,
+                            struct vk_sync_signal *signals,
+                            uint32_t signal_count)
 {
-   (void)u_trace_submission_data;
    struct tu_device *device = queue->device;
-   struct tu_wddm_submit *submit = (struct tu_wddm_submit *)_submit;
-   if (submit == NULL || submit->failed || !device->wddm_initialized)
-      return VK_ERROR_DEVICE_LOST;
-
-   for (uint32_t i = 0; i < signal_count; i++) {
-      if (!tu_wddm_sync_signal_valid(signals[i].sync,
-                                     &device->wddm_context))
-         return VK_ERROR_DEVICE_LOST;
-   }
-
-   /* The pre-v1 private ABI has no scheduler wait list.  Resolve waits through
-    * the same context-scoped completion endpoint before issuing Render. */
-   for (uint32_t i = 0; i < wait_count; i++) {
-      if (waits[i].sync == NULL || vk_sync_type_is_dummy(waits[i].sync->type))
-         continue;
-      VkResult result = vk_sync_wait(&device->vk, waits[i].sync,
-                                     waits[i].wait_value,
-                                     VK_SYNC_WAIT_COMPLETE,
-                                     OS_TIMEOUT_INFINITE);
-      if (result != VK_SUCCESS)
-         return result == VK_TIMEOUT ? VK_TIMEOUT : VK_ERROR_DEVICE_LOST;
-   }
-
    const uint32_t entry_count = util_dynarray_num_elements(
       &submit->entries, struct tu_wddm_submit_entry);
    uint32_t fence = 0;
@@ -2256,6 +2232,46 @@ tu_wddm_queue_submit(struct tu_queue *queue, void *_submit,
    }
 
    return VK_SUCCESS;
+}
+
+static VkResult
+tu_wddm_queue_submit(struct tu_queue *queue,
+                     void *_submit,
+                     struct vk_sync_wait *waits,
+                     uint32_t wait_count,
+                     struct vk_sync_signal *signals,
+                     uint32_t signal_count,
+                     struct tu_u_trace_submission_data *u_trace_submission_data)
+{
+   (void) u_trace_submission_data;
+   struct tu_device *device = queue->device;
+   struct tu_wddm_submit *submit = (struct tu_wddm_submit *) _submit;
+   if (submit == NULL || submit->failed || !device->wddm_initialized)
+      return VK_ERROR_DEVICE_LOST;
+
+   for (uint32_t i = 0; i < signal_count; i++) {
+      if (!tu_wddm_sync_signal_valid(signals[i].sync, &device->wddm_context))
+         return VK_ERROR_DEVICE_LOST;
+   }
+
+   /* The pre-v1 private ABI has no scheduler wait list.  Resolve waits through
+    * the same context-scoped completion endpoint before issuing Render. */
+   for (uint32_t i = 0; i < wait_count; i++) {
+      if (waits[i].sync == NULL || vk_sync_type_is_dummy(waits[i].sync->type))
+         continue;
+      VkResult result =
+         vk_sync_wait(&device->vk, waits[i].sync, waits[i].wait_value, VK_SYNC_WAIT_COMPLETE, OS_TIMEOUT_INFINITE);
+      if (result != VK_SUCCESS)
+         return result == VK_TIMEOUT ? VK_TIMEOUT : VK_ERROR_DEVICE_LOST;
+   }
+
+   /* queue_submit already owns submit_mutex.  The nested WDDM lock protects
+    * the all-live-BO snapshot and Render transfer from concurrent BO teardown
+    * without making generic BO release recursively acquire submit_mutex. */
+   mtx_lock(&device->wddm_mutex);
+   VkResult result = tu_wddm_queue_submit_locked(queue, submit, signals, signal_count);
+   mtx_unlock(&device->wddm_mutex);
+   return result;
 }
 
 static VkResult

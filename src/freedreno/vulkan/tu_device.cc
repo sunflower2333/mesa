@@ -2866,6 +2866,9 @@ tu_device_destroy_mutexes(struct tu_device *device)
 
    u_rwlock_destroy(&device->dma_bo_lock);
    u_rwlock_destroy(&device->vm_bind_fence_lock);
+#ifdef TU_HAS_WDDM
+   mtx_destroy(&device->wddm_mutex);
+#endif
    mtx_destroy(&device->submit_mutex);
 
    if (device->physical_device->has_set_iova) {
@@ -2996,6 +2999,9 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    u_rwlock_init(&device->dma_bo_lock);
    u_rwlock_init(&device->vm_bind_fence_lock);
    mtx_init(&device->submit_mutex, mtx_plain);
+#ifdef TU_HAS_WDDM
+   mtx_init(&device->wddm_mutex, mtx_plain);
+#endif
    device->vm_bind_fence_fd = -1;
 
    if (physical_device->has_set_iova) {

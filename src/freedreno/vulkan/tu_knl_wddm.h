@@ -166,9 +166,11 @@ bool tu_wddm_allocation_create(struct tu_wddm_context *context,
                                const struct tu_wddm_allocation_desc *desc,
                                struct tu_wddm_allocation *allocation);
 bool tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation);
-bool tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation,
-                             bool read_only,
-                             void **map);
+/* Turnip records command streams and uploads through every CPU mapping.  GPU
+ * read-only is a submission permission and must not make this KMT lock
+ * read-only to the CPU. */
+bool
+tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation, void **map);
 bool tu_wddm_allocation_unlock(struct tu_wddm_allocation *allocation);
 
 /* Build one bounded Native Context packet in the KMD-provided DMA buffers.

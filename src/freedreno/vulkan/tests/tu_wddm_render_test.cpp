@@ -126,6 +126,8 @@ struct test_fixture {
    unsigned escape_calls;
    uint32_t completed_fence;
    uint32_t returned_context_id;
+   uint32_t expected_reference_flags;
+   uint32_t expected_submit_bo_flags;
    bool lock_returns_null_data;
    bool render_returns_null_replacements;
    bool render_returns_partial_replacements;
@@ -205,9 +207,9 @@ fake_lock(D3DKMT_LOCK *lock)
    CHECK(lock->hAllocation == kAllocationHandle);
    CHECK(lock->NumPages == 0);
    CHECK(lock->pPages == NULL);
-   CHECK(lock->Flags.ReadOnly == 1);
+   CHECK(lock->Flags.ReadOnly == 0);
    CHECK(lock->Flags.LockEntire == 1);
-   CHECK((lock->Flags.Value & ~(UINT32_C(1) | UINT32_C(0x10))) == 0);
+   CHECK((lock->Flags.Value & ~UINT32_C(0x10)) == 0);
    if (!fixture->lock_returns_null_data)
       lock->pData = fixture->allocation_map;
    return kStatusSuccess;
@@ -272,7 +274,7 @@ check_render_packet(const D3DKMT_RENDER *render)
    const VIOGPU_WDDM_ALLOCATION_REFERENCE *reference =
       reinterpret_cast<const VIOGPU_WDDM_ALLOCATION_REFERENCE *>(packet + sizeof(*header));
    CHECK(reference->AllocationIndex == 0);
-   CHECK(reference->Flags == (VIOGPU_WDDM_REFERENCE_READ | VIOGPU_WDDM_REFERENCE_WRITE));
+   CHECK(reference->Flags == fixture->expected_reference_flags);
    CHECK(reference->AllocationOffset == 0);
    CHECK(reference->Length == 4096);
    CHECK(reference->PatchOffset == 44);
@@ -282,11 +284,13 @@ check_render_packet(const D3DKMT_RENDER *render)
    memcpy(&submit, packet + command_offset, sizeof(submit));
    CHECK(submit.request.command == TEST_MSM_CCMD_GEM_SUBMIT);
    CHECK(submit.request.length == sizeof(submit));
+   CHECK(submit.bo.flags == fixture->expected_submit_bo_flags);
    CHECK(submit.bo.handle == 0);
    CHECK(submit.bo.presumed == 0);
 
    CHECK(fixture->context.allocation_list[0].hAllocation == kAllocationHandle);
-   CHECK(fixture->context.allocation_list[0].WriteOperation == 1);
+   CHECK(fixture->context.allocation_list[0].WriteOperation ==
+         ((fixture->expected_reference_flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0));
    CHECK(fixture->context.patch_location_list[0].AllocationIndex == 0);
    CHECK(fixture->context.patch_location_list[0].SlotId == 0);
    CHECK(fixture->context.patch_location_list[0].Reserved == 0);
@@ -455,6 +459,8 @@ init_fixture(test_fixture *fixture)
    fixture->next_allocation_list_size = TU_WDDM_MAX_RENDER_ALLOCATIONS;
    fixture->next_patch_list_size = TU_WDDM_MAX_RENDER_ALLOCATIONS;
    fixture->returned_context_id = kContextId;
+   fixture->expected_reference_flags = VIOGPU_WDDM_REFERENCE_READ | VIOGPU_WDDM_REFERENCE_WRITE;
+   fixture->expected_submit_bo_flags = TEST_MSM_SUBMIT_BO_READ | TEST_MSM_SUBMIT_BO_WRITE;
 
    fixture->device.adapter.runtime = &fixture->runtime;
    fixture->device.adapter.handle = kAdapterHandle;
@@ -546,7 +552,7 @@ test_allocation_and_lock()
       return;
 
    void *map = NULL;
-   CHECK(tu_wddm_allocation_lock(&allocation, true, &map));
+   CHECK(tu_wddm_allocation_lock(&allocation, &map));
    CHECK(map == fixture.allocation_map);
    CHECK(allocation.locked);
    CHECK(fixture.lock_calls == 1);
@@ -554,6 +560,35 @@ test_allocation_and_lock()
    CHECK(!allocation.locked);
    CHECK(allocation.map == NULL);
    CHECK(fixture.unlock_calls == 1);
+}
+
+void
+test_gpu_read_only_allocation_maps_cpu_writable()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   tu_wddm_allocation allocation = {};
+   tu_wddm_allocation_desc desc = native_allocation_desc();
+   desc.flags |= VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY;
+   CHECK(tu_wddm_allocation_create(&fixture.context, &desc, &allocation));
+   CHECK((allocation.private_info.Flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0);
+
+   void *map = NULL;
+   CHECK(tu_wddm_allocation_lock(&allocation, &map));
+   CHECK(map == fixture.allocation_map);
+   static_cast<BYTE *>(map)[0] = 0x5a;
+   CHECK(fixture.allocation_map[0] == 0x5a);
+
+   test_msm_submit_one_bo submit = valid_submit();
+   submit.bo.flags = TEST_MSM_SUBMIT_BO_READ;
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   reference.flags = VIOGPU_WDDM_REFERENCE_READ;
+   fixture.expected_reference_flags = VIOGPU_WDDM_REFERENCE_READ;
+   fixture.expected_submit_bo_flags = TEST_MSM_SUBMIT_BO_READ;
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+
+   CHECK(tu_wddm_allocation_unlock(&allocation));
+   CHECK(tu_wddm_allocation_destroy(&allocation));
 }
 
 void
@@ -632,7 +667,7 @@ test_null_lock_data_is_rolled_back()
       return;
 
    void *map = reinterpret_cast<void *>(UINTPTR_MAX);
-   CHECK(!tu_wddm_allocation_lock(&allocation, true, &map));
+   CHECK(!tu_wddm_allocation_lock(&allocation, &map));
    CHECK(map == NULL);
    CHECK(!allocation.locked);
    CHECK(allocation.map == NULL);
@@ -653,7 +688,7 @@ test_null_lock_data_rollback_retains_owner()
       return;
 
    void *map = reinterpret_cast<void *>(UINTPTR_MAX);
-   CHECK(!tu_wddm_allocation_lock(&allocation, true, &map));
+   CHECK(!tu_wddm_allocation_lock(&allocation, &map));
    CHECK(map == NULL);
    CHECK(allocation.locked);
    CHECK(allocation.map == NULL);
@@ -1030,6 +1065,7 @@ int
 main()
 {
    test_allocation_and_lock();
+   test_gpu_read_only_allocation_maps_cpu_writable();
    test_allocation_range_rejected();
    test_failed_allocation_creation_compensates();
    test_failed_allocation_rollback_retains_owner();

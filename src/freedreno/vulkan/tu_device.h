@@ -507,6 +507,10 @@ struct tu_device
 #ifdef TU_HAS_WDDM
    struct tu_wddm_device wddm_device;
    struct tu_wddm_context wddm_context;
+   /* Serializes WDDM residency snapshots and BO destruction.  This must stay
+    * distinct from submit_mutex because generic queue preparation can release
+    * BOs while already holding submit_mutex. */
+   mtx_t wddm_mutex;
    struct tu_bo **wddm_bos;
    uint32_t wddm_bo_count;
    uint32_t wddm_bo_capacity;
