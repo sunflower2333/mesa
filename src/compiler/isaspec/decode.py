@@ -188,17 +188,20 @@ ${expr.get_c_name()}(struct decode_scope *scope)
 
 /* forward-declarations of bitset decode functions */
 %for name, bitset in isa.all_bitsets():
-%   for df in s.decode_fields(bitset):
+<%  decode_fields = list(s.decode_fields(bitset)) %>
+%   for df in decode_fields:
 static void decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_${df.get_c_name()}(void *out, struct decode_scope *scope, uint64_t val);
 %   endfor
+%   if decode_fields:
 static const struct isa_field_decode decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_fields[] = {
-%   for df in s.decode_fields(bitset):
+%   for df in decode_fields:
     {
         .name = "${df.name}",
         .decode = decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_${df.get_c_name()},
     },
 %   endfor
 };
+%   endif
 static void decode_${bitset.get_c_name()}_gen_${bitset.gen_min}(void *out, struct decode_scope *scope);
 %endfor
 
@@ -220,6 +223,7 @@ static const struct isa_bitset *${root.get_c_name()}[];
  */
 
 %for name, bitset in isa.all_bitsets():
+<%  decode_fields = list(s.decode_fields(bitset)) %>
 %   for case in bitset.cases:
 %      for field_name, field in case.fields.items():
 %         if field.get_c_typename() == 'TYPE_BITSET':
@@ -288,8 +292,12 @@ static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_mi
        .dontcare.bitset = { ${', '.join(isa.split_bits(pattern.dontcare, 32))} },
        .mask.bitset     = { ${', '.join(isa.split_bits(pattern.mask, 32))} },
        .decode = decode_${bitset.get_c_name()}_gen_${bitset.gen_min},
+%   if decode_fields:
        .num_decode_fields = ARRAY_SIZE(decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_fields),
        .decode_fields = decode_${bitset.get_c_name()}_gen_${bitset.gen_min}_fields,
+%   else:
+       .num_decode_fields = 0,
+%   endif
        .num_cases = ${len(bitset.cases)},
        .cases    = {
 %   for case in bitset.cases:
