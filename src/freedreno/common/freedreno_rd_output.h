@@ -10,6 +10,13 @@
 #include <stdint.h>
 #include <zlib.h>
 
+#ifdef _MSC_VER
+#include <stdlib.h>
+#ifndef PATH_MAX
+#define PATH_MAX _MAX_PATH
+#endif
+#endif
+
 #include "redump.h"
 #include "util/u_dynarray.h"
 
