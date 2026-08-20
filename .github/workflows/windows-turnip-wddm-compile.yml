@@ -28,7 +28,7 @@ permissions:
 jobs:
   compile:
     name: ${{ matrix.arch }} SDK/WDK compile
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     strategy:
       fail-fast: false
       matrix:
@@ -102,7 +102,7 @@ jobs:
 
   full-target:
     name: ${{ matrix.arch }} full Turnip WDDM link
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     strategy:
       fail-fast: false
       matrix:
@@ -137,24 +137,32 @@ jobs:
       - name: Install Windows flex and bison
         shell: pwsh
         run: |
-          $toolDir = Join-Path $env:RUNNER_TEMP "winflexbison-2.5.24"
-          $archive = Join-Path $env:RUNNER_TEMP "win_flex_bison-2.5.24.zip"
-          $url = "https://github.com/lexxmark/winflexbison/releases/download/v2.5.24/win_flex_bison-2.5.24.zip"
-          $expectedSha256 = "39c6086ce211d5415500acc5ed2d8939861ca1696aee48909c7f6daf5122b505"
-          Invoke-WebRequest -Uri $url -OutFile $archive
-          $actualSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualSha256 -ne $expectedSha256) {
-            throw "WinFlexBison archive SHA256 mismatch: $actualSha256"
+          $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+          $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
+          if ($null -eq $flex -or $null -eq $bison) {
+            winget install --silent --accept-source-agreements --accept-package-agreements `
+              --source winget --exact --id WinFlexBison.win_flex_bison --version 2.5.24
+            if ($LASTEXITCODE -ne 0) {
+              throw "WinFlexBison installation failed with exit code $LASTEXITCODE"
+            }
+            $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $env:Path = "$machinePath;$userPath;$env:Path"
+            $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+            $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
           }
-          Expand-Archive -LiteralPath $archive -DestinationPath $toolDir -Force
-          if (-not (Test-Path (Join-Path $toolDir "win_flex.exe")) -or
-              -not (Test-Path (Join-Path $toolDir "win_bison.exe"))) {
-            throw "WinFlexBison archive did not contain the expected binaries"
+          if ($null -eq $flex -or $null -eq $bison) {
+            throw "WinFlexBison binaries were not found after installation"
           }
-          $env:Path = "$toolDir;$env:Path"
-          Add-Content -Path $env:GITHUB_PATH -Value $toolDir
-          Write-Host "win_flex -> $(Join-Path $toolDir 'win_flex.exe')"
-          Write-Host "win_bison -> $(Join-Path $toolDir 'win_bison.exe')"
+          $flexItem = Get-Item -LiteralPath $flex.Path -Force
+          $flexBin = Split-Path -Parent $flex.Path
+          if ($flexItem.Target) {
+            $flexBin = Split-Path -Parent ([string]$flexItem.Target)
+          }
+          $env:Path = "$flexBin;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $flexBin
+          Write-Host "win_flex -> $($flex.Path)"
+          Write-Host "win_bison -> $($bison.Path)"
 
       - name: Locate shader compiler
         shell: pwsh
