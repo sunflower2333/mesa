@@ -17,6 +17,7 @@ on:
       - "src/freedreno/vulkan/tests/tu_wddm_abi_expected.txt"
       - "src/freedreno/vulkan/tests/tu_wddm_render_test.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_transport_compile.cpp"
+      - "src/freedreno/tests/**"
       - "src/freedreno/vulkan/**"
       - "meson.build"
       - "meson.options"
@@ -214,27 +215,53 @@ jobs:
           $installDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-install-${{ matrix.arch }}"
           if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
           if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
-          meson setup $buildDir . `
-            --backend=ninja `
-            --buildtype=release `
-            -Dplatforms=windows `
-            -Dvulkan-drivers=freedreno `
-            -Dfreedreno-kmds=wddm `
-            '-Dgallium-drivers=[]' `
-            -Dopengl=false `
-            -Dgles1=disabled `
-            -Dgles2=disabled `
-            -Degl=disabled `
-            -Dglx=disabled `
-            -Dgbm=disabled `
-            -Dllvm=disabled `
-            -Dshader-cache=disabled `
-            -Dzlib=disabled `
-            -Dzstd=disabled `
-            '-Dtools=[]' `
-            -Dbuild-tests=false `
-            -Dwerror=false `
+          $mesonOptions = @(
+            '--backend=ninja',
+            '--buildtype=release',
+            '-Dplatforms=windows',
+            '-Dvulkan-drivers=freedreno',
+            '-Dfreedreno-kmds=wddm',
+            '-Dgallium-drivers=[]',
+            '-Dopengl=false',
+            '-Dgles1=disabled',
+            '-Dgles2=disabled',
+            '-Degl=disabled',
+            '-Dglx=disabled',
+            '-Dgbm=disabled',
+            '-Dllvm=disabled',
+            '-Dshader-cache=disabled',
+            '-Dzlib=disabled',
+            '-Dzstd=disabled',
+            '-Dtools=[]',
+            '-Dbuild-tests=false',
+            '-Dwerror=false',
             "-Dprefix=$installDir"
+          )
+          $setupArgs = @('setup', $buildDir, '.')
+          if ('${{ matrix.arch }}' -eq 'arm64') {
+            # Meson must not execute ARM64 sanity binaries on the x64 runner.
+            $crossFile = Join-Path $env:RUNNER_TEMP 'mesa-turnip-wddm-arm64-cross.ini'
+            $crossFileLines = @(
+              '[binaries]'
+              "c = 'cl'"
+              "cpp = 'cl'"
+              "ar = 'lib'"
+              ''
+              '[host_machine]'
+              "system = 'windows'"
+              "cpu_family = 'aarch64'"
+              "cpu = 'arm64'"
+              "endian = 'little'"
+              ''
+              '[properties]'
+              'needs_exe_wrapper = true'
+            )
+            Set-Content -LiteralPath $crossFile -Value $crossFileLines -Encoding ascii
+            $setupArgs += @('--cross-file', $crossFile)
+          }
+          $setupArgs += $mesonOptions
+          & meson @setupArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Compile and link full Turnip target
         shell: pwsh
