@@ -109,28 +109,6 @@ static_assert(tu_wddm_fence_distance(4096, 0) == 4096,
 static_assert(tu_wddm_fence_distance(1, UINT32_MAX) == 1,
               "WDDM wrapped fence distance changed");
 
-static bool
-tu_wddm_pending_fence_count(uint32_t submitted, uint32_t completed,
-                            uint32_t *pending)
-{
-   if (pending == NULL)
-      return false;
-   *pending = 0;
-
-   if (submitted == 0)
-      return completed == 0;
-   if (submitted == completed)
-      return true;
-   if (completed != 0 && !tu_wddm_fence_after(submitted, completed))
-      return false;
-
-   const uint64_t distance = tu_wddm_fence_distance(submitted, completed);
-   if (distance > UINT32_MAX)
-      return false;
-   *pending = static_cast<uint32_t>(distance);
-   return true;
-}
-
 static void
 tu_wddm_init_header(VIOGPU_WDDM_ABI_HEADER *header, uint32_t size)
 {
@@ -2143,6 +2121,28 @@ tu_wddm_sync_set_submit_fence(struct vk_sync *base,
       return false;
    tu_wddm_sync_state_set(sync,
                           signal_now ? TU_WDDM_SYNC_SIGNALED : fence);
+   return true;
+}
+
+static bool
+tu_wddm_pending_fence_count(uint32_t submitted, uint32_t completed,
+                            uint32_t *pending)
+{
+   if (pending == NULL)
+      return false;
+   *pending = 0;
+
+   if (submitted == 0)
+      return completed == 0;
+   if (submitted == completed)
+      return true;
+   if (completed != 0 && !tu_wddm_fence_after(submitted, completed))
+      return false;
+
+   const uint64_t distance = tu_wddm_fence_distance(submitted, completed);
+   if (distance > UINT32_MAX)
+      return false;
+   *pending = static_cast<uint32_t>(distance);
    return true;
 }
 
