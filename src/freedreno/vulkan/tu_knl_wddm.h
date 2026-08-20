@@ -78,7 +78,7 @@ struct tu_instance;
  * smaller than the WDDM wire fields so arithmetic stays bounded before a
  * D3DKMT call is made. */
 enum {
-   TU_WDDM_MAX_RENDER_ALLOCATIONS = 64,
+   TU_WDDM_MAX_RENDER_ALLOCATIONS = 128,
    TU_WDDM_MAX_RENDER_COMMAND_SIZE = 64 * 1024,
 };
 

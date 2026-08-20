@@ -111,6 +111,8 @@ struct test_fixture {
    NTSTATUS render_status;
    NTSTATUS escape_status;
    NTSTATUS create_allocation_status;
+   NTSTATUS destroy_allocation_status;
+   NTSTATUS unlock_status;
    D3DKMT_HANDLE next_allocation_handle;
    uint32_t expected_allocation_count;
    uint32_t next_command_buffer_size;
@@ -186,7 +188,7 @@ fake_destroy_allocation(const D3DKMT_DESTROYALLOCATION *destroy)
    CHECK(destroy->phAllocationList != NULL);
    if (destroy->AllocationCount == 1 && destroy->phAllocationList != NULL)
       CHECK(destroy->phAllocationList[0] == kAllocationHandle);
-   return kStatusSuccess;
+   return fixture->destroy_allocation_status;
 }
 
 NTSTATUS APIENTRY
@@ -226,7 +228,7 @@ fake_unlock(const D3DKMT_UNLOCK *unlock)
    CHECK(unlock->phAllocations != NULL);
    if (unlock->NumAllocations == 1 && unlock->phAllocations != NULL)
       CHECK(unlock->phAllocations[0] == kAllocationHandle);
-   return kStatusSuccess;
+   return fixture->unlock_status;
 }
 
 void
@@ -445,6 +447,8 @@ init_fixture(test_fixture *fixture)
    fixture->render_status = kStatusSuccess;
    fixture->escape_status = kStatusSuccess;
    fixture->create_allocation_status = kStatusSuccess;
+   fixture->destroy_allocation_status = kStatusSuccess;
+   fixture->unlock_status = kStatusSuccess;
    fixture->next_allocation_handle = kAllocationHandle;
    fixture->expected_allocation_count = 1;
    fixture->next_command_buffer_size = sizeof(fixture->next_command_buffer);
@@ -592,6 +596,31 @@ test_failed_allocation_creation_compensates()
 }
 
 void
+test_failed_allocation_rollback_retains_owner()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.create_allocation_status = kStatusInvalidParameter;
+   fixture.destroy_allocation_status = kStatusInvalidParameter;
+
+   tu_wddm_allocation allocation = {};
+   tu_wddm_allocation_desc desc = native_allocation_desc();
+   CHECK(!tu_wddm_allocation_create(&fixture.context, &desc, &allocation));
+   CHECK(fixture.create_calls == 1);
+   CHECK(fixture.destroy_allocation_calls == 1);
+   CHECK(allocation.handle == kAllocationHandle);
+   CHECK(allocation.context == &fixture.context);
+   CHECK(allocation.private_info.RequestedIova == kVaStart);
+   CHECK(allocation.vma_size == 4096);
+
+   fixture.destroy_allocation_status = kStatusSuccess;
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(fixture.destroy_allocation_calls == 2);
+   CHECK(allocation.handle == 0);
+   CHECK(allocation.context == NULL);
+}
+
+void
 test_null_lock_data_is_rolled_back()
 {
    test_fixture fixture;
@@ -609,6 +638,32 @@ test_null_lock_data_is_rolled_back()
    CHECK(allocation.map == NULL);
    CHECK(fixture.lock_calls == 1);
    CHECK(fixture.unlock_calls == 1);
+}
+
+void
+test_null_lock_data_rollback_retains_owner()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.lock_returns_null_data = true;
+   fixture.unlock_status = kStatusInvalidParameter;
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   void *map = reinterpret_cast<void *>(UINTPTR_MAX);
+   CHECK(!tu_wddm_allocation_lock(&allocation, true, &map));
+   CHECK(map == NULL);
+   CHECK(allocation.locked);
+   CHECK(allocation.map == NULL);
+   CHECK(fixture.lock_calls == 1);
+   CHECK(fixture.unlock_calls == 1);
+
+   fixture.unlock_status = kStatusSuccess;
+   CHECK(tu_wddm_allocation_unlock(&allocation));
+   CHECK(!allocation.locked);
+   CHECK(fixture.unlock_calls == 2);
 }
 
 void
@@ -656,14 +711,35 @@ test_submission_retirement_snapshot()
 
    submit.request.sequence = 8;
    submit.request.fence = 8;
-   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
-                                &reference, 1));
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                 &reference, 1));
+   CHECK(fixture.render_calls == 1);
    CHECK(fixture.context.last_submitted_fence == 9);
 
    fixture.completed_fence = 8;
    CHECK(!tu_wddm_context_wait_submissions(&fixture.context, 0));
    fixture.completed_fence = 9;
    CHECK(tu_wddm_context_wait_submissions(&fixture.context, 0));
+}
+
+void
+test_duplicate_fence_rejected_before_render()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                &reference, 1));
+   CHECK(fixture.render_calls == 1);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                 &reference, 1));
+   CHECK(fixture.render_calls == 1);
+   CHECK(fixture.context.last_submitted_fence == submit.request.fence);
 }
 
 void
@@ -956,9 +1032,12 @@ main()
    test_allocation_and_lock();
    test_allocation_range_rejected();
    test_failed_allocation_creation_compensates();
+   test_failed_allocation_rollback_retains_owner();
    test_null_lock_data_is_rolled_back();
+   test_null_lock_data_rollback_retains_owner();
    test_valid_render();
    test_submission_retirement_snapshot();
+   test_duplicate_fence_rejected_before_render();
    test_context_render_fence_wrap();
    test_valid_two_bo_render();
    test_malformed_render_rejected();

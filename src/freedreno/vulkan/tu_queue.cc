@@ -499,9 +499,9 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       submit_add_entries(device, submit, &dump_cmds, cs->entries,
                          cs->entry_count);
 
-      /* Command streams retain references to descriptor, image, and scratch
-       * BOs in these arrays.  Some backends already maintain a kernel-global
-       * BO table; WDDM needs the explicit access set for its allocation list. */
+      /* These arrays own the command-stream backing BOs.  Backends which need
+       * resource residency beyond the IBs must add their complete dependency
+       * set before submitting the kernel request. */
       tu_submit_add_bos(device, submit, cs->read_only.bos,
                         cs->read_only.bo_count, TU_SUBMIT_BO_ACCESS_READ);
       tu_submit_add_bos(device, submit, cs->read_write.bos,

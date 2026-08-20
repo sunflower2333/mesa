@@ -512,6 +512,7 @@ struct tu_device
    uint32_t wddm_bo_capacity;
    uint32_t wddm_next_handle;
    uint32_t wddm_next_fence;
+   uint32_t wddm_pending_submission_upper_bound;
    bool wddm_initialized;
 #endif
 
