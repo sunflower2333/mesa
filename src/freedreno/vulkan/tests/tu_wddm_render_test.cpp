@@ -13,6 +13,7 @@ namespace {
 
 constexpr uint64_t kResetGeneration = 7;
 constexpr uint32_t kContextId = 11;
+constexpr uint32_t kSubmitQueueId = 17;
 constexpr uint64_t kVaStart = UINT64_C(0x100000000);
 constexpr uint64_t kVaSize = UINT64_C(0x01000000);
 constexpr D3DKMT_HANDLE kDeviceHandle = 2;
@@ -368,6 +369,7 @@ init_fixture(test_fixture *fixture)
    fixture->context.info.VaSize = kVaSize;
    fixture->context.info.ResetGeneration = kResetGeneration;
    fixture->context.info.ContextId = kContextId;
+   fixture->context.info.SubmitQueueId = kSubmitQueueId;
 }
 
 tu_wddm_allocation_desc
@@ -389,7 +391,7 @@ valid_submit()
    submit.request.length = sizeof(submit);
    submit.request.sequence = 1;
    submit.request.flags = TEST_MSM_PIPE_3D0 | TEST_MSM_SUBMIT_NO_IMPLICIT;
-   submit.request.queue_id = 1;
+   submit.request.queue_id = kSubmitQueueId;
    submit.request.bo_count = 1;
    submit.request.command_count = 1;
    submit.request.fence = 1;
@@ -573,6 +575,23 @@ test_malformed_render_rejected()
 }
 
 void
+test_queue_id_mismatch_rejected()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   submit.request.queue_id++;
+   CHECK(submit.request.queue_id != fixture.context.info.SubmitQueueId);
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(fixture.render_calls == 0);
+}
+
+void
 test_failed_render_rotates_buffers()
 {
    test_fixture fixture;
@@ -590,11 +609,11 @@ test_failed_render_rotates_buffers()
    CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
    CHECK(fixture.render_calls == 1);
    CHECK(fixture.context.command_buffer == fixture.next_command_buffer);
-   CHECK(fixture.context.command_buffer_size == fixture.next_command_buffer_size);
+   CHECK(fixture.context.command_buffer_size == sizeof(fixture.command_buffer));
    CHECK(fixture.context.allocation_list == fixture.next_allocation_list);
-   CHECK(fixture.context.allocation_list_size == fixture.next_allocation_list_size);
+   CHECK(fixture.context.allocation_list_size == TU_WDDM_MAX_RENDER_ALLOCATIONS);
    CHECK(fixture.context.patch_location_list == fixture.next_patch_list);
-   CHECK(fixture.context.patch_location_list_size == fixture.next_patch_list_size);
+   CHECK(fixture.context.patch_location_list_size == TU_WDDM_MAX_RENDER_ALLOCATIONS);
 }
 
 } /* namespace */
@@ -620,6 +639,7 @@ main()
    test_valid_render();
    test_valid_two_bo_render();
    test_malformed_render_rejected();
+   test_queue_id_mismatch_rejected();
    test_failed_render_rotates_buffers();
    current_fixture = NULL;
 

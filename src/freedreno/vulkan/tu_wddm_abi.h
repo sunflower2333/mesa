@@ -112,6 +112,7 @@ typedef struct VIOGPU_WDDM_CONTEXT_INFO {
    VIOGPU_WDDM_UINT64 VaSize;
    VIOGPU_WDDM_UINT64 ResetGeneration;
    VIOGPU_WDDM_UINT32 ContextId;
+   VIOGPU_WDDM_UINT32 SubmitQueueId;
 } VIOGPU_WDDM_CONTEXT_INFO;
 
 typedef struct VIOGPU_WDDM_RENDER_COMMAND {
@@ -144,7 +145,7 @@ static_assert(sizeof(VIOGPU_WDDM_ABI_HEADER) == 16, "WDDM ABI header layout chan
 static_assert(sizeof(VIOGPU_WDDM_ADAPTER_INFO) == 128, "WDDM adapter ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_ALLOCATION_INFO) == 80, "WDDM allocation ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_CONTEXT_CREATE) == 32, "WDDM context-create ABI layout changed");
-static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 60, "WDDM context-info ABI layout changed");
+static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 64, "WDDM context-info ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) == 64, "WDDM render ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) == 32, "WDDM reference ABI layout changed");
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, VaStart) == 32, "WDDM context VA offset changed");
@@ -153,6 +154,7 @@ static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, ResetGeneration) == 48,
               "WDDM context generation offset changed");
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, ContextId) == 56,
               "WDDM context id offset changed");
+static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, SubmitQueueId) == 60, "WDDM submit queue id offset changed");
 #endif
 
 #endif /* TU_WDDM_ABI_H */

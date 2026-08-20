@@ -112,14 +112,11 @@ tu_wddm_validate_context_info(const VIOGPU_WDDM_CONTEXT_INFO *info,
                               uint64_t expected_reset_generation)
 {
    if (info == NULL || expected_reset_generation == 0 ||
-       !tu_wddm_header_is_current(&info->Header,
-                                  tu_wddm_sizeof<VIOGPU_WDDM_CONTEXT_INFO>()) ||
-       info->Opcode != VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO ||
-       info->Flags != VIOGPU_WDDM_ESCAPE_FLAGS_NONE ||
-       info->ExpectedResetGeneration != expected_reset_generation || info->VaStart == 0 ||
-       info->VaSize == 0 || info->ResetGeneration != expected_reset_generation ||
-       info->ContextId == 0 || (info->VaStart & 4095) != 0 || (info->VaSize & 4095) != 0 ||
-       info->VaSize > UINT64_MAX - info->VaStart)
+       !tu_wddm_header_is_current(&info->Header, tu_wddm_sizeof<VIOGPU_WDDM_CONTEXT_INFO>()) ||
+       info->Opcode != VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO || info->Flags != VIOGPU_WDDM_ESCAPE_FLAGS_NONE ||
+       info->ExpectedResetGeneration != expected_reset_generation || info->VaStart == 0 || info->VaSize == 0 ||
+       info->ResetGeneration != expected_reset_generation || info->ContextId == 0 || info->SubmitQueueId == 0 ||
+       (info->VaStart & 4095) != 0 || (info->VaSize & 4095) != 0 || info->VaSize > UINT64_MAX - info->VaStart)
       return false;
 
    return true;
@@ -643,7 +640,8 @@ static bool
 tu_wddm_native_submit_valid(const void *command_stream,
                             uint32_t command_stream_size,
                             const struct tu_wddm_render_reference *references,
-                            uint32_t reference_count)
+                            uint32_t reference_count,
+                            uint32_t submit_queue_id)
 {
    if (command_stream == NULL || references == NULL || command_stream_size < sizeof(tu_wddm_msm_submit_request) ||
        (command_stream_size & (sizeof(uint32_t) - 1)) != 0)
@@ -657,8 +655,8 @@ tu_wddm_native_submit_valid(const void *command_stream,
    if (request.command != TU_WDDM_MSM_CCMD_GEM_SUBMIT || request.length != command_stream_size ||
        request.sequence == 0 || request.response_offset != 0 || request.flags == 0 ||
        (request.flags & ~valid_submit_flags) != 0 || (request.flags & TU_WDDM_MSM_PIPE_3D0) != TU_WDDM_MSM_PIPE_3D0 ||
-       request.queue_id == 0 || request.fence == 0 || request.bo_count != reference_count || request.bo_count == 0 ||
-       request.command_count == 0)
+       request.queue_id != submit_queue_id || request.fence == 0 || request.bo_count != reference_count ||
+       request.bo_count == 0 || request.command_count == 0)
       return false;
 
    const uint64_t bo_bytes = static_cast<uint64_t>(request.bo_count) * sizeof(tu_wddm_msm_submit_bo);
@@ -749,7 +747,8 @@ tu_wddm_context_render(struct tu_wddm_context *context,
       }
    }
 
-   if (!tu_wddm_native_submit_valid(command_stream, command_stream_size, references, reference_count))
+   if (!tu_wddm_native_submit_valid(command_stream, command_stream_size, references, reference_count,
+                                    context->info.SubmitQueueId))
       return false;
 
    BYTE *packet = static_cast<BYTE *>(context->command_buffer);
@@ -803,11 +802,13 @@ tu_wddm_context_render(struct tu_wddm_context *context,
 
    NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
    context->command_buffer = render.pNewCommandBuffer;
-   context->command_buffer_size = render.NewCommandBufferSize;
    context->allocation_list = render.pNewAllocationList;
-   context->allocation_list_size = render.NewAllocationListSize;
    context->patch_location_list = render.pNewPatchLocationList;
-   context->patch_location_list_size = render.NewPatchLocationListSize;
+   if (NT_SUCCESS(status)) {
+      context->command_buffer_size = render.NewCommandBufferSize;
+      context->allocation_list_size = render.NewAllocationListSize;
+      context->patch_location_list_size = render.NewPatchLocationListSize;
+   }
 
    return NT_SUCCESS(status) && context->command_buffer != NULL && context->allocation_list != NULL &&
           context->patch_location_list != NULL && context->command_buffer_size != 0 &&

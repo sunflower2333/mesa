@@ -9,7 +9,7 @@
 #include "../tu_knl_wddm.h"
 
 static_assert(sizeof(VIOGPU_WDDM_ADAPTER_INFO) == 128, "private ABI drift");
-static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 60, "private ABI drift");
+static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 64, "private ABI drift");
 static_assert(TU_WDDM_MAX_RENDER_ALLOCATIONS == 64, "KMD allocation limit drift");
 static_assert(TU_WDDM_MAX_RENDER_COMMAND_SIZE == 64 * 1024, "KMD command limit drift");
 

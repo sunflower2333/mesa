@@ -34,7 +34,7 @@ main()
    assert(adapter.Header.Magic == 0x504D5644U);
    assert(sizeof(adapter) == 128);
    assert(sizeof(VIOGPU_WDDM_ALLOCATION_INFO) == 80);
-   assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 60);
+   assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 64);
    assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) == 64);
    assert(sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) == 32);
 
