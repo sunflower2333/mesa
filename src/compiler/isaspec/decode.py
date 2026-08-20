@@ -43,6 +43,14 @@ class State(object):
     def case_name(self, bitset, name):
         return bitset.encode.case_prefix + name.upper().replace('.', '_').replace('-', '_').replace('#', '')
 
+    def root_leafs(self, root):
+        return [
+            leaf
+            for leafs in self.isa.leafs.values()
+            for leaf in leafs
+            if leaf.get_root() == root
+        ]
+
     # Return a list of all <map> entries for a leaf bitset, with the child
     # bitset overriding the parent bitset's entries. Because we can't resolve
     # which <map>s are used until we resolve which overload is used, we
@@ -215,7 +223,8 @@ static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_mi
 %endfor
 
 %for root_name, root in isa.roots.items():
-static const struct isa_bitset *${root.get_c_name()}[];
+<%  root_leafs = s.root_leafs(root) %>
+static const struct isa_bitset *${root.get_c_name()}[${len(root_leafs) + 1}];
 %endfor
 
 /*
@@ -248,6 +257,7 @@ static const struct isa_case ${case.get_c_name()}_gen_${bitset.gen_min} = {
        .display  = "${case.display}",
 %   endif
        .num_fields = ${len(case.fields)},
+%   if case.fields:
        .fields   = {
 %   for field_name, field in case.fields.items():
           { .name = "${field_name}", .low = ${field.low}, .high = ${field.high},
@@ -276,6 +286,7 @@ static const struct isa_case ${case.get_c_name()}_gen_${bitset.gen_min} = {
           },
 %   endfor
        },
+%   endif
 };
 %   endfor
 static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_min} = {
@@ -312,13 +323,10 @@ static const struct isa_bitset bitset_${bitset.get_c_name()}_gen_${bitset.gen_mi
  */
 
 %for root_name, root in isa.roots.items():
-static const struct isa_bitset *${root.get_c_name()}[] = {
-%   for leaf_name, leafs in isa.leafs.items():
-%      for leaf in leafs:
-%         if leaf.get_root() == root:
+<%  root_leafs = s.root_leafs(root) %>
+static const struct isa_bitset *${root.get_c_name()}[${len(root_leafs) + 1}] = {
+%   for leaf in root_leafs:
              &bitset_${leaf.get_c_name()}_gen_${leaf.gen_min},
-%         endif
-%      endfor
 %   endfor
     (void *)0
 };
