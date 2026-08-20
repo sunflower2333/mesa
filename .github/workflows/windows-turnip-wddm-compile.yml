@@ -267,7 +267,7 @@ jobs:
         shell: pwsh
         run: |
           $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-${{ matrix.arch }}"
-          meson compile -C $buildDir vulkan_freedreno
+          meson compile -C $buildDir --ninja-args=-k0 vulkan_freedreno
           $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "vulkan_freedreno.dll" |
             Select-Object -First 1
           if ($null -eq $library) {
