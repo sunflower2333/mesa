@@ -163,11 +163,18 @@ jobs:
           if ($null -eq $candidate) {
             throw "glslangValidator.exe is required to generate the Turnip shader headers"
           }
-          $shaderBin = Split-Path -Parent $candidate.Source
-          if ([string]::IsNullOrEmpty($shaderBin)) {
-            $shaderBin = Split-Path -Parent $candidate.FullName
+          # Get-Command returns a CommandInfo while Get-ChildItem returns a
+          # FileInfo.  FileInfo.Source is unset on hosted runners, so always
+          # resolve the executable path before asking for its parent.
+          $shaderPath = $candidate.FullName
+          if ([string]::IsNullOrEmpty($shaderPath)) {
+            $shaderPath = $candidate.Source
           }
-          Write-Host "glslangValidator -> $($candidate.FullName)"
+          if ([string]::IsNullOrEmpty($shaderPath)) {
+            throw "glslangValidator path could not be resolved"
+          }
+          $shaderBin = Split-Path -Parent $shaderPath
+          Write-Host "glslangValidator -> $shaderPath"
           Add-Content -Path $env:GITHUB_PATH -Value $shaderBin
 
       - name: Configure full Turnip target
