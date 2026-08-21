@@ -11,6 +11,7 @@
 #endif
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <dxgi1_2.h>
@@ -138,6 +139,12 @@ bool tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
 
 bool tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info);
 bool tu_wddm_submitqueue_priority_is_supported(int priority);
+/* Publish the byte-exact DXGI adapter identity expected by Vulkan loader
+ * interface v7.  This backend exposes one WDDM node, ordinal zero. */
+bool tu_wddm_get_device_id_properties(const struct tu_wddm_adapter_info *identity,
+                                      void *device_luid,
+                                      size_t device_luid_size,
+                                      uint32_t *device_node_mask);
 /* Select the fixed VidMm guest-pool heap exposed by DXGI.  Both inputs must
  * be non-zero 4 KiB quantities; the address-space window caps the pool. */
 bool tu_wddm_select_heap_size(uint64_t dedicated_video_memory,

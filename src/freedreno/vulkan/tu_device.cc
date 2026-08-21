@@ -976,6 +976,15 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
    memset(p->deviceLUID, 0, VK_LUID_SIZE);
    p->deviceNodeMask = 0;
    p->deviceLUIDValid = false;
+#ifdef TU_HAS_WDDM
+   if (is_wddm(pdevice->instance)) {
+      static_assert(sizeof(pdevice->wddm_adapter.luid) == VK_LUID_SIZE,
+                    "DXGI and Vulkan LUID sizes differ");
+      p->deviceLUIDValid = tu_wddm_get_device_id_properties(
+         &pdevice->wddm_adapter, p->deviceLUID, sizeof(p->deviceLUID),
+         &p->deviceNodeMask);
+   }
+#endif
 
    p->subgroupSize =
       pdevice->expose_double_threadsize ? pdevice->info->threadsize_base * 2 : pdevice->info->threadsize_base;

@@ -130,6 +130,30 @@ test_priority_contract()
 }
 
 void
+test_device_luid_contract()
+{
+   tu_wddm_adapter_info identity = {};
+   identity.luid.LowPart = UINT32_C(0x89abcdef);
+   identity.luid.HighPart = INT32_C(0x12345678);
+
+   uint8_t device_luid[sizeof(LUID)] = {};
+   uint32_t device_node_mask = 0;
+   CHECK(tu_wddm_get_device_id_properties(
+      &identity, device_luid, sizeof(device_luid), &device_node_mask));
+   CHECK(memcmp(device_luid, &identity.luid, sizeof(device_luid)) == 0);
+   CHECK(device_node_mask == 1);
+
+   CHECK(!tu_wddm_get_device_id_properties(
+      NULL, device_luid, sizeof(device_luid), &device_node_mask));
+   CHECK(!tu_wddm_get_device_id_properties(
+      &identity, NULL, sizeof(device_luid), &device_node_mask));
+   CHECK(!tu_wddm_get_device_id_properties(
+      &identity, device_luid, sizeof(device_luid) - 1, &device_node_mask));
+   CHECK(!tu_wddm_get_device_id_properties(
+      &identity, device_luid, sizeof(device_luid), NULL));
+}
+
+void
 test_heap_size_contract()
 {
    uint64_t heap_size = UINT64_MAX;
@@ -1498,6 +1522,7 @@ int
 main()
 {
    test_priority_contract();
+   test_device_luid_contract();
    test_heap_size_contract();
    test_context_buffer_contract_and_failed_destroy_retention();
    test_context_info_failure_cleanup_retry();

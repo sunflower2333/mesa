@@ -132,6 +132,21 @@ tu_wddm_submitqueue_priority_is_supported(int priority)
    return priority == 0;
 }
 
+bool
+tu_wddm_get_device_id_properties(const struct tu_wddm_adapter_info *identity,
+                                 void *device_luid,
+                                 size_t device_luid_size,
+                                 uint32_t *device_node_mask)
+{
+   if (identity == NULL || device_luid == NULL ||
+       device_luid_size != sizeof(identity->luid) || device_node_mask == NULL)
+      return false;
+
+   memcpy(device_luid, &identity->luid, sizeof(identity->luid));
+   *device_node_mask = 1;
+   return true;
+}
+
 static inline bool
 tu_wddm_page_aligned_nonzero(uint64_t size)
 {
