@@ -3398,6 +3398,17 @@ fail_queues:
    tu_perfetto_destroy_state(&device->perfetto);
 #endif
    tu_drm_device_finish(device);
+#ifdef TU_HAS_WDDM
+   if (is_wddm(physical_device->instance) &&
+       device->wddm_teardown_failed) {
+      /* Later initialization can fail after WDDM BOs and queues exist.  Keep
+       * the VMA, sparse-array, mutex, and outer-device owners when their final
+       * KMT teardown cannot complete; the failed VkDevice was never published
+       * and is retained until process termination. */
+      mesa_loge("retaining failed WDDM late initialization owner graph");
+      return result;
+   }
+#endif
    if (physical_device->has_set_iova)
       util_vma_heap_finish(&device->vma);
    tu_device_destroy_mutexes(device);
