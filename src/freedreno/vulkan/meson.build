@@ -207,6 +207,7 @@ endif
 libvulkan_freedreno = shared_library(
   'vulkan_freedreno',
   [libtu_files, tu_drirc, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h, bvh_spv],
+  vs_module_defs : vulkan_api_def,
   include_directories : libtu_includes,
   link_with : [
     libfreedreno_ir3,
