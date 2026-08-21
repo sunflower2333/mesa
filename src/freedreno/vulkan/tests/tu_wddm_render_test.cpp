@@ -170,6 +170,8 @@ struct test_fixture {
    NTSTATUS escape_status;
    NTSTATUS create_allocation_status;
    NTSTATUS destroy_allocation_status;
+   NTSTATUS create_context_status;
+   NTSTATUS destroy_context_status;
    NTSTATUS unlock_status;
    D3DKMT_HANDLE next_allocation_handle;
    uint32_t expected_allocation_count;
@@ -178,6 +180,8 @@ struct test_fixture {
    uint32_t next_patch_list_size;
    unsigned create_calls;
    unsigned destroy_allocation_calls;
+   unsigned create_context_calls;
+   unsigned destroy_context_calls;
    unsigned lock_calls;
    unsigned unlock_calls;
    unsigned render_calls;
@@ -191,6 +195,7 @@ struct test_fixture {
    bool render_returns_partial_replacements;
    bool render_returns_oversized_replacements;
    bool render_leaves_replacements_untouched;
+   bool context_returns_invalid_buffers;
 };
 
 test_fixture *current_fixture;
@@ -231,6 +236,54 @@ fake_create_allocation(D3DKMT_CREATEALLOCATION *create)
    memcpy(&fixture->created_private_info, allocation_info->pPrivateDriverData, sizeof(fixture->created_private_info));
    allocation_info->hAllocation = fixture->next_allocation_handle++;
    return fixture->create_allocation_status;
+}
+
+NTSTATUS APIENTRY
+fake_create_context(D3DKMT_CREATECONTEXT *create)
+{
+   test_fixture *fixture = current_fixture;
+   CHECK(fixture != NULL);
+   CHECK(create != NULL);
+   if (fixture == NULL || create == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->create_context_calls++;
+   CHECK(create->hDevice == kDeviceHandle);
+   CHECK(create->NodeOrdinal == 0);
+   CHECK(create->EngineAffinity == 1);
+   CHECK(create->Flags.Value == 0);
+   CHECK(create->pPrivateDriverData != NULL);
+   CHECK(create->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_CONTEXT_CREATE));
+   if (create->pPrivateDriverData == NULL ||
+       create->PrivateDriverDataSize != sizeof(VIOGPU_WDDM_CONTEXT_CREATE))
+      return kStatusInvalidParameter;
+
+   create->hContext = kContextHandle;
+   create->CommandBufferSize = sizeof(fixture->command_buffer);
+   create->pCommandBuffer = fixture->command_buffer;
+   create->AllocationListSize = TU_WDDM_MAX_RENDER_ALLOCATIONS;
+   create->pAllocationList = fixture->allocation_list;
+   create->PatchLocationListSize = TU_WDDM_MAX_RENDER_ALLOCATIONS;
+   create->pPatchLocationList = fixture->patch_list;
+   if (fixture->context_returns_invalid_buffers) {
+      create->pCommandBuffer = NULL;
+      create->AllocationListSize = 0;
+   }
+   return fixture->create_context_status;
+}
+
+NTSTATUS APIENTRY
+fake_destroy_context(const D3DKMT_DESTROYCONTEXT *destroy)
+{
+   test_fixture *fixture = current_fixture;
+   CHECK(fixture != NULL);
+   CHECK(destroy != NULL);
+   if (fixture == NULL || destroy == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->destroy_context_calls++;
+   CHECK(destroy->hContext == kContextHandle);
+   return fixture->destroy_context_status;
 }
 
 NTSTATUS APIENTRY
@@ -500,6 +553,8 @@ init_fixture(test_fixture *fixture)
 {
    memset(fixture, 0, sizeof(*fixture));
    current_fixture = fixture;
+   fixture->runtime.dispatch.CreateContext = fake_create_context;
+   fixture->runtime.dispatch.DestroyContext = fake_destroy_context;
    fixture->runtime.dispatch.CreateAllocation = fake_create_allocation;
    fixture->runtime.dispatch.DestroyAllocation = fake_destroy_allocation;
    fixture->runtime.dispatch.Lock = fake_lock;
@@ -508,6 +563,8 @@ init_fixture(test_fixture *fixture)
    fixture->runtime.dispatch.Escape = fake_escape;
    fixture->render_status = kStatusSuccess;
    fixture->escape_status = kStatusSuccess;
+   fixture->create_context_status = kStatusSuccess;
+   fixture->destroy_context_status = kStatusSuccess;
    fixture->create_allocation_status = kStatusSuccess;
    fixture->destroy_allocation_status = kStatusSuccess;
    fixture->unlock_status = kStatusSuccess;
@@ -598,6 +655,45 @@ create_native_allocation(test_fixture *fixture, tu_wddm_allocation *allocation)
       CHECK(allocation->private_info.ContextId == kContextId);
    }
    return created;
+}
+
+void
+test_context_buffer_contract_and_failed_destroy_retention()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+
+   tu_wddm_context context = {};
+   CHECK(tu_wddm_context_open(&fixture.device, &context));
+   CHECK(fixture.create_context_calls == 1);
+   CHECK(context.handle == kContextHandle);
+   CHECK(context.command_buffer == fixture.command_buffer);
+   CHECK(context.allocation_list == fixture.allocation_list);
+   CHECK(context.patch_location_list == fixture.patch_list);
+   CHECK(tu_wddm_context_close(&context));
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(context.handle == 0);
+
+   init_fixture(&fixture);
+   fixture.context_returns_invalid_buffers = true;
+   context = {};
+   CHECK(!tu_wddm_context_open(&fixture.device, &context));
+   CHECK(fixture.create_context_calls == 1);
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(context.handle == 0);
+
+   init_fixture(&fixture);
+   fixture.context_returns_invalid_buffers = true;
+   fixture.destroy_context_status = kStatusInvalidParameter;
+   context = {};
+   CHECK(!tu_wddm_context_open(&fixture.device, &context));
+   CHECK(context.handle == kContextHandle);
+   CHECK(context.device == &fixture.device);
+   CHECK(fixture.destroy_context_calls == 1);
+   fixture.destroy_context_status = kStatusSuccess;
+   CHECK(tu_wddm_context_close(&context));
+   CHECK(context.handle == 0);
+   CHECK(fixture.destroy_context_calls == 2);
 }
 
 void
@@ -1174,6 +1270,7 @@ main()
 {
    test_priority_contract();
    test_heap_size_contract();
+   test_context_buffer_contract_and_failed_destroy_retention();
    test_allocation_and_lock();
    test_gpu_read_only_allocation_maps_cpu_writable();
    test_allocation_range_rejected();

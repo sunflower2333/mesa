@@ -139,6 +139,23 @@ tu_wddm_page_aligned_nonzero(uint64_t size)
    return size != 0 && (size & (page_size - 1)) == 0;
 }
 
+static bool
+tu_wddm_context_buffers_valid(const D3DKMT_CREATECONTEXT *info)
+{
+   if (info == NULL ||
+       info->CommandBufferSize < sizeof(VIOGPU_WDDM_RENDER_COMMAND) +
+                                  sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) +
+                                  sizeof(tu_wddm_msm_submit_request) ||
+       info->pCommandBuffer == NULL || info->pAllocationList == NULL ||
+       info->AllocationListSize == 0 ||
+       info->AllocationListSize > TU_WDDM_MAX_RENDER_ALLOCATIONS ||
+       info->pPatchLocationList == NULL || info->PatchLocationListSize == 0 ||
+       info->PatchLocationListSize > TU_WDDM_MAX_RENDER_ALLOCATIONS)
+      return false;
+
+   return true;
+}
+
 bool
 tu_wddm_select_heap_size(uint64_t dedicated_video_memory,
                          uint64_t va_size,
@@ -495,7 +512,8 @@ tu_wddm_context_open(struct tu_wddm_device *device,
    create.ClientHint = D3DKMT_CLIENTHINT_VULKAN;
 
    NTSTATUS status = device->adapter.runtime->dispatch.CreateContext(&create);
-   if (!NT_SUCCESS(status) || create.hContext == 0) {
+   if (!NT_SUCCESS(status) || create.hContext == 0 ||
+       !tu_wddm_context_buffers_valid(&create)) {
       if (create.hContext != 0) {
          D3DKMT_DESTROYCONTEXT destroy = {};
          destroy.hContext = create.hContext;
