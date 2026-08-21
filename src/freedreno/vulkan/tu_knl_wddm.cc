@@ -1563,6 +1563,7 @@ tu_wddm_device_finish(struct tu_device *dev)
                             "failed to unlock WDDM allocation during teardown");
          return;
       }
+      bo->map = NULL;
       if (allocation->handle != 0 &&
           !tu_wddm_allocation_destroy(allocation)) {
          dev->wddm_teardown_failed = true;
