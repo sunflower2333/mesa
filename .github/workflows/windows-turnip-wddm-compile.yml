@@ -2,6 +2,11 @@ name: Windows Turnip WDDM transport compile
 
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git ref containing the WDDM transport sources
+        required: false
+        default: wip/windows-turnip-wddm
   push:
     branches:
       - wip/windows-turnip-wddm
@@ -37,10 +42,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
-      - name: Install Windows SDK and WDK 28000
+      - name: Ensure Windows SDK and WDK 28000
         shell: pwsh
         run: |
+          $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+          $required = @(
+            (Join-Path $kitRoot 'Include\10.0.28000.0\shared\d3dkmthk.h')
+            (Join-Path $kitRoot 'Include\10.0.28000.0\um\Windows.h')
+          )
+          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_) })
+          if ($missing.Count -eq 0) {
+            Write-Host 'Windows SDK/WDK 10.0.28000 is already present; skipping winget.'
+            exit 0
+          }
+
+          Write-Host "Missing SDK/WDK files: $($missing -join ', ')"
           $packages = @(
             'Microsoft.WindowsSDK.10.0.28000'
             'Microsoft.WindowsWDK.10.0.28000'
@@ -51,6 +70,12 @@ jobs:
               --disable-interactivity
             if ($LASTEXITCODE -ne 0) {
               throw "winget failed to install $id (exit code $LASTEXITCODE)"
+            }
+          }
+
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "SDK/WDK installation did not provide required file: $path"
             }
           }
 
