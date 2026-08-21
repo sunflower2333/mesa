@@ -697,6 +697,28 @@ test_context_buffer_contract_and_failed_destroy_retention()
 }
 
 void
+test_allocation_lifecycle_loop()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   const tu_wddm_allocation_desc desc = native_allocation_desc();
+
+   /* This is the focused pre-v1 equivalent of the P2 10,000-cycle gate.  The
+    * real KMT/Host pool run remains a device-runtime requirement; this fixture
+    * only proves that the UMD compensates each create/destroy pair. */
+   for (unsigned i = 0; i < 10000; i++) {
+      fixture.next_allocation_handle = kAllocationHandle;
+      tu_wddm_allocation allocation = {};
+      CHECK(tu_wddm_allocation_create(&fixture.context, &desc, &allocation));
+      CHECK(tu_wddm_allocation_destroy(&allocation));
+      CHECK(allocation.handle == 0);
+      CHECK(allocation.context == NULL);
+   }
+   CHECK(fixture.create_calls == 10000);
+   CHECK(fixture.destroy_allocation_calls == 10000);
+}
+
+void
 test_allocation_and_lock()
 {
    test_fixture fixture;
@@ -1271,6 +1293,7 @@ main()
    test_priority_contract();
    test_heap_size_contract();
    test_context_buffer_contract_and_failed_destroy_retention();
+   test_allocation_lifecycle_loop();
    test_allocation_and_lock();
    test_gpu_read_only_allocation_maps_cpu_writable();
    test_allocation_range_rejected();
