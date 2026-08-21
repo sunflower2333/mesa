@@ -63,6 +63,31 @@ jobs:
           src\freedreno\vulkan\tests\tu_wddm_render_test.cpp
           src\freedreno\vulkan\tests\tu_wddm_transport_compile.cpp
 
+      - name: Link ARM64 fake-dispatch fixture
+        shell: cmd
+        run: >-
+          cl /nologo /std:c++17 /W4 /WX /EHsc
+          /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C
+          /I src\freedreno\vulkan
+          src\freedreno\vulkan\tu_knl_wddm.cc
+          src\freedreno\vulkan\tests\tu_wddm_render_test.cpp
+          /Fe:tu_wddm_render_test_arm64.exe
+
+      - name: Verify ARM64 fixture image
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $PWD 'tu_wddm_render_test_arm64.exe'
+          if (-not (Test-Path -LiteralPath $fixture -PathType Leaf) -or
+              (Get-Item -LiteralPath $fixture).Length -eq 0) {
+            throw "ARM64 fake-dispatch fixture did not link"
+          }
+          $headers = & dumpbin /headers $fixture 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for ARM64 fixture" }
+          if (-not ($headers -match 'AA64 machine')) {
+            throw "fake-dispatch fixture machine type does not match ARM64"
+          }
+          Write-Host 'ARM64 fixture linked successfully; it is not executed on the cross-build host.'
+
       - name: Assert compile-only artifact policy
         shell: pwsh
         run: |
