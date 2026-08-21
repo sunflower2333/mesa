@@ -135,6 +135,11 @@ bool tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
 
 bool tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info);
 bool tu_wddm_submitqueue_priority_is_supported(int priority);
+/* Select the fixed VidMm guest-pool heap exposed by DXGI.  Both inputs must
+ * be non-zero 4 KiB quantities; the address-space window caps the pool. */
+bool tu_wddm_select_heap_size(uint64_t dedicated_video_memory,
+                              uint64_t va_size,
+                              uint64_t *heap_size);
 bool tu_wddm_validate_context_info(const VIOGPU_WDDM_CONTEXT_INFO *info,
                                   uint64_t expected_reset_generation);
 bool tu_wddm_validate_fence_info(const VIOGPU_WDDM_FENCE_INFO *info,

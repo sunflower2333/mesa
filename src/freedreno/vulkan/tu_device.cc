@@ -2201,6 +2201,20 @@ tu_get_budget_memory(struct tu_physical_device *physical_device)
    if (tu_get_guest_pool_budget(physical_device, &pool_budget))
       return pool_budget;
 
+#ifdef TU_HAS_WDDM
+   /* The WDDM KMD exposes the guest-owned pool as one fixed, non-system
+    * VidMm segment.  There is no dynamic pool-usage query in this slice, so
+    * the segment size itself is the authoritative budget; consulting the
+    * generic guest-RAM estimate would advertise memory that BOs cannot use. */
+   uint64_t selected_heap_size = 0;
+   if (physical_device->wddm_adapter.private_info.Header.Magic ==
+          VIOGPU_WDDM_ABI_MAGIC &&
+       tu_wddm_select_heap_size(physical_device->wddm_adapter.dedicated_video_memory,
+                                physical_device->va_size, &selected_heap_size) &&
+       selected_heap_size == heap_size)
+      return heap_size;
+#endif
+
    /*
     * Let's not incite the app to starve the system: report at most 90% of
     * available system memory.

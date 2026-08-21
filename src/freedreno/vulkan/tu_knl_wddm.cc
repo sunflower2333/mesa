@@ -132,6 +132,30 @@ tu_wddm_submitqueue_priority_is_supported(int priority)
    return priority == 0;
 }
 
+static inline bool
+tu_wddm_page_aligned_nonzero(uint64_t size)
+{
+   constexpr uint64_t page_size = UINT64_C(4096);
+   return size != 0 && (size & (page_size - 1)) == 0;
+}
+
+bool
+tu_wddm_select_heap_size(uint64_t dedicated_video_memory,
+                         uint64_t va_size,
+                         uint64_t *heap_size)
+{
+   if (heap_size == NULL)
+      return false;
+
+   *heap_size = 0;
+   if (!tu_wddm_page_aligned_nonzero(dedicated_video_memory) ||
+       !tu_wddm_page_aligned_nonzero(va_size))
+      return false;
+
+   *heap_size = dedicated_video_memory < va_size ? dedicated_video_memory : va_size;
+   return *heap_size != 0;
+}
+
 bool
 tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info)
 {
@@ -2393,6 +2417,11 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
 
    memset(probe_device, 0, sizeof(*probe_device));
    memset(probe_context, 0, sizeof(*probe_context));
+   /* DXGI must describe the fixed gpu_guest VidMm segment.  A zero or
+    * sub-page descriptor cannot identify a usable WDDM heap. */
+   if (!tu_wddm_page_aligned_nonzero(identity->dedicated_video_memory))
+      return true;
+
    if (!tu_wddm_device_open(&state->instance->wddm_runtime, identity,
                             probe_device)) {
       if (!tu_wddm_probe_cleanup(state->instance)) {
@@ -2408,6 +2437,9 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
       va_start = probe_context->info.VaStart;
       va_size = probe_context->info.VaSize;
    }
+   uint64_t heap_size = 0;
+   const bool valid_heap = tu_wddm_select_heap_size(
+      identity->dedicated_video_memory, va_size, &heap_size);
    if (!tu_wddm_probe_cleanup(state->instance)) {
       state->result = VK_ERROR_DEVICE_LOST;
       return false;
@@ -2416,6 +2448,8 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
       state->result = VK_ERROR_DEVICE_LOST;
       return true;
    }
+   if (!valid_heap)
+      return true;
 
    struct tu_physical_device *device = (struct tu_physical_device *)vk_zalloc(
       &state->instance->vk.alloc, sizeof(*device), 8,
@@ -2464,10 +2498,10 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
    device->sync_types[0] = &tu_wddm_sync_type;
    device->sync_types[1] = &device->timeline_type.sync;
    device->sync_types[2] = NULL;
-   /* The context VA window is an address-space limit, not a memory budget.
-    * Use the normal system-memory estimate here; reporting the (often much
-    * larger) VA range would let applications overcommit guest RAM. */
-   device->heap.size = tu_get_system_heap_size(device);
+   /* DXGI DedicatedVideoMemory is the sole non-system VidMm segment published
+    * by the KMD (the gpu_guest pool).  Keep it bounded by the context VA
+    * window; do not replace this fixed pool size with a guest-RAM estimate. */
+   device->heap.size = heap_size;
    device->heap.used = 0;
    device->heap.flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 

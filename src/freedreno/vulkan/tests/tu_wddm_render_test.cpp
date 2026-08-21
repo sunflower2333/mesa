@@ -129,6 +129,31 @@ test_priority_contract()
    CHECK(!tu_wddm_submitqueue_priority_is_supported(-1));
 }
 
+void
+test_heap_size_contract()
+{
+   uint64_t heap_size = UINT64_MAX;
+
+   CHECK(!tu_wddm_select_heap_size(0, kVaSize, &heap_size));
+   CHECK(heap_size == 0);
+
+   heap_size = UINT64_MAX;
+   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x1001), kVaSize, &heap_size));
+   CHECK(heap_size == 0);
+
+   heap_size = 0;
+   CHECK(tu_wddm_select_heap_size(UINT64_C(0x02000000), kVaSize, &heap_size));
+   CHECK(heap_size == kVaSize);
+
+   heap_size = 0;
+   CHECK(tu_wddm_select_heap_size(UINT64_C(0x00400000), kVaSize, &heap_size));
+   CHECK(heap_size == UINT64_C(0x00400000));
+
+   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x00400000), 0, &heap_size));
+   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x00400000), UINT64_C(0x1001), &heap_size));
+   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x00400000), kVaSize, NULL));
+}
+
 struct test_fixture {
    tu_wddm_runtime runtime;
    tu_wddm_device device;
@@ -1098,6 +1123,7 @@ int
 main()
 {
    test_priority_contract();
+   test_heap_size_contract();
    test_allocation_and_lock();
    test_gpu_read_only_allocation_maps_cpu_writable();
    test_allocation_range_rejected();
