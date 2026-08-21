@@ -121,10 +121,13 @@ typedef bool (*tu_wddm_adapter_callback)(const struct tu_wddm_adapter_info *info
 bool tu_wddm_runtime_init(struct tu_wddm_runtime *runtime);
 void tu_wddm_runtime_finish(struct tu_wddm_runtime *runtime);
 
-/* Close handles retained by a failed physical-adapter probe.  The owner is
- * stored on tu_instance so a transient KMT close failure can be retried
- * before the runtime dispatch table is unloaded. */
+/* Close handles retained by a failed physical-adapter probe in dependency
+ * order.  The instance wrapper preserves the graph when a transient KMT close
+ * failure must be retried before the runtime dispatch table is unloaded. */
+bool tu_wddm_probe_owner_cleanup(struct tu_wddm_device *device,
+                                 struct tu_wddm_context *context);
 bool tu_wddm_probe_cleanup(struct tu_instance *instance);
+bool tu_wddm_instance_prepare_destroy(struct tu_instance *instance);
 
 /* Enumerates only adapters that claim the exact DroidVM private endpoint.
  * The callback must return true to continue; false aborts enumeration and is

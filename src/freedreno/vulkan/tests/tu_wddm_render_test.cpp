@@ -172,6 +172,8 @@ struct test_fixture {
    NTSTATUS destroy_allocation_status;
    NTSTATUS create_context_status;
    NTSTATUS destroy_context_status;
+   NTSTATUS destroy_device_status;
+   NTSTATUS close_adapter_status;
    NTSTATUS unlock_status;
    D3DKMT_HANDLE next_allocation_handle;
    uint32_t expected_allocation_count;
@@ -182,6 +184,8 @@ struct test_fixture {
    unsigned destroy_allocation_calls;
    unsigned create_context_calls;
    unsigned destroy_context_calls;
+   unsigned destroy_device_calls;
+   unsigned close_adapter_calls;
    unsigned lock_calls;
    unsigned unlock_calls;
    unsigned render_calls;
@@ -284,6 +288,34 @@ fake_destroy_context(const D3DKMT_DESTROYCONTEXT *destroy)
    fixture->destroy_context_calls++;
    CHECK(destroy->hContext == kContextHandle);
    return fixture->destroy_context_status;
+}
+
+NTSTATUS APIENTRY
+fake_destroy_device(const D3DKMT_DESTROYDEVICE *destroy)
+{
+   test_fixture *fixture = current_fixture;
+   CHECK(fixture != NULL);
+   CHECK(destroy != NULL);
+   if (fixture == NULL || destroy == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->destroy_device_calls++;
+   CHECK(destroy->hDevice == kDeviceHandle);
+   return fixture->destroy_device_status;
+}
+
+NTSTATUS APIENTRY
+fake_close_adapter(const D3DKMT_CLOSEADAPTER *close)
+{
+   test_fixture *fixture = current_fixture;
+   CHECK(fixture != NULL);
+   CHECK(close != NULL);
+   if (fixture == NULL || close == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->close_adapter_calls++;
+   CHECK(close->hAdapter == kAdapterHandle);
+   return fixture->close_adapter_status;
 }
 
 NTSTATUS APIENTRY
@@ -555,6 +587,8 @@ init_fixture(test_fixture *fixture)
    current_fixture = fixture;
    fixture->runtime.dispatch.CreateContext = fake_create_context;
    fixture->runtime.dispatch.DestroyContext = fake_destroy_context;
+   fixture->runtime.dispatch.DestroyDevice = fake_destroy_device;
+   fixture->runtime.dispatch.CloseAdapter = fake_close_adapter;
    fixture->runtime.dispatch.CreateAllocation = fake_create_allocation;
    fixture->runtime.dispatch.DestroyAllocation = fake_destroy_allocation;
    fixture->runtime.dispatch.Lock = fake_lock;
@@ -565,6 +599,8 @@ init_fixture(test_fixture *fixture)
    fixture->escape_status = kStatusSuccess;
    fixture->create_context_status = kStatusSuccess;
    fixture->destroy_context_status = kStatusSuccess;
+   fixture->destroy_device_status = kStatusSuccess;
+   fixture->close_adapter_status = kStatusSuccess;
    fixture->create_allocation_status = kStatusSuccess;
    fixture->destroy_allocation_status = kStatusSuccess;
    fixture->unlock_status = kStatusSuccess;
@@ -599,6 +635,66 @@ init_fixture(test_fixture *fixture)
    fixture->context.info.ResetGeneration = kResetGeneration;
    fixture->context.info.ContextId = kContextId;
    fixture->context.info.SubmitQueueId = kSubmitQueueId;
+}
+
+void
+test_probe_owner_cleanup_retry()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.destroy_context_status = kStatusInvalidParameter;
+
+   CHECK(!tu_wddm_probe_owner_cleanup(&fixture.device, &fixture.context));
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(fixture.destroy_device_calls == 0);
+   CHECK(fixture.close_adapter_calls == 0);
+   CHECK(fixture.context.handle == kContextHandle);
+   CHECK(fixture.device.handle == kDeviceHandle);
+   CHECK(fixture.device.adapter.handle == kAdapterHandle);
+
+   fixture.destroy_context_status = kStatusSuccess;
+   CHECK(tu_wddm_probe_owner_cleanup(&fixture.device, &fixture.context));
+   CHECK(fixture.destroy_context_calls == 2);
+   CHECK(fixture.destroy_device_calls == 1);
+   CHECK(fixture.close_adapter_calls == 1);
+   CHECK(fixture.context.handle == 0);
+   CHECK(fixture.device.handle == 0);
+   CHECK(fixture.device.adapter.handle == 0);
+
+   init_fixture(&fixture);
+   fixture.destroy_device_status = kStatusInvalidParameter;
+   CHECK(!tu_wddm_probe_owner_cleanup(&fixture.device, &fixture.context));
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(fixture.destroy_device_calls == 1);
+   CHECK(fixture.close_adapter_calls == 0);
+   CHECK(fixture.context.handle == 0);
+   CHECK(fixture.device.handle == kDeviceHandle);
+   CHECK(fixture.device.adapter.handle == kAdapterHandle);
+
+   fixture.destroy_device_status = kStatusSuccess;
+   CHECK(tu_wddm_probe_owner_cleanup(&fixture.device, &fixture.context));
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(fixture.destroy_device_calls == 2);
+   CHECK(fixture.close_adapter_calls == 1);
+   CHECK(fixture.device.handle == 0);
+   CHECK(fixture.device.adapter.handle == 0);
+
+   init_fixture(&fixture);
+   fixture.close_adapter_status = kStatusInvalidParameter;
+   CHECK(!tu_wddm_probe_owner_cleanup(&fixture.device, &fixture.context));
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(fixture.destroy_device_calls == 1);
+   CHECK(fixture.close_adapter_calls == 1);
+   CHECK(fixture.context.handle == 0);
+   CHECK(fixture.device.handle == 0);
+   CHECK(fixture.device.adapter.handle == kAdapterHandle);
+
+   fixture.close_adapter_status = kStatusSuccess;
+   CHECK(tu_wddm_probe_owner_cleanup(&fixture.device, &fixture.context));
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(fixture.destroy_device_calls == 1);
+   CHECK(fixture.close_adapter_calls == 2);
+   CHECK(fixture.device.adapter.handle == 0);
 }
 
 tu_wddm_allocation_desc
@@ -1293,6 +1389,7 @@ main()
    test_priority_contract();
    test_heap_size_contract();
    test_context_buffer_contract_and_failed_destroy_retention();
+   test_probe_owner_cleanup_retry();
    test_allocation_lifecycle_loop();
    test_allocation_and_lock();
    test_gpu_read_only_allocation_maps_cpu_writable();

@@ -2042,6 +2042,16 @@ tu_DestroyInstance(VkInstance _instance,
    if (!instance)
       return;
 
+#ifdef TU_HAS_WDDM
+   /* A failed KMT close leaves a retryable owner graph on the instance.  Do
+    * not release any outer instance state or unload its dispatch table until
+    * every retained probe handle has closed successfully. */
+   if (!tu_wddm_instance_prepare_destroy(instance)) {
+      mesa_loge("failed to close retained WDDM adapter probe handles");
+      return;
+   }
+#endif
+
    VG(VALGRIND_DESTROY_MEMPOOL(instance));
 
    driDestroyOptionCache(&instance->drirc.options);
@@ -2050,9 +2060,8 @@ tu_DestroyInstance(VkInstance _instance,
    vk_instance_finish(&instance->vk);
 #ifdef TU_HAS_WDDM
    if (instance->wddm_runtime_initialized) {
-      if (!tu_wddm_probe_cleanup(instance))
-         mesa_loge("failed to close retained WDDM adapter probe handles");
       tu_wddm_runtime_finish(&instance->wddm_runtime);
+      instance->wddm_runtime_initialized = false;
    }
 #endif
    vk_free(&instance->vk.alloc, instance);

@@ -669,6 +669,29 @@ tu_wddm_context_close(struct tu_wddm_context *context)
    return true;
 }
 
+bool
+tu_wddm_probe_owner_cleanup(struct tu_wddm_device *device,
+                            struct tu_wddm_context *context)
+{
+   if (device == NULL || context == NULL)
+      return false;
+
+   /* Contexts own the device while they are live.  Never destroy the device
+    * after a failed context close: doing so would invalidate the remaining
+    * KMT context handle and make a retry impossible. */
+   if (context->handle != 0) {
+      if (!tu_wddm_context_close(context))
+         return false;
+   }
+
+   if (device->handle != 0 || device->adapter.handle != 0) {
+      if (!tu_wddm_device_close(device))
+         return false;
+   }
+
+   return true;
+}
+
 #ifdef TU_HAS_WDDM
 bool
 tu_wddm_probe_cleanup(struct tu_instance *instance)
@@ -676,26 +699,20 @@ tu_wddm_probe_cleanup(struct tu_instance *instance)
    if (instance == NULL)
       return false;
 
-   /* Contexts own the device while they are live.  Never destroy the device
-    * after a failed context close: doing so would invalidate the remaining
-    * KMT context handle and make a retry impossible. */
-   if (instance->wddm_probe_context.handle != 0) {
-      if (!tu_wddm_context_close(&instance->wddm_probe_context)) {
-         instance->wddm_probe_pending = true;
-         return false;
-      }
-   }
+   const bool cleaned = tu_wddm_probe_owner_cleanup(
+      &instance->wddm_probe_device, &instance->wddm_probe_context);
+   instance->wddm_probe_pending = !cleaned;
+   return cleaned;
+}
 
-   if (instance->wddm_probe_device.handle != 0 ||
-       instance->wddm_probe_device.adapter.handle != 0) {
-      if (!tu_wddm_device_close(&instance->wddm_probe_device)) {
-         instance->wddm_probe_pending = true;
-         return false;
-      }
-   }
+bool
+tu_wddm_instance_prepare_destroy(struct tu_instance *instance)
+{
+   if (instance == NULL)
+      return false;
 
-   instance->wddm_probe_pending = false;
-   return true;
+   return !instance->wddm_runtime_initialized ||
+          tu_wddm_probe_cleanup(instance);
 }
 #endif
 
