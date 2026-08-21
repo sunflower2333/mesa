@@ -24,7 +24,7 @@ permissions:
 jobs:
   compile:
     name: ${{ matrix.arch }} SDK/WDK compile
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +37,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Windows SDK and WDK 28000
+        shell: pwsh
+        run: |
+          $packages = @(
+            'Microsoft.WindowsSDK.10.0.28000'
+            'Microsoft.WindowsWDK.10.0.28000'
+          )
+          foreach ($id in $packages) {
+            winget install --id $id --source winget `
+              --exact --silent --accept-package-agreements --accept-source-agreements `
+              --disable-interactivity
+            if ($LASTEXITCODE -ne 0) {
+              throw "winget failed to install $id (exit code $LASTEXITCODE)"
+            }
+          }
 
       - name: Set up MSVC and WDK
         uses: ilammy/msvc-dev-cmd@v1
