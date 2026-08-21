@@ -88,6 +88,14 @@ jobs:
           }
           Write-Host 'ARM64 fixture linked successfully; it is not executed on the cross-build host.'
 
+      - name: Upload ARM64 fake-dispatch runtime fixture
+        uses: actions/upload-artifact@v7
+        with:
+          name: tu-wddm-fake-dispatch-arm64
+          path: tu_wddm_render_test_arm64.exe
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Assert compile-only artifact policy
         shell: pwsh
         run: |
