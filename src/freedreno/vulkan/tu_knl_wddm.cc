@@ -1491,13 +1491,18 @@ tu_wddm_device_finish(struct tu_device *dev)
        dev->wddm_device.handle == 0 && dev->wddm_device.adapter.handle == 0)
       return;
 
-   /* This is the final Vulkan-device hook: no caller can retry after it
-    * returns.  Try the leaf KMT owners first, then close their parents, but
-    * always release UMD bookkeeping before the outer device storage is freed. */
+   /* This is the final Vulkan-device hook.  A failed KMT operation cannot be
+    * retried after tu_DestroyDevice releases the outer device, so preserve the
+    * complete owner graph on every failure path.  The retained KMT objects are
+    * intentionally process-lifetime owned; leaking them is safer than freeing
+    * UMD bookkeeping/VMA state while a live allocation or parent handle still
+    * exists. */
    const bool submissions_retired =
       tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX);
-   if (!submissions_retired)
+   if (!submissions_retired) {
       vk_device_set_lost(&dev->vk, "failed to retire WDDM queue work");
+      return;
+   }
 
    while (dev->wddm_bo_count != 0) {
       struct tu_bo *bo = dev->wddm_bos[dev->wddm_bo_count - 1];
@@ -1515,17 +1520,16 @@ tu_wddm_device_finish(struct tu_device *dev)
                                           : (allocation->private_info.Size + UINT64_C(4095)) &
                                                ~UINT64_C(4095);
 
-      bool can_destroy = submissions_retired;
-      if (can_destroy && allocation->locked &&
-          !tu_wddm_allocation_unlock(allocation)) {
+      if (allocation->locked && !tu_wddm_allocation_unlock(allocation)) {
          vk_device_set_lost(&dev->vk,
                             "failed to unlock WDDM allocation during teardown");
-         can_destroy = false;
+         return;
       }
-      if (can_destroy && allocation->handle != 0 &&
+      if (allocation->handle != 0 &&
           !tu_wddm_allocation_destroy(allocation)) {
          vk_device_set_lost(&dev->vk,
                             "failed to destroy WDDM allocation during teardown");
+         return;
       }
 
       tu_debug_bos_del(dev, bo);
@@ -1545,18 +1549,20 @@ tu_wddm_device_finish(struct tu_device *dev)
    bool context_closed = dev->wddm_context.handle == 0;
    if (!context_closed) {
       context_closed = tu_wddm_context_close(&dev->wddm_context);
-      if (!context_closed)
+      if (!context_closed) {
          vk_device_set_lost(&dev->vk, "failed to close WDDM context");
+         return;
+      }
    }
    if (context_closed &&
        (dev->wddm_device.handle != 0 ||
         dev->wddm_device.adapter.handle != 0)) {
-      if (!tu_wddm_device_close(&dev->wddm_device))
+      if (!tu_wddm_device_close(&dev->wddm_device)) {
          vk_device_set_lost(&dev->vk, "failed to close WDDM device");
+         return;
+      }
    }
 
-   /* Failed KMT closes remain OS/process-owned.  Do not leave pointers in a
-    * tu_device which tu_DestroyDevice is about to release. */
    memset(&dev->wddm_context, 0, sizeof(dev->wddm_context));
    memset(&dev->wddm_device, 0, sizeof(dev->wddm_device));
    dev->wddm_initialized = false;

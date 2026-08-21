@@ -714,6 +714,56 @@ test_failed_allocation_rollback_retains_owner()
 }
 
 void
+test_failed_allocation_teardown_retains_owner()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   fixture.destroy_allocation_status = kStatusInvalidParameter;
+   CHECK(!tu_wddm_allocation_destroy(&allocation));
+   CHECK(allocation.handle == kAllocationHandle);
+   CHECK(allocation.context == &fixture.context);
+   CHECK(allocation.private_info.RequestedIova == kVaStart);
+   CHECK(allocation.vma_size == 4096);
+
+   fixture.destroy_allocation_status = kStatusSuccess;
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(allocation.handle == 0);
+   CHECK(allocation.context == NULL);
+}
+
+void
+test_failed_unlock_retains_owner()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   void *map = NULL;
+   CHECK(tu_wddm_allocation_lock(&allocation, &map));
+   CHECK(map == fixture.allocation_map);
+
+   fixture.unlock_status = kStatusInvalidParameter;
+   CHECK(!tu_wddm_allocation_unlock(&allocation));
+   CHECK(allocation.handle == kAllocationHandle);
+   CHECK(allocation.context == &fixture.context);
+   CHECK(allocation.locked);
+   CHECK(allocation.map == fixture.allocation_map);
+
+   fixture.unlock_status = kStatusSuccess;
+   CHECK(tu_wddm_allocation_unlock(&allocation));
+   CHECK(!allocation.locked);
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+}
+
+void
 test_null_lock_data_is_rolled_back()
 {
    test_fixture fixture;
@@ -1129,6 +1179,8 @@ main()
    test_allocation_range_rejected();
    test_failed_allocation_creation_compensates();
    test_failed_allocation_rollback_retains_owner();
+   test_failed_allocation_teardown_retains_owner();
+   test_failed_unlock_retains_owner();
    test_null_lock_data_is_rolled_back();
    test_null_lock_data_rollback_retains_owner();
    test_valid_render();
