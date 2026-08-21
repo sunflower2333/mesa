@@ -96,6 +96,39 @@ check(bool condition, const char *expression, int line)
 
 #define CHECK(expression) check(!!(expression), #expression, __LINE__)
 
+VIOGPU_WDDM_ADAPTER_INFO
+valid_adapter_info()
+{
+   VIOGPU_WDDM_ADAPTER_INFO info = {};
+   info.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   info.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   info.Header.Size = static_cast<uint32_t>(sizeof(info));
+   info.ResetGeneration = 1;
+   info.MsmMajorVersion = 1;
+   info.MsmMinorVersion = 9;
+   info.GpuId = 1;
+   info.ChipId = 1;
+   info.GmemSize = 4096;
+   info.PriorityCount = 1;
+   return info;
+}
+
+void
+test_priority_contract()
+{
+   VIOGPU_WDDM_ADAPTER_INFO info = valid_adapter_info();
+   CHECK(tu_wddm_validate_adapter_info(&info));
+
+   info.PriorityCount = 0;
+   CHECK(!tu_wddm_validate_adapter_info(&info));
+   info.PriorityCount = 2;
+   CHECK(!tu_wddm_validate_adapter_info(&info));
+
+   CHECK(tu_wddm_submitqueue_priority_is_supported(0));
+   CHECK(!tu_wddm_submitqueue_priority_is_supported(1));
+   CHECK(!tu_wddm_submitqueue_priority_is_supported(-1));
+}
+
 struct test_fixture {
    tu_wddm_runtime runtime;
    tu_wddm_device device;
@@ -1064,6 +1097,7 @@ tu_wddm_dispatch_finish(struct tu_wddm_dispatch *dispatch)
 int
 main()
 {
+   test_priority_contract();
    test_allocation_and_lock();
    test_gpu_read_only_allocation_maps_cpu_writable();
    test_allocation_range_rejected();

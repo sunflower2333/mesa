@@ -127,6 +127,12 @@ tu_wddm_header_is_current(const VIOGPU_WDDM_ABI_HEADER *header, uint32_t size)
 }
 
 bool
+tu_wddm_submitqueue_priority_is_supported(int priority)
+{
+   return priority == 0;
+}
+
+bool
 tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info)
 {
    if (info == NULL ||
@@ -134,7 +140,7 @@ tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info)
                                   tu_wddm_sizeof<VIOGPU_WDDM_ADAPTER_INFO>()) ||
        info->Capabilities != VIOGPU_WDDM_CAPABILITIES_NONE || info->ResetGeneration == 0 ||
        info->MsmMajorVersion != 1 || info->MsmMinorVersion < 9 || info->GpuId == 0 ||
-       info->ChipId == 0 || info->GmemSize == 0 || info->PriorityCount == 0 ||
+       info->ChipId == 0 || info->GmemSize == 0 || info->PriorityCount != 1 ||
        info->HasCachedCoherentMemory > 1 || info->HasRayTracing > 1)
       return false;
 
@@ -1564,8 +1570,9 @@ tu_wddm_device_check_status(struct tu_device *dev)
 static int
 tu_wddm_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
 {
-   if (queue->type != TU_QUEUE_GFX || queue->priority >=
-                                      dev->physical_device->submitqueue_priority_count ||
+   if (queue->type != TU_QUEUE_GFX ||
+       dev->physical_device->submitqueue_priority_count != 1 ||
+       !tu_wddm_submitqueue_priority_is_supported(queue->priority) ||
        dev->wddm_context.info.SubmitQueueId == 0)
       return -EINVAL;
    queue->msm_queue_id = dev->wddm_context.info.SubmitQueueId;
@@ -2443,7 +2450,8 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
    device->has_sparse_prr = false;
    device->has_lazy_bos = false;
    device->is_perf_cntr_selectable = false;
-   device->submitqueue_priority_count = identity->private_info.PriorityCount;
+   /* The WDDM context exposes one host submitqueue, fixed at priority zero. */
+   device->submitqueue_priority_count = 1;
    device->uche_trap_base = identity->private_info.UcheTrapBase;
    device->ubwc_config.highest_bank_bit = identity->private_info.HighestBankBit;
    device->ubwc_config.bank_swizzle_levels =
