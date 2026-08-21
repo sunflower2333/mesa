@@ -661,6 +661,8 @@ tu_wddm_context_wait_fence(struct tu_wddm_context *context,
       uint32_t completed = 0;
       if (!tu_wddm_context_get_completed_fence(context, &completed))
          return false;
+      if (!tu_wddm_device_execution_active(context->device))
+         return false;
       if (completed == fence || tu_wddm_fence_after(completed, fence))
          return true;
 
@@ -1354,31 +1356,42 @@ tu_wddm_sync_wait(struct vk_device *_device, struct vk_sync *base,
                   uint64_t wait_value, enum vk_sync_wait_flags wait_flags,
                   uint64_t abs_timeout_ns)
 {
-   (void)_device;
    (void)wait_value;
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
 
    for (;;) {
+      if (!tu_wddm_sync_is_current(sync))
+         return vk_device_set_lost(_device,
+                                   "WDDM sync wait observed a stale context");
+
       const uint64_t state = tu_wddm_sync_state_read(sync);
       const uint32_t fence = static_cast<uint32_t>(state);
       const bool signaled = (state & TU_WDDM_SYNC_SIGNALED) != 0;
 
-      if (signaled || ((wait_flags & VK_SYNC_WAIT_PENDING) && fence != 0))
+      if (signaled || ((wait_flags & VK_SYNC_WAIT_PENDING) && fence != 0)) {
+         if (!tu_wddm_device_execution_active(sync->context->device))
+            return vk_device_set_lost(
+               _device, "WDDM sync wait observed an inactive device");
          return VK_SUCCESS;
-      if (!tu_wddm_sync_is_current(sync))
-         return VK_ERROR_DEVICE_LOST;
+      }
 
       if (fence != 0) {
          uint32_t completed = 0;
          if (!tu_wddm_context_get_completed_fence(sync->context, &completed))
-            return VK_ERROR_DEVICE_LOST;
+            return vk_device_set_lost(_device,
+                                      "WDDM sync fence query failed");
+         if (!tu_wddm_device_execution_active(sync->context->device))
+            return vk_device_set_lost(
+               _device, "WDDM sync wait observed an inactive device");
          if (completed == fence || tu_wddm_fence_after(completed, fence)) {
             if (static_cast<uint64_t>(p_atomic_cmpxchg(
                    &sync->state, state, TU_WDDM_SYNC_SIGNALED)) == state)
                return VK_SUCCESS;
             continue;
          }
-      }
+      } else if (!tu_wddm_device_execution_active(sync->context->device))
+         return vk_device_set_lost(
+            _device, "WDDM sync wait observed an inactive device");
 
       const uint64_t now = static_cast<uint64_t>(os_time_get_nano());
       if (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns)
@@ -2266,7 +2279,11 @@ tu_wddm_wait_submission_slot(struct tu_device *device)
       uint32_t completed = 0;
       if (!tu_wddm_context_get_completed_fence(&device->wddm_context,
                                                &completed))
-         return VK_ERROR_DEVICE_LOST;
+         return vk_device_set_lost(
+            &device->vk, "WDDM submission-slot fence query failed");
+      if (!tu_wddm_device_execution_active(&device->wddm_device))
+         return vk_device_set_lost(
+            &device->vk, "WDDM submission-slot wait observed an inactive device");
 
       uint32_t pending = 0;
       if (!tu_wddm_pending_fence_count(
@@ -2400,7 +2417,12 @@ tu_wddm_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
       uint32_t completed = 0;
       if (!tu_wddm_context_get_completed_fence(&queue->device->wddm_context,
                                                &completed))
-         return VK_ERROR_DEVICE_LOST;
+         return vk_device_set_lost(
+            &queue->device->vk, "WDDM queue fence query failed");
+      if (!tu_wddm_device_execution_active(&queue->device->wddm_device))
+         return vk_device_set_lost(
+            &queue->device->vk,
+            "WDDM queue wait observed an inactive device");
       if (completed == fence || tu_wddm_fence_after(completed, fence))
          return VK_SUCCESS;
       uint64_t elapsed = (uint64_t)os_time_get_nano() - start;

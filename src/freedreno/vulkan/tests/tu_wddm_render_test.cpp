@@ -1532,6 +1532,19 @@ test_completed_fence_query_and_wait()
 }
 
 void
+test_completed_fence_wait_rejects_inactive_device()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.completed_fence = 7;
+   fixture.execution_state = D3DKMT_DEVICEEXECUTION_RESET;
+
+   CHECK(!tu_wddm_context_wait_fence(&fixture.context, 7, 0));
+   CHECK(fixture.escape_calls == 1);
+   CHECK(fixture.get_device_state_calls == 1);
+}
+
+void
 test_completed_fence_identity_rejected()
 {
    test_fixture fixture;
@@ -1598,6 +1611,7 @@ main()
    test_successful_render_with_partial_replacements_fails_closed();
    test_successful_render_with_oversized_replacements_fails_closed();
    test_completed_fence_query_and_wait();
+   test_completed_fence_wait_rejects_inactive_device();
    test_completed_fence_identity_rejected();
    current_fixture = NULL;
 
