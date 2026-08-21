@@ -167,6 +167,7 @@ struct test_fixture {
    BYTE allocation_map[4096];
    VIOGPU_WDDM_ALLOCATION_INFO created_private_info;
    NTSTATUS render_status;
+   NTSTATUS context_info_status;
    NTSTATUS escape_status;
    NTSTATUS create_allocation_status;
    NTSTATUS destroy_allocation_status;
@@ -258,9 +259,20 @@ fake_create_context(D3DKMT_CREATECONTEXT *create)
    CHECK(create->Flags.Value == 0);
    CHECK(create->pPrivateDriverData != NULL);
    CHECK(create->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_CONTEXT_CREATE));
+   CHECK(create->ClientHint == D3DKMT_CLIENTHINT_VULKAN);
    if (create->pPrivateDriverData == NULL ||
        create->PrivateDriverDataSize != sizeof(VIOGPU_WDDM_CONTEXT_CREATE))
       return kStatusInvalidParameter;
+
+   const VIOGPU_WDDM_CONTEXT_CREATE *private_data =
+      static_cast<const VIOGPU_WDDM_CONTEXT_CREATE *>(create->pPrivateDriverData);
+   CHECK(private_data->Header.Magic == VIOGPU_WDDM_ABI_MAGIC);
+   CHECK(private_data->Header.Version == VIOGPU_WDDM_ABI_VERSION);
+   CHECK(private_data->Header.Size == sizeof(*private_data));
+   CHECK(private_data->Header.Reserved == 0);
+   CHECK(private_data->ExpectedResetGeneration == kResetGeneration);
+   CHECK(private_data->Flags == VIOGPU_WDDM_CONTEXT_FLAGS_NONE);
+   CHECK(private_data->Reserved == 0);
 
    create->hContext = kContextHandle;
    create->CommandBufferSize = sizeof(fixture->command_buffer);
@@ -546,9 +558,44 @@ fake_escape(const D3DKMT_ESCAPE *escape)
    CHECK(escape->Type == D3DKMT_ESCAPE_DRIVERPRIVATE);
    CHECK(escape->Flags.Value == 0);
    CHECK(escape->pPrivateDriverData != NULL);
+   if (escape->pPrivateDriverData == NULL)
+      return kStatusInvalidParameter;
+
+   if (escape->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_CONTEXT_INFO)) {
+      VIOGPU_WDDM_CONTEXT_INFO *info =
+         static_cast<VIOGPU_WDDM_CONTEXT_INFO *>(escape->pPrivateDriverData);
+      CHECK(info->Header.Magic == VIOGPU_WDDM_ABI_MAGIC);
+      CHECK(info->Header.Version == VIOGPU_WDDM_ABI_VERSION);
+      CHECK(info->Header.Size == sizeof(*info));
+      CHECK(info->Header.Reserved == 0);
+      CHECK(info->Opcode == VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO);
+      CHECK(info->Flags == VIOGPU_WDDM_ESCAPE_FLAGS_NONE);
+      CHECK(info->ExpectedResetGeneration == kResetGeneration);
+      CHECK(info->VaStart == 0);
+      CHECK(info->VaSize == 0);
+      CHECK(info->ResetGeneration == 0);
+      CHECK(info->ContextId == 0);
+      CHECK(info->SubmitQueueId == 0);
+
+      if (fixture->context_info_status != kStatusSuccess)
+         return fixture->context_info_status;
+
+      VIOGPU_WDDM_CONTEXT_INFO response = {};
+      init_header(&response.Header, sizeof(response));
+      response.Opcode = VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO;
+      response.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+      response.ExpectedResetGeneration = kResetGeneration;
+      response.VaStart = kVaStart;
+      response.VaSize = kVaSize;
+      response.ResetGeneration = kResetGeneration;
+      response.ContextId = kContextId;
+      response.SubmitQueueId = kSubmitQueueId;
+      *info = response;
+      return kStatusSuccess;
+   }
+
    CHECK(escape->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_FENCE_INFO));
-   if (escape->pPrivateDriverData == NULL ||
-       escape->PrivateDriverDataSize != sizeof(VIOGPU_WDDM_FENCE_INFO))
+   if (escape->PrivateDriverDataSize != sizeof(VIOGPU_WDDM_FENCE_INFO))
       return kStatusInvalidParameter;
 
    VIOGPU_WDDM_FENCE_INFO *info =
@@ -596,6 +643,7 @@ init_fixture(test_fixture *fixture)
    fixture->runtime.dispatch.Render = fake_render;
    fixture->runtime.dispatch.Escape = fake_escape;
    fixture->render_status = kStatusSuccess;
+   fixture->context_info_status = kStatusSuccess;
    fixture->escape_status = kStatusSuccess;
    fixture->create_context_status = kStatusSuccess;
    fixture->destroy_context_status = kStatusSuccess;
@@ -790,6 +838,69 @@ test_context_buffer_contract_and_failed_destroy_retention()
    CHECK(tu_wddm_context_close(&context));
    CHECK(context.handle == 0);
    CHECK(fixture.destroy_context_calls == 2);
+}
+
+void
+test_context_info_failure_cleanup_retry()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.context_info_status = kStatusInvalidParameter;
+
+   tu_wddm_context context = {};
+   CHECK(!tu_wddm_context_open(&fixture.device, &context));
+   CHECK(fixture.create_context_calls == 1);
+   CHECK(fixture.escape_calls == 1);
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(context.handle == 0);
+   CHECK(context.device == NULL);
+
+   init_fixture(&fixture);
+   fixture.context_info_status = kStatusInvalidParameter;
+   fixture.destroy_context_status = kStatusInvalidParameter;
+   context = {};
+   CHECK(!tu_wddm_context_open(&fixture.device, &context));
+   CHECK(fixture.create_context_calls == 1);
+   CHECK(fixture.escape_calls == 1);
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(context.handle == kContextHandle);
+   CHECK(context.device == &fixture.device);
+
+   fixture.destroy_context_status = kStatusSuccess;
+   CHECK(tu_wddm_context_close(&context));
+   CHECK(fixture.destroy_context_calls == 2);
+   CHECK(context.handle == 0);
+   CHECK(context.device == NULL);
+}
+
+void
+test_context_lifecycle_loop()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+
+   /* The device-runtime gate must repeat this against KMT and the Host pool.
+    * This focused loop catches UMD owner and returned-buffer drift first. */
+   for (unsigned i = 0; i < 10000; i++) {
+      tu_wddm_context context = {};
+      CHECK(tu_wddm_context_open(&fixture.device, &context));
+      CHECK(context.handle == kContextHandle);
+      CHECK(context.device == &fixture.device);
+      CHECK(context.command_buffer == fixture.command_buffer);
+      CHECK(context.allocation_list == fixture.allocation_list);
+      CHECK(context.patch_location_list == fixture.patch_list);
+      CHECK(context.info.VaStart == kVaStart);
+      CHECK(context.info.VaSize == kVaSize);
+      CHECK(context.info.ResetGeneration == kResetGeneration);
+      CHECK(context.info.ContextId == kContextId);
+      CHECK(context.info.SubmitQueueId == kSubmitQueueId);
+      CHECK(tu_wddm_context_close(&context));
+      CHECK(context.handle == 0);
+      CHECK(context.device == NULL);
+   }
+   CHECK(fixture.create_context_calls == 10000);
+   CHECK(fixture.escape_calls == 10000);
+   CHECK(fixture.destroy_context_calls == 10000);
 }
 
 void
@@ -1389,6 +1500,8 @@ main()
    test_priority_contract();
    test_heap_size_contract();
    test_context_buffer_contract_and_failed_destroy_retention();
+   test_context_info_failure_cleanup_retry();
+   test_context_lifecycle_loop();
    test_probe_owner_cleanup_retry();
    test_allocation_lifecycle_loop();
    test_allocation_and_lock();
