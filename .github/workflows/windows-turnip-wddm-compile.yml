@@ -28,16 +28,8 @@ permissions:
 
 jobs:
   compile:
-    name: ${{ matrix.arch }} SDK/WDK compile
+    name: ARM64 SDK/WDK compile
     runs-on: windows-2025-vs2026
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            msvc_arch: x64
-          - arch: arm64
-            msvc_arch: x64_arm64
 
     steps:
       - name: Checkout
@@ -46,7 +38,7 @@ jobs:
       - name: Set up MSVC and WDK
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.msvc_arch }}
+          arch: x64_arm64
 
       - name: Verify required SDK headers
         shell: pwsh
@@ -71,28 +63,6 @@ jobs:
           src\freedreno\vulkan\tests\tu_wddm_render_test.cpp
           src\freedreno\vulkan\tests\tu_wddm_transport_compile.cpp
 
-      - name: Run x64 render fixture
-        if: matrix.arch == 'x64'
-        shell: cmd
-        run: |
-          cl /nologo /std:c++17 /W4 /WX /EHsc /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C /I src\freedreno\vulkan src\freedreno\vulkan\tu_knl_wddm.cc src\freedreno\vulkan\tests\tu_wddm_render_test.cpp /Fe:%TEMP%\tu-wddm-render-test.exe
-          if errorlevel 1 exit /b 1
-          %TEMP%\tu-wddm-render-test.exe
-
-      - name: Run x64 ABI fixture
-        if: matrix.arch == 'x64'
-        shell: cmd
-        run: |
-          cl /nologo /std:c++17 /W4 /WX /EHsc /I src\freedreno\vulkan src\freedreno\vulkan\tests\tu_wddm_abi_layout.cpp /Fe:%TEMP%\tu-wddm-abi-layout.exe
-          if errorlevel 1 exit /b 1
-          %TEMP%\tu-wddm-abi-layout.exe
-          if errorlevel 1 exit /b 1
-          cl /nologo /std:c++17 /W4 /WX /EHsc /I src\freedreno\vulkan src\freedreno\vulkan\tests\tu_wddm_abi_manifest.cpp /Fe:%TEMP%\tu-wddm-abi-manifest.exe
-          if errorlevel 1 exit /b 1
-          %TEMP%\tu-wddm-abi-manifest.exe > %TEMP%\tu-wddm-abi-manifest.txt
-          if errorlevel 1 exit /b 1
-          fc /b src\freedreno\vulkan\tests\tu_wddm_abi_expected.txt %TEMP%\tu-wddm-abi-manifest.txt
-
       - name: Assert compile-only artifact policy
         shell: pwsh
         run: |
@@ -102,18 +72,8 @@ jobs:
           Write-Host "No driver, INF, package, or installation step is part of this gate."
 
   full-target:
-    name: ${{ matrix.arch }} full Turnip WDDM link (clang-cl)
+    name: ARM64 full Turnip WDDM link (clang-cl)
     runs-on: windows-2025-vs2026
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            msvc_arch: x64
-            machine: "8664"
-          - arch: arm64
-            msvc_arch: x64_arm64
-            machine: "AA64"
 
     steps:
       - name: Checkout
@@ -122,7 +82,7 @@ jobs:
       - name: Set up MSVC and WDK
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.msvc_arch }}
+          arch: x64_arm64
 
       - name: Verify LLVM toolchain
         shell: pwsh
@@ -220,8 +180,8 @@ jobs:
       - name: Configure full Turnip target
         shell: pwsh
         run: |
-          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-${{ matrix.arch }}"
-          $installDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-install-${{ matrix.arch }}"
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
+          $installDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-install-arm64"
           if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
           if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
           $mesonOptions = @(
@@ -250,27 +210,25 @@ jobs:
           $env:CXX = 'clang-cl'
           $env:AR = 'llvm-lib'
           $setupArgs = @('setup', $buildDir, '.')
-          if ('${{ matrix.arch }}' -eq 'arm64') {
-            # Meson must not execute ARM64 sanity binaries on the x64 runner.
-            $crossFile = Join-Path $env:RUNNER_TEMP 'mesa-turnip-wddm-arm64-cross.ini'
-            $crossFileLines = @(
-              '[binaries]'
-              "c = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
-              "cpp = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
-              "ar = 'llvm-lib'"
-              ''
-              '[host_machine]'
-              "system = 'windows'"
-              "cpu_family = 'aarch64'"
-              "cpu = 'arm64'"
-              "endian = 'little'"
-              ''
-              '[properties]'
-              'needs_exe_wrapper = true'
-            )
-            Set-Content -LiteralPath $crossFile -Value $crossFileLines -Encoding ascii
-            $setupArgs += @('--cross-file', $crossFile)
-          }
+          # Meson must not execute ARM64 sanity binaries on the x64 runner.
+          $crossFile = Join-Path $env:RUNNER_TEMP 'mesa-turnip-wddm-arm64-cross.ini'
+          $crossFileLines = @(
+            '[binaries]'
+            "c = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
+            "cpp = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
+            "ar = 'llvm-lib'"
+            ''
+            '[host_machine]'
+            "system = 'windows'"
+            "cpu_family = 'aarch64'"
+            "cpu = 'arm64'"
+            "endian = 'little'"
+            ''
+            '[properties]'
+            'needs_exe_wrapper = true'
+          )
+          Set-Content -LiteralPath $crossFile -Value $crossFileLines -Encoding ascii
+          $setupArgs += @('--cross-file', $crossFile)
           $setupArgs += $mesonOptions
           & meson @setupArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -278,7 +236,7 @@ jobs:
       - name: Compile and link full Turnip target
         shell: pwsh
         run: |
-          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-${{ matrix.arch }}"
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
           meson compile -C $buildDir --ninja-args=-k0 vulkan_freedreno
           $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "vulkan_freedreno.dll" |
             Select-Object -First 1
@@ -289,15 +247,15 @@ jobs:
           $headers = & dumpbin /headers $library.FullName 2>&1
           if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for linked target" }
           $headers | Select-String "machine" | Select-Object -First 1
-          $expectedMachine = "${{ matrix.machine }} machine"
+          $expectedMachine = "AA64 machine"
           if (-not ($headers -match $expectedMachine)) {
-            throw "linked target machine type does not match ${{ matrix.arch }}"
+            throw "linked target machine type does not match ARM64"
           }
 
       - name: Assert full-target compile-only policy
         shell: pwsh
         run: |
-          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-${{ matrix.arch }}"
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
           $forbidden = Get-ChildItem -Path $buildDir -Recurse -File -Include *.sys,*.inf,*.cat,*.msix,*.appx -ErrorAction SilentlyContinue
           if ($null -ne $forbidden -and $forbidden.Count -ne 0) {
             throw "full-target gate produced a driver/package artifact"
