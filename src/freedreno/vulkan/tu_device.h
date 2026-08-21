@@ -518,6 +518,9 @@ struct tu_device
    uint32_t wddm_next_fence;
    uint32_t wddm_pending_submission_upper_bound;
    bool wddm_initialized;
+   /* KMT owner graph remains live when final teardown cannot complete.  The
+    * Vulkan destroy hook must then retain this outer object as well. */
+   bool wddm_teardown_failed;
 #endif
 
    uint32_t submit_count;

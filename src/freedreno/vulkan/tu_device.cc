@@ -2977,8 +2977,14 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
        * Run its finish hook while the device object and dispatch table still
        * exist so a failed close remains retryable instead of being orphaned
        * by this early-return path. */
-      if (is_wddm(physical_device->instance))
+      if (is_wddm(physical_device->instance)) {
          tu_drm_device_finish(device);
+         if (device->wddm_teardown_failed) {
+            mesa_loge("retaining failed WDDM device initialization owner graph");
+            physical_device->device_count--;
+            return result;
+         }
+      }
 #endif
       physical_device->device_count--;
       vk_device_finish(&device->vk);
@@ -3493,6 +3499,18 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    }
 
    tu_drm_device_finish(device);
+
+#ifdef TU_HAS_WDDM
+   if (is_wddm(device->physical_device->instance) &&
+       device->wddm_teardown_failed) {
+      /* The KMT handles and their UMD bookkeeping are still live.  Freeing
+       * the outer device here would turn the deliberate owner retention into
+       * a use-after-free; keep the complete graph for process-lifetime retry
+       * or termination cleanup. */
+      mesa_loge("retaining failed WDDM teardown owner graph");
+      return;
+   }
+#endif
 
    if (device->physical_device->has_set_iova)
       util_vma_heap_finish(&device->vma);

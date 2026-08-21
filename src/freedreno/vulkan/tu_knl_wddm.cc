@@ -1446,6 +1446,7 @@ tu_wddm_device_init(struct tu_device *dev)
    dev->wddm_next_handle = 1;
    dev->wddm_next_fence = 1;
    dev->wddm_pending_submission_upper_bound = 0;
+   dev->wddm_teardown_failed = false;
    dev->wddm_bos = NULL;
    dev->wddm_bo_count = 0;
    dev->wddm_bo_capacity = 0;
@@ -1500,6 +1501,7 @@ tu_wddm_device_finish(struct tu_device *dev)
    const bool submissions_retired =
       tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX);
    if (!submissions_retired) {
+      dev->wddm_teardown_failed = true;
       vk_device_set_lost(&dev->vk, "failed to retire WDDM queue work");
       return;
    }
@@ -1521,12 +1523,14 @@ tu_wddm_device_finish(struct tu_device *dev)
                                                ~UINT64_C(4095);
 
       if (allocation->locked && !tu_wddm_allocation_unlock(allocation)) {
+         dev->wddm_teardown_failed = true;
          vk_device_set_lost(&dev->vk,
                             "failed to unlock WDDM allocation during teardown");
          return;
       }
       if (allocation->handle != 0 &&
           !tu_wddm_allocation_destroy(allocation)) {
+         dev->wddm_teardown_failed = true;
          vk_device_set_lost(&dev->vk,
                             "failed to destroy WDDM allocation during teardown");
          return;
@@ -1550,6 +1554,7 @@ tu_wddm_device_finish(struct tu_device *dev)
    if (!context_closed) {
       context_closed = tu_wddm_context_close(&dev->wddm_context);
       if (!context_closed) {
+         dev->wddm_teardown_failed = true;
          vk_device_set_lost(&dev->vk, "failed to close WDDM context");
          return;
       }
@@ -1558,6 +1563,7 @@ tu_wddm_device_finish(struct tu_device *dev)
        (dev->wddm_device.handle != 0 ||
         dev->wddm_device.adapter.handle != 0)) {
       if (!tu_wddm_device_close(&dev->wddm_device)) {
+         dev->wddm_teardown_failed = true;
          vk_device_set_lost(&dev->vk, "failed to close WDDM device");
          return;
       }
@@ -1566,6 +1572,7 @@ tu_wddm_device_finish(struct tu_device *dev)
    memset(&dev->wddm_context, 0, sizeof(dev->wddm_context));
    memset(&dev->wddm_device, 0, sizeof(dev->wddm_device));
    dev->wddm_initialized = false;
+   dev->wddm_teardown_failed = false;
 }
 
 static int
