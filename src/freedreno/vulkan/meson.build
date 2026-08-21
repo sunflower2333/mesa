@@ -269,18 +269,23 @@ endif
 
 icd_file_name = libname_prefix + 'vulkan_freedreno.' + libname_suffix
 
+freedreno_icd_command = [
+  prog_python, '@INPUT0@',
+  '--api-version', '1.4', '--xml', '@INPUT1@',
+  '--sizeof-pointer', sizeof_pointer,
+  '--icd-lib-path', vulkan_icd_lib_path,
+  '--icd-filename', icd_file_name,
+  '--out', '@OUTPUT@',
+]
+if with_platform_windows
+  freedreno_icd_command += '--use-backslash'
+endif
+
 freedreno_icd = custom_target(
   'freedreno_icd',
   input : [vk_icd_gen, vk_api_xml],
   output : 'freedreno_icd.' + vulkan_manifest_suffix,
-  command : [
-    prog_python, '@INPUT0@',
-    '--api-version', '1.4', '--xml', '@INPUT1@',
-    '--sizeof-pointer', sizeof_pointer,
-    '--icd-lib-path', vulkan_icd_lib_path,
-    '--icd-filename', icd_file_name,
-    '--out', '@OUTPUT@',
-  ],
+  command : freedreno_icd_command,
   build_by_default : true,
   install_dir : with_vulkan_icd_dir,
   install_tag : 'runtime',
@@ -288,18 +293,23 @@ freedreno_icd = custom_target(
 )
 
 _dev_icdname = 'freedreno_devenv_icd.@0@.json'.format(host_machine.cpu())
+freedreno_devenv_icd_command = [
+  prog_python, '@INPUT0@',
+  '--api-version', '1.4', '--xml', '@INPUT1@',
+  '--sizeof-pointer', sizeof_pointer,
+  '--icd-lib-path', meson.current_build_dir(),
+  '--icd-filename', icd_file_name,
+  '--out', '@OUTPUT@',
+]
+if with_platform_windows
+  freedreno_devenv_icd_command += '--use-backslash'
+endif
+
 _dev_icd = custom_target(
   'freedreno_devenv_icd',
   input : [vk_icd_gen, vk_api_xml],
   output : _dev_icdname,
-  command : [
-    prog_python, '@INPUT0@',
-    '--api-version', '1.4', '--xml', '@INPUT1@',
-    '--sizeof-pointer', sizeof_pointer,
-    '--icd-lib-path', meson.current_build_dir(),
-    '--icd-filename', icd_file_name,
-    '--out', '@OUTPUT@',
-  ],
+  command : freedreno_devenv_icd_command,
   build_by_default : true,
 )
 

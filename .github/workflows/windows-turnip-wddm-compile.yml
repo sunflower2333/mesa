@@ -270,7 +270,7 @@ jobs:
         shell: pwsh
         run: |
           $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
-          meson compile -C $buildDir --ninja-args=-k0 vulkan_freedreno
+          meson compile -C $buildDir --ninja-args=-k0 vulkan_freedreno freedreno_icd
           $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "vulkan_freedreno.dll" |
             Select-Object -First 1
           if ($null -eq $library) {
@@ -285,6 +285,93 @@ jobs:
             throw "linked target machine type does not match ARM64"
           }
 
+      - name: Stage ARM64 headless ICD runtime-test bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
+          $stageDir = Join-Path $env:RUNNER_TEMP "turnip-wddm-headless-arm64"
+          if (Test-Path $stageDir) { Remove-Item -Recurse -Force $stageDir }
+          New-Item -ItemType Directory -Path $stageDir | Out-Null
+
+          $libraries = @(Get-ChildItem -Path $buildDir -Recurse -File -Filter "vulkan_freedreno.dll")
+          if ($libraries.Count -ne 1) {
+            throw "expected exactly one ARM64 vulkan_freedreno.dll, found $($libraries.Count)"
+          }
+          $zlibLibraries = @(Get-ChildItem -Path $buildDir -Recurse -File -Filter "z-1.dll")
+          if ($zlibLibraries.Count -ne 1) {
+            throw "expected exactly one ARM64 z-1.dll dependency, found $($zlibLibraries.Count)"
+          }
+          $mesonManifests = @(
+            Get-ChildItem -Path $buildDir -Recurse -File -Filter "freedreno_icd.arm64.json"
+          )
+          if ($mesonManifests.Count -ne 1) {
+            throw "expected exactly one Meson ARM64 ICD manifest, found $($mesonManifests.Count)"
+          }
+          $mesonIcd = Get-Content -LiteralPath $mesonManifests[0].FullName -Raw |
+            ConvertFrom-Json
+          if ($mesonIcd.file_format_version -ne '1.0.1' -or
+              $mesonIcd.ICD.library_path -match '/' -or
+              $mesonIcd.ICD.library_path -notmatch '\\vulkan_freedreno\.dll$' -or
+              $mesonIcd.ICD.library_arch -ne '64') {
+            throw "Meson ARM64 ICD manifest does not use a valid Windows library path"
+          }
+
+          $exports = & dumpbin /exports $libraries[0].FullName 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin exports failed for Turnip ICD" }
+          foreach ($symbol in @(
+            'vk_icdNegotiateLoaderICDInterfaceVersion',
+            'vk_icdGetInstanceProcAddr',
+            'vk_icdGetPhysicalDeviceProcAddr'
+          )) {
+            if (-not ($exports | Select-String -SimpleMatch $symbol)) {
+              throw "Turnip ICD is missing required loader export: $symbol"
+            }
+          }
+
+          $dependents = & dumpbin /dependents $libraries[0].FullName 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin dependents failed for Turnip ICD" }
+          if (-not ($dependents | Select-String -SimpleMatch 'z-1.dll')) {
+            throw "Turnip ICD no longer imports the staged z-1.dll dependency"
+          }
+
+          foreach ($pe in @($libraries[0], $zlibLibraries[0])) {
+            $headers = & dumpbin /headers $pe.FullName 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not ($headers -match 'AA64 machine')) {
+              throw "$($pe.Name) is not an ARM64 PE image"
+            }
+            Copy-Item -LiteralPath $pe.FullName -Destination $stageDir
+          }
+
+          $manifest = Join-Path $stageDir 'freedreno_icd.arm64.json'
+          & python src/vulkan/util/vk_icd_gen.py `
+            --api-version 1.4 --xml src/vulkan/registry/vk.xml `
+            --sizeof-pointer 8 --icd-lib-path . `
+            --icd-filename vulkan_freedreno.dll `
+            --use-backslash --out $manifest
+          if ($LASTEXITCODE -ne 0) { throw "app-local ICD manifest generation failed" }
+
+          $icd = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+          if ($icd.file_format_version -ne '1.0.1' -or
+              $icd.ICD.library_path -ne '.\vulkan_freedreno.dll' -or
+              $icd.ICD.library_arch -ne '64' -or
+              $icd.ICD.api_version -notmatch '^1\.4\.[0-9]+$') {
+            throw "app-local ARM64 ICD manifest has unexpected contents"
+          }
+
+          $forbidden = Get-ChildItem -Path $stageDir -Recurse -File `
+            -Include *.sys,*.inf,*.cat,*.msix,*.appx -ErrorAction SilentlyContinue
+          if ($null -ne $forbidden -and $forbidden.Count -ne 0) {
+            throw "headless UMD bundle contains a driver or install package"
+          }
+
+          $hashLines = Get-ChildItem -Path $stageDir -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          Set-Content -LiteralPath (Join-Path $stageDir 'SHA256SUMS.txt') `
+            -Value $hashLines -Encoding ascii
+
       - name: Assert full-target compile-only policy
         shell: pwsh
         run: |
@@ -293,4 +380,12 @@ jobs:
           if ($null -ne $forbidden -and $forbidden.Count -ne 0) {
             throw "full-target gate produced a driver/package artifact"
           }
-          Write-Host "Full Turnip link completed without install, packaging, signing, or loading."
+          Write-Host "Full Turnip link completed without driver packaging, signing, installation, or loading."
+
+      - name: Upload ARM64 headless ICD runtime-test bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: turnip-wddm-headless-arm64-do-not-install
+          path: ${{ runner.temp }}/turnip-wddm-headless-arm64/*
+          if-no-files-found: error
+          retention-days: 7
