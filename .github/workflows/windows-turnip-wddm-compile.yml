@@ -37,13 +37,25 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.ref }}
 
-      - name: Verify preinstalled Windows SDK and WDK 28000
+      - name: Verify preinstalled Windows SDK and WDK
         shell: pwsh
         run: |
           $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+          $includeRoot = Join-Path $kitRoot 'Include'
+          $kit = Get-ChildItem -LiteralPath $includeRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'shared\d3dkmthk.h')) -and
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'um\Windows.h'))
+            } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+          if ($null -eq $kit) {
+            throw "no preinstalled Windows SDK/WDK include tree found under $includeRoot"
+          }
+          Write-Host "Using Windows Kit $($kit.Name)"
           $required = @(
-            (Join-Path $kitRoot 'Include\10.0.28000.0\shared\d3dkmthk.h')
-            (Join-Path $kitRoot 'Include\10.0.28000.0\um\Windows.h')
+            (Join-Path $kit.FullName 'shared\d3dkmthk.h')
+            (Join-Path $kit.FullName 'um\Windows.h')
           )
           foreach ($path in $required) {
             if (-not (Test-Path -LiteralPath $path)) {
