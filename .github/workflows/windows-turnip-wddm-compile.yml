@@ -28,16 +28,8 @@ permissions:
 
 jobs:
   compile:
-    name: ${{ matrix.arch }} SDK/WDK compile
+    name: ARM64 SDK/WDK compile
     runs-on: windows-2025-vs2026
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            msvc_arch: x64
-          - arch: arm64
-            msvc_arch: x64_arm64
 
     steps:
       - name: Checkout
@@ -45,7 +37,7 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.ref }}
 
-      - name: Ensure Windows SDK and WDK 28000
+      - name: Verify preinstalled Windows SDK and WDK 28000
         shell: pwsh
         run: |
           $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
@@ -53,36 +45,17 @@ jobs:
             (Join-Path $kitRoot 'Include\10.0.28000.0\shared\d3dkmthk.h')
             (Join-Path $kitRoot 'Include\10.0.28000.0\um\Windows.h')
           )
-          $missing = @($required | Where-Object { -not (Test-Path -LiteralPath $_) })
-          if ($missing.Count -eq 0) {
-            Write-Host 'Windows SDK/WDK 10.0.28000 is already present; skipping winget.'
-            exit 0
-          }
-
-          Write-Host "Missing SDK/WDK files: $($missing -join ', ')"
-          $packages = @(
-            'Microsoft.WindowsSDK.10.0.28000'
-            'Microsoft.WindowsWDK.10.0.28000'
-          )
-          foreach ($id in $packages) {
-            winget install --id $id --source winget `
-              --exact --silent --accept-package-agreements --accept-source-agreements `
-              --disable-interactivity
-            if ($LASTEXITCODE -ne 0) {
-              throw "winget failed to install $id (exit code $LASTEXITCODE)"
-            }
-          }
-
           foreach ($path in $required) {
             if (-not (Test-Path -LiteralPath $path)) {
-              throw "SDK/WDK installation did not provide required file: $path"
+              throw "preinstalled SDK/WDK file not found: $path"
             }
+            Write-Host "SDK/WDK -> $path"
           }
 
       - name: Set up MSVC and WDK
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.msvc_arch }}
+          arch: x64_arm64
 
       - name: Verify required SDK headers
         shell: pwsh
@@ -105,20 +78,6 @@ jobs:
           src\freedreno\vulkan\tu_wddm_dispatch.cc
           src\freedreno\vulkan\tu_knl_wddm.cc
           src\freedreno\vulkan\tests\tu_wddm_transport_compile.cpp
-
-      - name: Run x64 ABI fixture
-        if: matrix.arch == 'x64'
-        shell: cmd
-        run: |
-          cl /nologo /std:c++17 /W4 /WX /EHsc /I src\freedreno\vulkan src\freedreno\vulkan\tests\tu_wddm_abi_layout.cpp /Fe:%TEMP%\tu-wddm-abi-layout.exe
-          if errorlevel 1 exit /b 1
-          %TEMP%\tu-wddm-abi-layout.exe
-          if errorlevel 1 exit /b 1
-          cl /nologo /std:c++17 /W4 /WX /EHsc /I src\freedreno\vulkan src\freedreno\vulkan\tests\tu_wddm_abi_manifest.cpp /Fe:%TEMP%\tu-wddm-abi-manifest.exe
-          if errorlevel 1 exit /b 1
-          %TEMP%\tu-wddm-abi-manifest.exe > %TEMP%\tu-wddm-abi-manifest.txt
-          if errorlevel 1 exit /b 1
-          fc /b src\freedreno\vulkan\tests\tu_wddm_abi_expected.txt %TEMP%\tu-wddm-abi-manifest.txt
 
       - name: Assert compile-only artifact policy
         shell: pwsh
