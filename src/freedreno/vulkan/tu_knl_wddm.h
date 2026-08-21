@@ -164,6 +164,7 @@ bool tu_wddm_adapter_close(struct tu_wddm_adapter *adapter);
 bool tu_wddm_device_open(struct tu_wddm_runtime *runtime,
                          const struct tu_wddm_adapter_info *identity,
                          struct tu_wddm_device *device);
+bool tu_wddm_device_execution_active(struct tu_wddm_device *device);
 bool tu_wddm_device_close(struct tu_wddm_device *device);
 
 bool tu_wddm_context_open(struct tu_wddm_device *device,

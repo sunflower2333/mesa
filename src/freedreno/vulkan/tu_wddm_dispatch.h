@@ -53,13 +53,6 @@ struct tu_wddm_dispatch {
    PFND3DKMT_ESCAPE Escape;
    PFND3DKMT_RENDER Render;
    PFND3DKMT_GETDEVICESTATE GetDeviceState;
-
-   PFND3DKMT_CREATESYNCHRONIZATIONOBJECT CreateSynchronizationObject;
-   PFND3DKMT_DESTROYSYNCHRONIZATIONOBJECT DestroySynchronizationObject;
-   PFND3DKMT_WAITFORSYNCHRONIZATIONOBJECT WaitForSynchronizationObject;
-   PFND3DKMT_SIGNALSYNCHRONIZATIONOBJECT SignalSynchronizationObject;
-   PFND3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU WaitForSynchronizationObjectFromCpu;
-   PFND3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMCPU SignalSynchronizationObjectFromCpu;
 };
 
 /* Returns false if gdi32 or any required thunk is unavailable. */

@@ -47,12 +47,6 @@ tu_wddm_dispatch_init(struct tu_wddm_dispatch *dispatch)
    TU_WDDM_LOAD(Escape);
    TU_WDDM_LOAD(Render);
    TU_WDDM_LOAD(GetDeviceState);
-   TU_WDDM_LOAD(CreateSynchronizationObject);
-   TU_WDDM_LOAD(DestroySynchronizationObject);
-   TU_WDDM_LOAD(WaitForSynchronizationObject);
-   TU_WDDM_LOAD(SignalSynchronizationObject);
-   TU_WDDM_LOAD(WaitForSynchronizationObjectFromCpu);
-   TU_WDDM_LOAD(SignalSynchronizationObjectFromCpu);
 
 #undef TU_WDDM_LOAD
    return true;

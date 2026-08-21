@@ -504,6 +504,22 @@ tu_wddm_device_close(struct tu_wddm_device *device)
 }
 
 bool
+tu_wddm_device_execution_active(struct tu_wddm_device *device)
+{
+   if (device == NULL || device->adapter.runtime == NULL ||
+       device->adapter.runtime->dispatch.GetDeviceState == NULL ||
+       device->handle == 0)
+      return false;
+
+   D3DKMT_GETDEVICESTATE state = {};
+   state.hDevice = device->handle;
+   state.StateType = D3DKMT_DEVICESTATE_EXECUTION;
+   NTSTATUS status = device->adapter.runtime->dispatch.GetDeviceState(&state);
+   return NT_SUCCESS(status) &&
+          state.ExecutionState == D3DKMT_DEVICEEXECUTION_ACTIVE;
+}
+
+bool
 tu_wddm_context_open(struct tu_wddm_device *device,
                      struct tu_wddm_context *context)
 {
@@ -1649,9 +1665,10 @@ tu_wddm_device_check_status(struct tu_device *dev)
 {
    uint32_t completed = 0;
    if (!dev->wddm_initialized ||
-       !tu_wddm_context_get_completed_fence(&dev->wddm_context, &completed))
+       !tu_wddm_context_get_completed_fence(&dev->wddm_context, &completed) ||
+       !tu_wddm_device_execution_active(&dev->wddm_device))
       return vk_device_set_lost(&dev->vk,
-                                "WDDM context completion query failed");
+                                "WDDM context or device execution query failed");
    return VK_SUCCESS;
 }
 

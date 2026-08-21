@@ -193,6 +193,7 @@ struct test_fixture {
    NTSTATUS render_status;
    NTSTATUS context_info_status;
    NTSTATUS escape_status;
+   NTSTATUS get_device_state_status;
    NTSTATUS create_allocation_status;
    NTSTATUS destroy_allocation_status;
    NTSTATUS create_context_status;
@@ -215,6 +216,8 @@ struct test_fixture {
    unsigned unlock_calls;
    unsigned render_calls;
    unsigned escape_calls;
+   unsigned get_device_state_calls;
+   UINT execution_state;
    uint32_t completed_fence;
    uint32_t returned_context_id;
    uint32_t expected_reference_flags;
@@ -651,6 +654,23 @@ fake_escape(const D3DKMT_ESCAPE *escape)
    return kStatusSuccess;
 }
 
+NTSTATUS APIENTRY
+fake_get_device_state(D3DKMT_GETDEVICESTATE *state)
+{
+   test_fixture *fixture = current_fixture;
+   CHECK(fixture != NULL);
+   CHECK(state != NULL);
+   if (fixture == NULL || state == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->get_device_state_calls++;
+   CHECK(state->hDevice == kDeviceHandle);
+   CHECK(state->StateType == D3DKMT_DEVICESTATE_EXECUTION);
+   state->ExecutionState =
+      static_cast<decltype(state->ExecutionState)>(fixture->execution_state);
+   return fixture->get_device_state_status;
+}
+
 void
 init_fixture(test_fixture *fixture)
 {
@@ -666,9 +686,12 @@ init_fixture(test_fixture *fixture)
    fixture->runtime.dispatch.Unlock = fake_unlock;
    fixture->runtime.dispatch.Render = fake_render;
    fixture->runtime.dispatch.Escape = fake_escape;
+   fixture->runtime.dispatch.GetDeviceState = fake_get_device_state;
    fixture->render_status = kStatusSuccess;
    fixture->context_info_status = kStatusSuccess;
    fixture->escape_status = kStatusSuccess;
+   fixture->get_device_state_status = kStatusSuccess;
+   fixture->execution_state = D3DKMT_DEVICEEXECUTION_ACTIVE;
    fixture->create_context_status = kStatusSuccess;
    fixture->destroy_context_status = kStatusSuccess;
    fixture->destroy_device_status = kStatusSuccess;
@@ -707,6 +730,29 @@ init_fixture(test_fixture *fixture)
    fixture->context.info.ResetGeneration = kResetGeneration;
    fixture->context.info.ContextId = kContextId;
    fixture->context.info.SubmitQueueId = kSubmitQueueId;
+}
+
+void
+test_device_execution_state()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+
+   CHECK(tu_wddm_device_execution_active(&fixture.device));
+   CHECK(fixture.get_device_state_calls == 1);
+
+   fixture.execution_state = D3DKMT_DEVICEEXECUTION_RESET;
+   CHECK(!tu_wddm_device_execution_active(&fixture.device));
+   CHECK(fixture.get_device_state_calls == 2);
+
+   fixture.execution_state = D3DKMT_DEVICEEXECUTION_ACTIVE;
+   fixture.get_device_state_status = kStatusInvalidParameter;
+   CHECK(!tu_wddm_device_execution_active(&fixture.device));
+   CHECK(fixture.get_device_state_calls == 3);
+
+   fixture.device.handle = 0;
+   CHECK(!tu_wddm_device_execution_active(&fixture.device));
+   CHECK(fixture.get_device_state_calls == 3);
 }
 
 void
@@ -1523,6 +1569,7 @@ main()
 {
    test_priority_contract();
    test_device_luid_contract();
+   test_device_execution_state();
    test_heap_size_contract();
    test_context_buffer_contract_and_failed_destroy_retention();
    test_context_info_failure_cleanup_retry();
