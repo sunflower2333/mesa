@@ -18,8 +18,11 @@ on:
       - "src/freedreno/vulkan/tests/tu_wddm_render_test.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_vulkan_probe.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_compute.comp"
+      - "src/freedreno/vulkan/tests/tu_wddm_graphics.vert"
+      - "src/freedreno/vulkan/tests/tu_wddm_graphics.frag"
       - "src/freedreno/vulkan/tests/tu_wddm_transport_compile.cpp"
       - "src/freedreno/tests/**"
       - "src/freedreno/vulkan/**"
@@ -314,6 +317,13 @@ jobs:
               throw "compute workload probe is missing required operation: $fragment"
             }
           }
+          $graphicsProbe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp' -Raw
+          foreach ($fragment in @('CreateGraphicsPipelines', 'CmdDraw', 'CmdCopyImageToBuffer',
+                                  'QueueSubmit', 'WaitForFences')) {
+            if ($graphicsProbe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+              throw "offscreen graphics workload probe is missing required operation: $fragment"
+            }
+          }
           $win32Probe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp' -Raw
           foreach ($fragment in @('vkCreateWin32SurfaceKHR', 'vkCreateSwapchainKHR', 'vkAcquireNextImageKHR',
                                   'QueueSubmit', 'CmdClearColorImage', 'vkQueuePresentKHR',
@@ -333,18 +343,34 @@ jobs:
           src\freedreno\vulkan\tests\tu_wddm_vulkan_probe.cpp
           /Fe:tu_wddm_vulkan_probe_arm64.exe
 
-      - name: Build ARM64 headless compute and Win32 WSI probes
+      - name: Build ARM64 compute, offscreen graphics, and Win32 WSI probes
         shell: pwsh
         run: |
-          $shader = Join-Path $PWD 'tu_wddm_compute.spv'
-          & glslangValidator.exe -V --target-env vulkan1.1 -S comp -o $shader `
+          $computeShader = Join-Path $PWD 'tu_wddm_compute.spv'
+          & glslangValidator.exe -V --target-env vulkan1.1 -S comp -o $computeShader `
             'src/freedreno/vulkan/tests/tu_wddm_compute.comp'
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shader -PathType Leaf)) {
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $computeShader -PathType Leaf)) {
             throw 'compute shader compilation failed'
+          }
+          $vertexShader = Join-Path $PWD 'tu_wddm_graphics.vert.spv'
+          & glslangValidator.exe -V --target-env vulkan1.1 -S vert -o $vertexShader `
+            'src/freedreno/vulkan/tests/tu_wddm_graphics.vert'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $vertexShader -PathType Leaf)) {
+            throw 'graphics vertex shader compilation failed'
+          }
+          $fragmentShader = Join-Path $PWD 'tu_wddm_graphics.frag.spv'
+          & glslangValidator.exe -V --target-env vulkan1.1 -S frag -o $fragmentShader `
+            'src/freedreno/vulkan/tests/tu_wddm_graphics.frag'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fragmentShader -PathType Leaf)) {
+            throw 'graphics fragment shader compilation failed'
           }
           cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
             src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp `
             /Fe:tu_wddm_vulkan_compute_probe_arm64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
+            src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp `
+            /Fe:tu_wddm_vulkan_graphics_probe_arm64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
             src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp `
@@ -365,7 +391,9 @@ jobs:
           }
           Write-Host 'ARM64 Vulkan runtime probe linked; it requires the app-local Turnip DLL at runtime.'
 
-          foreach ($name in @('tu_wddm_vulkan_compute_probe_arm64.exe', 'tu_wddm_win32_probe_arm64.exe')) {
+          foreach ($name in @('tu_wddm_vulkan_compute_probe_arm64.exe',
+                              'tu_wddm_vulkan_graphics_probe_arm64.exe',
+                              'tu_wddm_win32_probe_arm64.exe')) {
             $path = Join-Path $PWD $name
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "missing ARM64 workload probe: $name"
@@ -375,8 +403,11 @@ jobs:
               throw "$name machine type does not match ARM64"
             }
           }
-          if (-not (Test-Path -LiteralPath (Join-Path $PWD 'tu_wddm_compute.spv') -PathType Leaf)) {
-            throw 'compiled compute shader is missing'
+          foreach ($shader in @('tu_wddm_compute.spv', 'tu_wddm_graphics.vert.spv',
+                                'tu_wddm_graphics.frag.spv')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $PWD $shader) -PathType Leaf)) {
+              throw "compiled workload shader is missing: $shader"
+            }
           }
 
       - name: Upload ARM64 Vulkan runtime probe
@@ -393,8 +424,11 @@ jobs:
           name: tu-wddm-vulkan-workloads-arm64
           path: |
             tu_wddm_vulkan_compute_probe_arm64.exe
+            tu_wddm_vulkan_graphics_probe_arm64.exe
             tu_wddm_win32_probe_arm64.exe
             tu_wddm_compute.spv
+            tu_wddm_graphics.vert.spv
+            tu_wddm_graphics.frag.spv
           if-no-files-found: error
           retention-days: 7
 
@@ -500,8 +534,11 @@ jobs:
           foreach ($workload in @(
             'tu_wddm_vulkan_probe_arm64.exe',
             'tu_wddm_vulkan_compute_probe_arm64.exe',
+            'tu_wddm_vulkan_graphics_probe_arm64.exe',
             'tu_wddm_win32_probe_arm64.exe',
-            'tu_wddm_compute.spv'
+            'tu_wddm_compute.spv',
+            'tu_wddm_graphics.vert.spv',
+            'tu_wddm_graphics.frag.spv'
           )) {
             $workloadPath = Join-Path $PWD $workload
             if (-not (Test-Path -LiteralPath $workloadPath -PathType Leaf)) {

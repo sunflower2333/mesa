@@ -17,17 +17,28 @@ copies the mapped image into the window DC. It does not exercise the KMD
 `DxgkDdiPresent` callback; that callback remains a separate Windows display
 runtime gate.
 
-The ARM64 bundle also contains three runtime probes. `tu_wddm_vulkan_probe_arm64.exe`
+The ARM64 bundle also contains four runtime probes. `tu_wddm_vulkan_probe_arm64.exe`
 checks ICD loading, adapter identity, queue discovery, and device creation;
 `tu_wddm_vulkan_compute_probe_arm64.exe` takes `tu_wddm_compute.spv`, submits a
 real storage-buffer compute dispatch, waits on a Vulkan fence, and verifies all
-256 results; `tu_wddm_win32_probe_arm64.exe` creates a Win32 window, queries
-surface support/formats/present modes, and creates a CPU/GDI swapchain. It
-acquires an image with a fence, records a clear and both image-layout
+256 results; `tu_wddm_vulkan_graphics_probe_arm64.exe` takes
+`tu_wddm_graphics.vert.spv` and `tu_wddm_graphics.frag.spv`, renders a
+fullscreen triangle into a 64x64 optimal RGBA8 image, copies it to a
+host-visible buffer, waits on a real fence, and verifies every pixel is
+`rgba(255,0,0,255)`; `tu_wddm_win32_probe_arm64.exe` creates a Win32 window,
+queries surface support/formats/present modes, and creates a CPU/GDI swapchain.
+It acquires an image with a fence, records a clear and both image-layout
 transitions, submits the command buffer, and calls `vkQueuePresentKHR`. It then
 resizes, minimizes, restores, recreates the swapchain through `oldSwapchain`,
 and presents a second frame. The CI jobs only cross-compile and package these
 inputs. They do not execute them or prove Windows/KMT/Host runtime behavior.
+
+Run the offscreen graphics workload from the extracted app-local bundle with:
+
+```powershell
+.\tu_wddm_vulkan_graphics_probe_arm64.exe `
+  .\tu_wddm_graphics.vert.spv .\tu_wddm_graphics.frag.spv
+```
 
 Run installation only after the matching DroidVM Native Context KMD is active:
 
