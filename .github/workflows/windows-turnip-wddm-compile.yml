@@ -306,6 +306,36 @@ jobs:
           }
           Write-Host 'WDDM Win32 WSI policy selects CPU/GDI and disables DRM modifiers.'
 
+      - name: Build ARM64 app-local Vulkan runtime probe
+        shell: cmd
+        run: >-
+          cl /nologo /std:c++17 /W4 /WX /EHsc
+          /I include
+          src\freedreno\vulkan\tests\tu_wddm_vulkan_probe.cpp
+          /Fe:tu_wddm_vulkan_probe_arm64.exe
+
+      - name: Verify and upload ARM64 Vulkan runtime probe
+        shell: pwsh
+        run: |
+          $probe = Join-Path $PWD 'tu_wddm_vulkan_probe_arm64.exe'
+          if (-not (Test-Path -LiteralPath $probe -PathType Leaf) -or
+              (Get-Item -LiteralPath $probe).Length -eq 0) {
+            throw 'ARM64 Vulkan runtime probe did not link'
+          }
+          $headers = & dumpbin /headers $probe 2>&1
+          if ($LASTEXITCODE -ne 0 -or -not ($headers -match 'AA64 machine')) {
+            throw 'Vulkan runtime probe machine type does not match ARM64'
+          }
+          Write-Host 'ARM64 Vulkan runtime probe linked; it requires the app-local Turnip DLL at runtime.'
+
+      - name: Upload ARM64 Vulkan runtime probe
+        uses: actions/upload-artifact@v7
+        with:
+          name: tu-wddm-vulkan-probe-arm64
+          path: tu_wddm_vulkan_probe_arm64.exe
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Stage ARM64 Turnip ICD bundle
         shell: pwsh
         run: |
