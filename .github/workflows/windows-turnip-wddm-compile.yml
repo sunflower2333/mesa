@@ -285,12 +285,12 @@ jobs:
             throw "linked target machine type does not match ARM64"
           }
 
-      - name: Stage ARM64 headless ICD runtime-test bundle
+      - name: Stage ARM64 Turnip ICD bundle
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
-          $stageDir = Join-Path $env:RUNNER_TEMP "turnip-wddm-headless-arm64"
+          $stageDir = Join-Path $env:RUNNER_TEMP "turnip-wddm-arm64-icd"
           if (Test-Path $stageDir) { Remove-Item -Recurse -Force $stageDir }
           New-Item -ItemType Directory -Path $stageDir | Out-Null
 
@@ -349,20 +349,46 @@ jobs:
             --sizeof-pointer 8 --icd-lib-path . `
             --icd-filename vulkan_freedreno.dll `
             --use-backslash --out $manifest
-          if ($LASTEXITCODE -ne 0) { throw "app-local ICD manifest generation failed" }
+          if ($LASTEXITCODE -ne 0) { throw "ICD manifest generation failed" }
 
           $icd = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
           if ($icd.file_format_version -ne '1.0.1' -or
               $icd.ICD.library_path -ne '.\vulkan_freedreno.dll' -or
               $icd.ICD.library_arch -ne '64' -or
               $icd.ICD.api_version -notmatch '^1\.4\.[0-9]+$') {
-            throw "app-local ARM64 ICD manifest has unexpected contents"
+            throw "ARM64 ICD manifest has unexpected contents"
           }
+
+          $installerSource = Resolve-Path 'src/freedreno/vulkan/turnip-wddm-icd.ps1'
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $installerSource.Path, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            throw "Turnip ICD manager has PowerShell parse errors: $($parseErrors -join '; ')"
+          }
+          $installerText = Get-Content -LiteralPath $installerSource.Path -Raw
+          foreach ($fragment in @(
+            'function Get-VulkanDriverValueSnapshot',
+            'function Restore-VulkanDriverValue',
+            'function New-IcdTransactionRoot',
+            "`$registrySnapshot = Get-VulkanDriverValueSnapshot",
+            'Turnip ICD install failed and rollback also failed',
+            'Turnip ICD uninstall failed and rollback also failed'
+          )) {
+            if ($installerText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+              throw "Turnip ICD manager is missing transactional policy: $fragment"
+            }
+          }
+          Copy-Item -LiteralPath $installerSource.Path `
+            -Destination $stageDir
+          Copy-Item -LiteralPath 'src/freedreno/vulkan/TURNIP_WDDM_ICD.md' `
+            -Destination $stageDir
 
           $forbidden = Get-ChildItem -Path $stageDir -Recurse -File `
             -Include *.sys,*.inf,*.cat,*.msix,*.appx -ErrorAction SilentlyContinue
           if ($null -ne $forbidden -and $forbidden.Count -ne 0) {
-            throw "headless UMD bundle contains a driver or install package"
+            throw "Turnip UMD bundle contains a kernel driver package"
           }
 
           $hashLines = Get-ChildItem -Path $stageDir -File | Sort-Object Name | ForEach-Object {
@@ -372,7 +398,7 @@ jobs:
           Set-Content -LiteralPath (Join-Path $stageDir 'SHA256SUMS.txt') `
             -Value $hashLines -Encoding ascii
 
-      - name: Assert full-target compile-only policy
+      - name: Assert UMD-only package policy
         shell: pwsh
         run: |
           $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
@@ -380,12 +406,12 @@ jobs:
           if ($null -ne $forbidden -and $forbidden.Count -ne 0) {
             throw "full-target gate produced a driver/package artifact"
           }
-          Write-Host "Full Turnip link completed without driver packaging, signing, installation, or loading."
+          Write-Host "Turnip bundle contains no kernel driver and performs no CI installation or loading."
 
-      - name: Upload ARM64 headless ICD runtime-test bundle
+      - name: Upload ARM64 Turnip ICD bundle
         uses: actions/upload-artifact@v7
         with:
-          name: turnip-wddm-headless-arm64-do-not-install
-          path: ${{ runner.temp }}/turnip-wddm-headless-arm64/*
+          name: turnip-wddm-arm64-icd-bundle
+          path: ${{ runner.temp }}/turnip-wddm-arm64-icd/*
           if-no-files-found: error
           retention-days: 7
