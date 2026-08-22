@@ -346,7 +346,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
             src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp `
-            /Fe:tu_wddm_win32_probe_arm64.exe
+            /Fe:tu_wddm_win32_probe_arm64.exe user32.lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify and upload ARM64 Vulkan runtime probe
