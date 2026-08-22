@@ -24,6 +24,7 @@ on:
       - "src/freedreno/vulkan/tests/tu_wddm_graphics.vert"
       - "src/freedreno/vulkan/tests/tu_wddm_graphics.frag"
       - "src/freedreno/vulkan/tests/tu_wddm_transport_compile.cpp"
+      - "src/freedreno/vulkan/tests/check_tu_wddm_policy.py"
       - "src/freedreno/tests/**"
       - "src/freedreno/vulkan/**"
       - "meson.build"
@@ -143,6 +144,10 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --upgrade `
             "meson==1.9.1" mako packaging pyyaml
+
+      - name: Verify WDDM pageable-memory and residency policy
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/check_tu_wddm_policy.py
 
       - name: Install Windows flex and bison
         shell: pwsh

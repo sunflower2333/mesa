@@ -663,6 +663,9 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(tu_framebuffer, base, VkFramebuffer,
 uint64_t
 tu_get_system_heap_size(struct tu_physical_device *physical_device);
 
+void
+tu_bo_release_heap_accounting(struct tu_device *device, struct tu_bo *bo);
+
 VkResult
 tu_physical_device_init(struct tu_physical_device *device,
                         struct tu_instance *instance);

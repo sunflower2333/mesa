@@ -2222,20 +2222,6 @@ tu_get_budget_memory(struct tu_physical_device *physical_device)
    if (tu_get_guest_pool_budget(physical_device, &pool_budget))
       return pool_budget;
 
-#ifdef TU_HAS_WDDM
-   /* The WDDM KMD exposes the guest-owned pool as one fixed, non-system
-    * VidMm segment.  There is no dynamic pool-usage query in this slice, so
-    * the segment size itself is the authoritative budget; consulting the
-    * generic guest-RAM estimate would advertise memory that BOs cannot use. */
-   uint64_t selected_heap_size = 0;
-   if (physical_device->wddm_adapter.private_info.Header.Magic ==
-          VIOGPU_WDDM_ABI_MAGIC &&
-       tu_wddm_select_heap_size(physical_device->wddm_adapter.dedicated_video_memory,
-                                physical_device->va_size, &selected_heap_size) &&
-       selected_heap_size == heap_size)
-      return heap_size;
-#endif
-
    /*
     * Let's not incite the app to starve the system: report at most 90% of
     * available system memory.
@@ -2272,7 +2258,7 @@ tu_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice pdev,
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
          VkPhysicalDeviceMemoryBudgetPropertiesEXT *memory_budget_props =
             (VkPhysicalDeviceMemoryBudgetPropertiesEXT *) ext;
-         memory_budget_props->heapUsage[0] = physical_device->heap.used;
+         memory_budget_props->heapUsage[0] = p_atomic_read(&physical_device->heap.used);
          memory_budget_props->heapBudget[0] = tu_get_budget_memory(physical_device);
 
          /* The heapBudget and heapUsage values must be zero for array elements
@@ -3648,15 +3634,51 @@ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
 static VkResult
 tu_add_to_heap(struct tu_device *dev, struct tu_bo *bo)
 {
+   if (bo == NULL || bo->heap_accounted)
+      return vk_error(dev, VK_ERROR_UNKNOWN);
+
    struct tu_memory_heap *mem_heap = &dev->physical_device->heap;
-   uint64_t mem_heap_used = p_atomic_add_return(&mem_heap->used, bo->size);
-   if (mem_heap_used > mem_heap->size) {
-      p_atomic_add(&mem_heap->used, -bo->size);
-      tu_bo_finish(dev, bo);
+   uint64_t accounting_size = bo->size;
+#ifdef TU_HAS_WDDM
+   if (bo->wddm_allocation != NULL) {
+      accounting_size = bo->wddm_allocation->vma_size;
+      if (accounting_size == 0)
+         return vk_error(dev, VK_ERROR_UNKNOWN);
+   }
+#endif
+
+   bo->heap_accounted_size = accounting_size;
+   bo->heap_accounted = true;
+   uint64_t mem_heap_used = p_atomic_add_return(&mem_heap->used, accounting_size);
+   if (mem_heap_used < accounting_size || mem_heap_used > mem_heap->size) {
+#ifdef TU_HAS_WDDM
+      if (bo->wddm_allocation != NULL) {
+         /* WDDM teardown can fail and retain the allocation.  Its final-owner
+          * path releases accounting only after KMT destruction succeeds. */
+         tu_bo_finish(dev, bo);
+      } else
+#endif
+      {
+         tu_bo_release_heap_accounting(dev, bo);
+         tu_bo_finish(dev, bo);
+      }
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                        "Out of heap memory");
    }
    return VK_SUCCESS;
+}
+
+void
+tu_bo_release_heap_accounting(struct tu_device *device, struct tu_bo *bo)
+{
+   if (device == NULL || bo == NULL || !bo->heap_accounted)
+      return;
+
+   const uint64_t accounting_size = bo->heap_accounted_size;
+   assert(accounting_size != 0);
+   bo->heap_accounted = false;
+   bo->heap_accounted_size = 0;
+   p_atomic_add(&device->physical_device->heap.used, -accounting_size);
 }
 
 static VkResult
@@ -3743,7 +3765,10 @@ _tu_destroy_memory(struct tu_device *device,
                   struct tu_device_memory *mem)
 {
    if (mem->bo) {
-      p_atomic_add(&device->physical_device->heap.used, -mem->bo->size);
+#ifdef TU_HAS_WDDM
+      if (mem->bo->wddm_allocation == NULL)
+#endif
+         tu_bo_release_heap_accounting(device, mem->bo);
       tu_bo_finish(device, mem->bo);
    }
 

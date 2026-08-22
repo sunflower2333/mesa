@@ -153,31 +153,6 @@ test_device_luid_contract()
       &identity, device_luid, sizeof(device_luid), NULL));
 }
 
-void
-test_heap_size_contract()
-{
-   uint64_t heap_size = UINT64_MAX;
-
-   CHECK(!tu_wddm_select_heap_size(0, kVaSize, &heap_size));
-   CHECK(heap_size == 0);
-
-   heap_size = UINT64_MAX;
-   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x1001), kVaSize, &heap_size));
-   CHECK(heap_size == 0);
-
-   heap_size = 0;
-   CHECK(tu_wddm_select_heap_size(UINT64_C(0x02000000), kVaSize, &heap_size));
-   CHECK(heap_size == kVaSize);
-
-   heap_size = 0;
-   CHECK(tu_wddm_select_heap_size(UINT64_C(0x00400000), kVaSize, &heap_size));
-   CHECK(heap_size == UINT64_C(0x00400000));
-
-   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x00400000), 0, &heap_size));
-   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x00400000), UINT64_C(0x1001), &heap_size));
-   CHECK(!tu_wddm_select_heap_size(UINT64_C(0x00400000), kVaSize, NULL));
-}
-
 struct test_fixture {
    tu_wddm_runtime runtime;
    tu_wddm_device device;
@@ -1583,7 +1558,6 @@ main()
    test_priority_contract();
    test_device_luid_contract();
    test_device_execution_state();
-   test_heap_size_contract();
    test_context_buffer_contract_and_failed_destroy_retention();
    test_context_info_failure_cleanup_retry();
    test_context_lifecycle_loop();

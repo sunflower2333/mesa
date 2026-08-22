@@ -11,7 +11,7 @@
 static_assert(sizeof(VIOGPU_WDDM_ADAPTER_INFO) == 128, "private ABI drift");
 static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 64, "private ABI drift");
 static_assert(sizeof(VIOGPU_WDDM_FENCE_INFO) == 56, "private ABI drift");
-static_assert(TU_WDDM_MAX_RENDER_ALLOCATIONS == 128, "KMD allocation limit drift");
+static_assert(TU_WDDM_MAX_RENDER_ALLOCATIONS == 1024, "KMD allocation limit drift");
 static_assert(TU_WDDM_MAX_RENDER_COMMAND_SIZE == 64 * 1024, "KMD command limit drift");
 
 int

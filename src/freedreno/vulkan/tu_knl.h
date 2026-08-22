@@ -54,6 +54,7 @@ struct tu_bo {
 #endif
    uint64_t size;
    uint64_t iova;
+   uint64_t heap_accounted_size;
    void *map;
    const char *name; /* pointer to device->bo_sizes's entry's name */
    int32_t refcnt;
@@ -79,6 +80,7 @@ struct tu_bo {
    bool cached_non_coherent : 1;
    bool lazy : 1;
    bool gpu_read_only : 1;
+   bool heap_accounted : 1;
 
    bool dump;
 

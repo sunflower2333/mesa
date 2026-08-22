@@ -75,11 +75,13 @@ struct tu_wddm_context {
 
 struct tu_instance;
 
-/* These limits mirror the compile-only KMD contract.  They are deliberately
- * smaller than the WDDM wire fields so arithmetic stays bounded before a
- * D3DKMT call is made. */
+/* These limits mirror the KMD contract.  Native-context packets carry the
+ * legacy MSM BO table, so WDDM must keep every live BO resident when raw GPU
+ * addresses can escape through buffer-device-address.  1024 references plus
+ * 256 command entries fit in the 64 KiB DMA buffer with the private reference
+ * table; both sides reject larger packets before a D3DKMT call is made. */
 enum {
-   TU_WDDM_MAX_RENDER_ALLOCATIONS = 128,
+   TU_WDDM_MAX_RENDER_ALLOCATIONS = 1024,
    TU_WDDM_MAX_RENDER_COMMAND_SIZE = 64 * 1024,
 };
 
@@ -145,11 +147,6 @@ bool tu_wddm_get_device_id_properties(const struct tu_wddm_adapter_info *identit
                                       void *device_luid,
                                       size_t device_luid_size,
                                       uint32_t *device_node_mask);
-/* Select the fixed VidMm guest-pool heap exposed by DXGI.  Both inputs must
- * be non-zero 4 KiB quantities; the address-space window caps the pool. */
-bool tu_wddm_select_heap_size(uint64_t dedicated_video_memory,
-                              uint64_t va_size,
-                              uint64_t *heap_size);
 bool tu_wddm_validate_context_info(const VIOGPU_WDDM_CONTEXT_INFO *info,
                                   uint64_t expected_reset_generation);
 bool tu_wddm_validate_fence_info(const VIOGPU_WDDM_FENCE_INFO *info,

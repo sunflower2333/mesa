@@ -147,13 +147,6 @@ tu_wddm_get_device_id_properties(const struct tu_wddm_adapter_info *identity,
    return true;
 }
 
-static inline bool
-tu_wddm_page_aligned_nonzero(uint64_t size)
-{
-   constexpr uint64_t page_size = UINT64_C(4096);
-   return size != 0 && (size & (page_size - 1)) == 0;
-}
-
 static bool
 tu_wddm_context_buffers_valid(const D3DKMT_CREATECONTEXT *info)
 {
@@ -169,23 +162,6 @@ tu_wddm_context_buffers_valid(const D3DKMT_CREATECONTEXT *info)
       return false;
 
    return true;
-}
-
-bool
-tu_wddm_select_heap_size(uint64_t dedicated_video_memory,
-                         uint64_t va_size,
-                         uint64_t *heap_size)
-{
-   if (heap_size == NULL)
-      return false;
-
-   *heap_size = 0;
-   if (!tu_wddm_page_aligned_nonzero(dedicated_video_memory) ||
-       !tu_wddm_page_aligned_nonzero(va_size))
-      return false;
-
-   *heap_size = dedicated_video_memory < va_size ? dedicated_video_memory : va_size;
-   return *heap_size != 0;
 }
 
 bool
@@ -1228,6 +1204,17 @@ enum {
    TU_WDDM_MAX_SUBMIT_REFERENCES = TU_WDDM_MAX_RENDER_ALLOCATIONS,
 };
 
+static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) +
+                    TU_WDDM_MAX_SUBMIT_REFERENCES *
+                       sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) +
+                    sizeof(tu_wddm_msm_submit_request) +
+                    TU_WDDM_MAX_SUBMIT_REFERENCES *
+                       sizeof(tu_wddm_msm_submit_bo) +
+                    TU_WDDM_MAX_SUBMIT_COMMANDS *
+                       sizeof(tu_wddm_msm_submit_command) <=
+                 TU_WDDM_MAX_RENDER_COMMAND_SIZE,
+              "maximum WDDM submit no longer fits the DMA buffer");
+
 struct tu_wddm_sync {
    struct vk_sync base;
    struct tu_wddm_context *context;
@@ -1501,6 +1488,9 @@ tu_wddm_alloc_token_locked(struct tu_device *dev)
 static bool
 tu_wddm_add_bo_locked(struct tu_device *dev, struct tu_bo *bo)
 {
+   if (dev->wddm_bo_count >= TU_WDDM_MAX_RENDER_ALLOCATIONS)
+      return false;
+
    if (dev->wddm_bo_count == dev->wddm_bo_capacity) {
       uint32_t capacity = dev->wddm_bo_capacity ? dev->wddm_bo_capacity * 2 : 64;
       struct tu_bo **bos = (struct tu_bo **)vk_realloc(
@@ -1616,6 +1606,7 @@ tu_wddm_device_finish(struct tu_device *dev)
          return;
       }
 
+      tu_bo_release_heap_accounting(dev, bo);
       tu_debug_bos_del(dev, bo);
       tu_dump_bo_del(dev, bo);
       mtx_lock(&dev->vma_mutex);
@@ -1765,7 +1756,9 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
     * allocation.  The WDDM owner stays unpublished until CreateAllocation
     * returns, so a concurrent residency snapshot can skip this placeholder. */
    mtx_lock(&dev->bo_mutex);
-   uint32_t token = tu_wddm_alloc_token_locked(dev);
+   const bool capacity_available =
+      dev->wddm_bo_count < TU_WDDM_MAX_RENDER_ALLOCATIONS;
+   uint32_t token = capacity_available ? tu_wddm_alloc_token_locked(dev) : 0;
    struct tu_bo *bo = token ? tu_device_lookup_bo(dev, token) : NULL;
    bool added = bo != NULL && tu_wddm_add_bo_locked(dev, bo);
    if (!added) {
@@ -1774,7 +1767,9 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
       mtx_lock(&dev->vma_mutex);
       util_vma_heap_free(&dev->vma, iova, vma_size);
       mtx_unlock(&dev->vma_mutex);
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(dev, capacity_available
+                              ? VK_ERROR_OUT_OF_HOST_MEMORY
+                              : VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
    *bo = (struct tu_bo) {
@@ -1925,6 +1920,7 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       return;
    }
 
+   tu_bo_release_heap_accounting(dev, bo);
    tu_debug_bos_del(dev, bo);
    tu_dump_bo_del(dev, bo);
 
@@ -2174,7 +2170,14 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
    };
    memcpy(packet, &request, sizeof(request));
 
-   struct tu_wddm_render_reference render_refs[TU_WDDM_MAX_SUBMIT_REFERENCES] = {};
+   struct tu_wddm_render_reference *render_refs =
+      (struct tu_wddm_render_reference *)vk_zalloc(
+         &device->vk.alloc, (size_t)reference_count * sizeof(*render_refs), 8,
+         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (render_refs == NULL) {
+      vk_free(&device->vk.alloc, packet);
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
    const uint32_t bo_offset = sizeof(request);
    for (uint32_t i = 0; i < reference_count; i++) {
       struct tu_wddm_submit_reference *ref = util_dynarray_element(
@@ -2210,6 +2213,7 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
          &submit->entries, struct tu_wddm_submit_entry, i);
       int ref_index = tu_wddm_submit_reference_index(submit, entry->bo);
       if (ref_index < 0) {
+         vk_free(&device->vk.alloc, render_refs);
          vk_free(&device->vk.alloc, packet);
          return VK_ERROR_DEVICE_LOST;
       }
@@ -2229,6 +2233,7 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
    bool rendered = tu_wddm_context_render(&device->wddm_context, packet,
                                           packet_size, render_refs,
                                           reference_count);
+   vk_free(&device->vk.alloc, render_refs);
    vk_free(&device->vk.alloc, packet);
    return rendered ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
 }
@@ -2520,11 +2525,6 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
 
    memset(probe_device, 0, sizeof(*probe_device));
    memset(probe_context, 0, sizeof(*probe_context));
-   /* DXGI must describe the fixed gpu_guest VidMm segment.  A zero or
-    * sub-page descriptor cannot identify a usable WDDM heap. */
-   if (!tu_wddm_page_aligned_nonzero(identity->dedicated_video_memory))
-      return true;
-
    if (!tu_wddm_device_open(&state->instance->wddm_runtime, identity,
                             probe_device)) {
       if (!tu_wddm_probe_cleanup(state->instance)) {
@@ -2540,9 +2540,6 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
       va_start = probe_context->info.VaStart;
       va_size = probe_context->info.VaSize;
    }
-   uint64_t heap_size = 0;
-   const bool valid_heap = tu_wddm_select_heap_size(
-      identity->dedicated_video_memory, va_size, &heap_size);
    if (!tu_wddm_probe_cleanup(state->instance)) {
       state->result = VK_ERROR_DEVICE_LOST;
       return false;
@@ -2551,9 +2548,6 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
       state->result = VK_ERROR_DEVICE_LOST;
       return true;
    }
-   if (!valid_heap)
-      return true;
-
    struct tu_physical_device *device = (struct tu_physical_device *)vk_zalloc(
       &state->instance->vk.alloc, sizeof(*device), 8,
       VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
@@ -2601,10 +2595,10 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
    device->sync_types[0] = &tu_wddm_sync_type;
    device->sync_types[1] = &device->timeline_type.sync;
    device->sync_types[2] = NULL;
-   /* DXGI DedicatedVideoMemory is the sole non-system VidMm segment published
-    * by the KMD (the gpu_guest pool).  Keep it bounded by the context VA
-    * window; do not replace this fixed pool size with a guest-RAM estimate. */
-   device->heap.size = heap_size;
+   /* WDDM allocations are pageable guest RAM.  The context VA window is an
+    * address-space limit, while the system-memory estimate supplies the
+    * process budget; DXGI DedicatedVideoMemory is diagnostic only. */
+   device->heap.size = tu_get_system_heap_size(device);
    device->heap.used = 0;
    device->heap.flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 

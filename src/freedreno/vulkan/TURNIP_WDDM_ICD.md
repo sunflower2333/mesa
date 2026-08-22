@@ -17,6 +17,21 @@ copies the mapped image into the window DC. It does not exercise the KMD
 `DxgkDdiPresent` callback; that callback remains a separate Windows display
 runtime gate.
 
+The unprotected-VM backend allocates pageable guest RAM through VidMm; it does
+not consume a fixed restricted-DMA pool. Vulkan heap size and budget therefore
+use Mesa's system-memory estimate, while heap usage charges each WDDM BO's
+page-rounded backing extent. If KMT Unlock or DestroyAllocation fails, both the
+BO owner and its heap charge remain live until final destruction succeeds.
+
+Legacy MSM command streams can expose raw IOVAs through buffer device address,
+so a submit cannot prove an exact resource dependency closure. Every live WDDM
+BO is included in each nonempty submit. The matching UMD/KMD contract supports
+1024 references and up to 256 command records inside the 64 KiB DMA buffer;
+allocation creation returns `VK_ERROR_OUT_OF_DEVICE_MEMORY` before the live BO
+set could exceed that capacity. The temporary reference arrays are allocated
+to the actual count. This preserves residency correctness but remains a
+bounded scalability limit.
+
 The ARM64 bundle also contains four runtime probes. `tu_wddm_vulkan_probe_arm64.exe`
 checks ICD loading, adapter identity, queue discovery, and device creation;
 `tu_wddm_vulkan_compute_probe_arm64.exe` takes `tu_wddm_compute.spv`, submits a
