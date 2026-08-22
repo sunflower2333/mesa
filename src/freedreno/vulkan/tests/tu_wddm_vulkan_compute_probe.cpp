@@ -23,8 +23,8 @@ constexpr uint64_t kFenceTimeoutNs = UINT64_C(10000000000);
 bool
 load_spirv(const char *path, std::vector<uint32_t> *code)
 {
-   FILE *file = fopen(path, "rb");
-   if (file == nullptr)
+   FILE *file = nullptr;
+   if (fopen_s(&file, path, "rb") != 0 || file == nullptr)
       return false;
 
    if (fseek(file, 0, SEEK_END) != 0) {
