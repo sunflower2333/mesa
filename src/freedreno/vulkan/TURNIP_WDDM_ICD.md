@@ -21,11 +21,13 @@ The ARM64 bundle also contains three runtime probes. `tu_wddm_vulkan_probe_arm64
 checks ICD loading, adapter identity, queue discovery, and device creation;
 `tu_wddm_vulkan_compute_probe_arm64.exe` takes `tu_wddm_compute.spv`, submits a
 real storage-buffer compute dispatch, waits on a Vulkan fence, and verifies all
-256 results; `tu_wddm_win32_probe_arm64.exe` creates a hidden Win32 window,
-queries surface support/formats/present modes, creates and destroys a CPU/GDI
-swapchain, acquires an image with a fence, and exercises a resize/minimize/
-restore sequence. The CI jobs only cross-compile and package these inputs. They
-do not execute them or prove Windows/KMT/Host runtime behavior.
+256 results; `tu_wddm_win32_probe_arm64.exe` creates a Win32 window, queries
+surface support/formats/present modes, and creates a CPU/GDI swapchain. It
+acquires an image with a fence, records a clear and both image-layout
+transitions, submits the command buffer, and calls `vkQueuePresentKHR`. It then
+resizes, minimizes, restores, recreates the swapchain through `oldSwapchain`,
+and presents a second frame. The CI jobs only cross-compile and package these
+inputs. They do not execute them or prove Windows/KMT/Host runtime behavior.
 
 Run installation only after the matching DroidVM Native Context KMD is active:
 

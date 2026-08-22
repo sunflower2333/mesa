@@ -316,7 +316,9 @@ jobs:
           }
           $win32Probe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp' -Raw
           foreach ($fragment in @('vkCreateWin32SurfaceKHR', 'vkCreateSwapchainKHR', 'vkAcquireNextImageKHR',
-                                  'VK_PRESENT_MODE_FIFO_KHR', 'ShowWindow(window, SW_MINIMIZE)')) {
+                                  'QueueSubmit', 'CmdClearColorImage', 'vkQueuePresentKHR',
+                                  'oldSwapchain = old_swapchain', 'VK_PRESENT_MODE_FIFO_KHR',
+                                  'ShowWindow(window, SW_MINIMIZE)')) {
             if ($win32Probe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
               throw "Win32 workload probe is missing required operation: $fragment"
             }
