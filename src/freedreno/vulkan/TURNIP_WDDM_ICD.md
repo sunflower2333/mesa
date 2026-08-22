@@ -17,8 +17,15 @@ copies the mapped image into the window DC. It does not exercise the KMD
 `DxgkDdiPresent` callback; that callback remains a separate Windows display
 runtime gate.
 
-The current CI evidence is ARM64 compile/package evidence. It does not prove
-Win32 surface creation, swapchain resize behavior, or runtime present.
+The ARM64 bundle also contains three runtime probes. `tu_wddm_vulkan_probe_arm64.exe`
+checks ICD loading, adapter identity, queue discovery, and device creation;
+`tu_wddm_vulkan_compute_probe_arm64.exe` takes `tu_wddm_compute.spv`, submits a
+real storage-buffer compute dispatch, waits on a Vulkan fence, and verifies all
+256 results; `tu_wddm_win32_probe_arm64.exe` creates a hidden Win32 window,
+queries surface support/formats/present modes, creates and destroys a CPU/GDI
+swapchain, acquires an image with a fence, and exercises a resize/minimize/
+restore sequence. The CI jobs only cross-compile and package these inputs. They
+do not execute them or prove Windows/KMT/Host runtime behavior.
 
 Run installation only after the matching DroidVM Native Context KMD is active:
 

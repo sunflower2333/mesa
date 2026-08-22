@@ -1,0 +1,14 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) buffer Output {
+   uint values[];
+} output_buffer;
+
+void main()
+{
+   uint index = gl_GlobalInvocationID.x;
+   if (index < 256)
+      output_buffer.values[index] = index * 3u + 7u;
+}

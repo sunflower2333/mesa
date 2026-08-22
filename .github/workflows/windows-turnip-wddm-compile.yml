@@ -16,6 +16,10 @@ on:
       - "src/freedreno/vulkan/tests/tu_wddm_abi_manifest_entries.h"
       - "src/freedreno/vulkan/tests/tu_wddm_abi_expected.txt"
       - "src/freedreno/vulkan/tests/tu_wddm_render_test.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_vulkan_probe.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_compute.comp"
       - "src/freedreno/vulkan/tests/tu_wddm_transport_compile.cpp"
       - "src/freedreno/tests/**"
       - "src/freedreno/vulkan/**"
@@ -304,6 +308,19 @@ jobs:
           if ($tuMeson -notmatch '(?s)if\s+with_platform_windows\s*\r?\n\s*tu_wsi\s*=\s*true') {
             throw 'Windows platform does not compile the Turnip WSI source'
           }
+          $computeProbe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp' -Raw
+          foreach ($fragment in @('QueueSubmit', 'WaitForFences', 'CmdDispatch', 'MapMemory')) {
+            if ($computeProbe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+              throw "compute workload probe is missing required operation: $fragment"
+            }
+          }
+          $win32Probe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp' -Raw
+          foreach ($fragment in @('vkCreateWin32SurfaceKHR', 'vkCreateSwapchainKHR', 'vkAcquireNextImageKHR',
+                                  'VK_PRESENT_MODE_FIFO_KHR', 'ShowWindow(window, SW_MINIMIZE)')) {
+            if ($win32Probe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+              throw "Win32 workload probe is missing required operation: $fragment"
+            }
+          }
           Write-Host 'WDDM Win32 WSI policy selects CPU/GDI and disables DRM modifiers.'
 
       - name: Build ARM64 app-local Vulkan runtime probe
@@ -313,6 +330,24 @@ jobs:
           /I include
           src\freedreno\vulkan\tests\tu_wddm_vulkan_probe.cpp
           /Fe:tu_wddm_vulkan_probe_arm64.exe
+
+      - name: Build ARM64 headless compute and Win32 WSI probes
+        shell: pwsh
+        run: |
+          $shader = Join-Path $PWD 'tu_wddm_compute.spv'
+          & glslangValidator.exe -V --target-env vulkan1.1 -S comp -o $shader `
+            'src/freedreno/vulkan/tests/tu_wddm_compute.comp'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shader -PathType Leaf)) {
+            throw 'compute shader compilation failed'
+          }
+          cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
+            src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp `
+            /Fe:tu_wddm_vulkan_compute_probe_arm64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
+            src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp `
+            /Fe:tu_wddm_win32_probe_arm64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify and upload ARM64 Vulkan runtime probe
         shell: pwsh
@@ -328,11 +363,36 @@ jobs:
           }
           Write-Host 'ARM64 Vulkan runtime probe linked; it requires the app-local Turnip DLL at runtime.'
 
+          foreach ($name in @('tu_wddm_vulkan_compute_probe_arm64.exe', 'tu_wddm_win32_probe_arm64.exe')) {
+            $path = Join-Path $PWD $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "missing ARM64 workload probe: $name"
+            }
+            $probeHeaders = & dumpbin /headers $path 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not ($probeHeaders -match 'AA64 machine')) {
+              throw "$name machine type does not match ARM64"
+            }
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $PWD 'tu_wddm_compute.spv') -PathType Leaf)) {
+            throw 'compiled compute shader is missing'
+          }
+
       - name: Upload ARM64 Vulkan runtime probe
         uses: actions/upload-artifact@v7
         with:
           name: tu-wddm-vulkan-probe-arm64
           path: tu_wddm_vulkan_probe_arm64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload ARM64 Vulkan workload probes
+        uses: actions/upload-artifact@v7
+        with:
+          name: tu-wddm-vulkan-workloads-arm64
+          path: |
+            tu_wddm_vulkan_compute_probe_arm64.exe
+            tu_wddm_win32_probe_arm64.exe
+            tu_wddm_compute.spv
           if-no-files-found: error
           retention-days: 7
 
@@ -435,6 +495,18 @@ jobs:
             -Destination $stageDir
           Copy-Item -LiteralPath 'src/freedreno/vulkan/TURNIP_WDDM_ICD.md' `
             -Destination $stageDir
+          foreach ($workload in @(
+            'tu_wddm_vulkan_probe_arm64.exe',
+            'tu_wddm_vulkan_compute_probe_arm64.exe',
+            'tu_wddm_win32_probe_arm64.exe',
+            'tu_wddm_compute.spv'
+          )) {
+            $workloadPath = Join-Path $PWD $workload
+            if (-not (Test-Path -LiteralPath $workloadPath -PathType Leaf)) {
+              throw "missing runtime workload for the staged bundle: $workload"
+            }
+            Copy-Item -LiteralPath $workloadPath -Destination $stageDir
+          }
 
           $forbidden = Get-ChildItem -Path $stageDir -Recurse -File `
             -Include *.sys,*.inf,*.cat,*.msix,*.appx -ErrorAction SilentlyContinue
