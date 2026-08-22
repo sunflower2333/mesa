@@ -177,6 +177,9 @@ static const struct vk_instance_extension_table tu_instance_extensions_supported
 #ifdef VK_USE_PLATFORM_XLIB_KHR
    .KHR_xlib_surface                    = true,
 #endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   .KHR_win32_surface                   = true,
+#endif
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
    .EXT_acquire_drm_display             = true,
 #endif

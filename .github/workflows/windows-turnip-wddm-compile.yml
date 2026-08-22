@@ -285,6 +285,27 @@ jobs:
             throw "linked target machine type does not match ARM64"
           }
 
+      - name: Verify WDDM Win32 CPU/GDI WSI policy
+        shell: pwsh
+        run: |
+          $wsi = Get-Content -LiteralPath 'src/freedreno/vulkan/tu_wsi.cc' -Raw
+          $wsiHeader = Get-Content -LiteralPath 'src/freedreno/vulkan/tu_wsi.h' -Raw
+          $tuMeson = Get-Content -LiteralPath 'src/freedreno/vulkan/meson.build' -Raw
+          if ($wsi -notmatch '(?s)VK_USE_PLATFORM_WIN32_KHR.*TU_HAS_WDDM.*?\.sw_device\s*=\s*true') {
+            throw 'WDDM Win32 WSI must select the CPU/GDI software swapchain path'
+          }
+          if ($wsi -notmatch 'supports_modifiers' -or
+              $wsi -notmatch 'supports_modifiers[\s\S]{0,240}false') {
+            throw 'WDDM Win32 WSI must not advertise DRM modifiers'
+          }
+          if ($wsiHeader -notmatch 'VK_USE_PLATFORM_WIN32_KHR') {
+            throw 'Turnip WSI header is not wired for VK_KHR_win32_surface'
+          }
+          if ($tuMeson -notmatch '(?s)if\s+with_platform_windows\s*\r?\n\s*tu_wsi\s*=\s*true') {
+            throw 'Windows platform does not compile the Turnip WSI source'
+          }
+          Write-Host 'WDDM Win32 WSI policy selects CPU/GDI and disables DRM modifiers.'
+
       - name: Stage ARM64 Turnip ICD bundle
         shell: pwsh
         run: |

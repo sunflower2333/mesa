@@ -7,6 +7,19 @@ registry. Install, upgrade, and uninstall use a transaction directory beside
 the final install root; any file or registry failure restores the previous
 three-file set and exact registry value before returning an error.
 
+The WDDM build exposes `VK_KHR_win32_surface` and uses Mesa's existing CPU/GDI
+Win32 WSI path. It deliberately does not select the generic D3D12/DXGI
+swapchain backend; the KMD/guest path remains responsible for GPU work and the
+first Win32 present baseline is CPU copy.
+
+This baseline exercises Turnip rendering and a CPU-visible WDDM allocation, then
+copies the mapped image into the window DC. It does not exercise the KMD
+`DxgkDdiPresent` callback; that callback remains a separate Windows display
+runtime gate.
+
+The current CI evidence is ARM64 compile/package evidence. It does not prove
+Win32 surface creation, swapchain resize behavior, or runtime present.
+
 Run installation only after the matching DroidVM Native Context KMD is active:
 
 ```powershell
