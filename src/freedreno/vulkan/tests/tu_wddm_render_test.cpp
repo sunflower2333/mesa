@@ -153,6 +153,168 @@ test_device_luid_contract()
       &identity, device_luid, sizeof(device_luid), NULL));
 }
 
+constexpr D3DKMT_HANDLE kEnumeratedHandleBase = 100;
+
+struct enumeration_fixture {
+   ULONG adapter_count;
+   D3DKMT_HANDLE rejected_handle;
+   unsigned enum_calls;
+   unsigned query_calls;
+   unsigned close_calls;
+   unsigned callback_calls;
+   uint32_t closed_mask;
+   uint32_t callback_luids[3];
+   bool abort_callback;
+};
+
+enumeration_fixture *current_enumeration_fixture;
+
+NTSTATUS APIENTRY
+fake_enum_adapters2(const D3DKMT_ENUMADAPTERS2 *input)
+{
+   enumeration_fixture *fixture = current_enumeration_fixture;
+   CHECK(fixture != NULL);
+   CHECK(input != NULL);
+   if (fixture == NULL || input == NULL)
+      return kStatusInvalidParameter;
+
+   D3DKMT_ENUMADAPTERS2 *enumeration =
+      const_cast<D3DKMT_ENUMADAPTERS2 *>(input);
+   fixture->enum_calls++;
+   if (enumeration->pAdapters == NULL) {
+      enumeration->NumAdapters = fixture->adapter_count;
+      return kStatusSuccess;
+   }
+
+   CHECK(enumeration->NumAdapters >= fixture->adapter_count);
+   if (enumeration->NumAdapters < fixture->adapter_count)
+      return kStatusInvalidParameter;
+
+   for (ULONG index = 0; index < fixture->adapter_count; index++) {
+      enumeration->pAdapters[index].hAdapter = kEnumeratedHandleBase + index;
+      enumeration->pAdapters[index].AdapterLuid.LowPart = UINT32_C(0x1000) + index;
+      enumeration->pAdapters[index].AdapterLuid.HighPart = 0;
+   }
+   enumeration->NumAdapters = fixture->adapter_count;
+   return kStatusSuccess;
+}
+
+NTSTATUS APIENTRY
+fake_enumerated_query_adapter_info(D3DKMT_QUERYADAPTERINFO *query)
+{
+   enumeration_fixture *fixture = current_enumeration_fixture;
+   CHECK(fixture != NULL);
+   CHECK(query != NULL);
+   if (fixture == NULL || query == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->query_calls++;
+   CHECK(query->Type == KMTQAITYPE_UMDRIVERPRIVATE);
+   CHECK(query->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_ADAPTER_INFO));
+   if (query->hAdapter == fixture->rejected_handle)
+      return kStatusInvalidParameter;
+
+   VIOGPU_WDDM_ADAPTER_INFO info = valid_adapter_info();
+   memcpy(query->pPrivateDriverData, &info, sizeof(info));
+   return kStatusSuccess;
+}
+
+NTSTATUS APIENTRY
+fake_enumerated_close_adapter(const D3DKMT_CLOSEADAPTER *close)
+{
+   enumeration_fixture *fixture = current_enumeration_fixture;
+   CHECK(fixture != NULL);
+   CHECK(close != NULL);
+   if (fixture == NULL || close == NULL)
+      return kStatusInvalidParameter;
+
+   fixture->close_calls++;
+   CHECK(close->hAdapter >= kEnumeratedHandleBase);
+   const D3DKMT_HANDLE index = close->hAdapter - kEnumeratedHandleBase;
+   CHECK(index < fixture->adapter_count);
+   if (index >= fixture->adapter_count)
+      return kStatusInvalidParameter;
+   CHECK((fixture->closed_mask & (UINT32_C(1) << index)) == 0);
+   fixture->closed_mask |= UINT32_C(1) << index;
+   return kStatusSuccess;
+}
+
+bool
+record_enumerated_adapter(const tu_wddm_adapter_info *identity, void *data)
+{
+   enumeration_fixture *fixture = static_cast<enumeration_fixture *>(data);
+   CHECK(fixture != NULL);
+   CHECK(identity != NULL);
+   if (fixture == NULL || identity == NULL)
+      return false;
+
+   CHECK(fixture->callback_calls < 3);
+   CHECK(tu_wddm_validate_adapter_info(&identity->private_info));
+   if (fixture->callback_calls < 3)
+      fixture->callback_luids[fixture->callback_calls] = identity->luid.LowPart;
+   fixture->callback_calls++;
+   return !fixture->abort_callback;
+}
+
+void
+init_enumeration_fixture(enumeration_fixture *fixture,
+                         tu_wddm_runtime *runtime,
+                         ULONG adapter_count)
+{
+   memset(fixture, 0, sizeof(*fixture));
+   memset(runtime, 0, sizeof(*runtime));
+   current_enumeration_fixture = fixture;
+   fixture->adapter_count = adapter_count;
+   runtime->dispatch.EnumAdapters2 = fake_enum_adapters2;
+   runtime->dispatch.QueryAdapterInfo = fake_enumerated_query_adapter_info;
+   runtime->dispatch.CloseAdapter = fake_enumerated_close_adapter;
+}
+
+void
+test_kmt_adapter_enumeration()
+{
+   enumeration_fixture fixture;
+   tu_wddm_runtime runtime;
+   init_enumeration_fixture(&fixture, &runtime, 2);
+
+   CHECK(tu_wddm_runtime_foreach_adapter(
+      &runtime, record_enumerated_adapter, &fixture));
+   CHECK(fixture.enum_calls == 2);
+   CHECK(fixture.query_calls == 2);
+   CHECK(fixture.callback_calls == 2);
+   CHECK(fixture.close_calls == 2);
+   CHECK(fixture.closed_mask == UINT32_C(0x3));
+   CHECK(fixture.callback_luids[0] == UINT32_C(0x1000));
+   CHECK(fixture.callback_luids[1] == UINT32_C(0x1001));
+
+   init_enumeration_fixture(&fixture, &runtime, 2);
+   fixture.rejected_handle = kEnumeratedHandleBase;
+   CHECK(tu_wddm_runtime_foreach_adapter(
+      &runtime, record_enumerated_adapter, &fixture));
+   CHECK(fixture.query_calls == 2);
+   CHECK(fixture.callback_calls == 1);
+   CHECK(fixture.callback_luids[0] == UINT32_C(0x1001));
+   CHECK(fixture.close_calls == 2);
+   CHECK(fixture.closed_mask == UINT32_C(0x3));
+
+   init_enumeration_fixture(&fixture, &runtime, 3);
+   fixture.abort_callback = true;
+   CHECK(!tu_wddm_runtime_foreach_adapter(
+      &runtime, record_enumerated_adapter, &fixture));
+   CHECK(fixture.query_calls == 1);
+   CHECK(fixture.callback_calls == 1);
+   CHECK(fixture.close_calls == 3);
+   CHECK(fixture.closed_mask == UINT32_C(0x7));
+
+   init_enumeration_fixture(&fixture, &runtime, 0);
+   CHECK(tu_wddm_runtime_foreach_adapter(
+      &runtime, record_enumerated_adapter, &fixture));
+   CHECK(fixture.enum_calls == 1);
+   CHECK(fixture.callback_calls == 0);
+   CHECK(fixture.close_calls == 0);
+   current_enumeration_fixture = NULL;
+}
+
 struct test_fixture {
    tu_wddm_runtime runtime;
    tu_wddm_device device;
@@ -1557,6 +1719,7 @@ main()
 {
    test_priority_contract();
    test_device_luid_contract();
+   test_kmt_adapter_enumeration();
    test_device_execution_state();
    test_context_buffer_contract_and_failed_destroy_retention();
    test_context_info_failure_cleanup_retry();

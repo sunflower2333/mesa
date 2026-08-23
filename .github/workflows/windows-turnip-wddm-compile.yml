@@ -51,7 +51,7 @@ jobs:
       - name: Verify required SDK headers
         shell: pwsh
         run: |
-          $headers = @('windows.h', 'dxgi1_2.h', 'd3dkmthk.h')
+          $headers = @('windows.h', 'd3dkmthk.h')
           foreach ($header in $headers) {
             $found = Get-ChildItem -Path ($env:INCLUDE -split ';') -Filter $header -File -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($null -eq $found) {

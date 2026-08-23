@@ -39,6 +39,7 @@ extern "C" {
 struct tu_wddm_dispatch {
    HMODULE gdi32;
 
+   PFND3DKMT_ENUMADAPTERS2 EnumAdapters2;
    PFND3DKMT_OPENADAPTERFROMLUID OpenAdapterFromLuid;
    PFND3DKMT_CLOSEADAPTER CloseAdapter;
    PFND3DKMT_QUERYADAPTERINFO QueryAdapterInfo;

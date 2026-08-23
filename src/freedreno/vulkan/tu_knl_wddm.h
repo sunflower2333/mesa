@@ -14,8 +14,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <dxgi1_2.h>
-
 #include "tu_wddm_abi.h"
 #include "tu_wddm_dispatch.h"
 
@@ -25,20 +23,10 @@ extern "C" {
 
 struct tu_wddm_runtime {
    struct tu_wddm_dispatch dispatch;
-   HMODULE dxgi;
-   IDXGIFactory1 *factory;
 };
 
 struct tu_wddm_adapter_info {
    LUID luid;
-   uint32_t vendor_id;
-   uint32_t device_id;
-   uint32_t subsystem_id;
-   uint32_t revision;
-   uint64_t dedicated_video_memory;
-   uint64_t dedicated_system_memory;
-   uint64_t shared_system_memory;
-   char description[128];
    VIOGPU_WDDM_ADAPTER_INFO private_info;
 };
 
@@ -141,7 +129,7 @@ bool tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
 
 bool tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info);
 bool tu_wddm_submitqueue_priority_is_supported(int priority);
-/* Publish the byte-exact DXGI adapter identity expected by Vulkan loader
+/* Publish the byte-exact WDDM adapter identity expected by Vulkan loader
  * interface v7.  This backend exposes one WDDM node, ordinal zero. */
 bool tu_wddm_get_device_id_properties(const struct tu_wddm_adapter_info *identity,
                                       void *device_luid,

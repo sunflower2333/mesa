@@ -10,6 +10,7 @@
 
 #include "tu_knl_wddm.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef TU_HAS_WDDM
@@ -248,29 +249,8 @@ tu_wddm_runtime_init(struct tu_wddm_runtime *runtime)
    if (runtime == NULL)
       return false;
 
-   using PFN_CREATE_DXGI_FACTORY1 = HRESULT(WINAPI *)(REFIID, void **);
-   PFN_CREATE_DXGI_FACTORY1 create_factory = NULL;
-
    memset(runtime, 0, sizeof(*runtime));
-   if (!tu_wddm_dispatch_init(&runtime->dispatch))
-      return false;
-
-   runtime->dxgi = LoadLibraryExW(L"dxgi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-   if (runtime->dxgi == NULL)
-      goto fail;
-
-   create_factory = reinterpret_cast<PFN_CREATE_DXGI_FACTORY1>(
-      GetProcAddress(runtime->dxgi, "CreateDXGIFactory1"));
-   if (create_factory == NULL ||
-       FAILED(create_factory(__uuidof(IDXGIFactory1),
-                             reinterpret_cast<void **>(&runtime->factory))))
-      goto fail;
-
-   return true;
-
-fail:
-   tu_wddm_runtime_finish(runtime);
-   return false;
+   return tu_wddm_dispatch_init(&runtime->dispatch);
 }
 
 void
@@ -278,11 +258,6 @@ tu_wddm_runtime_finish(struct tu_wddm_runtime *runtime)
 {
    if (runtime == NULL)
       return;
-
-   if (runtime->factory != NULL)
-      runtime->factory->Release();
-   if (runtime->dxgi != NULL)
-      FreeLibrary(runtime->dxgi);
 
    tu_wddm_dispatch_finish(&runtime->dispatch);
    memset(runtime, 0, sizeof(*runtime));
@@ -343,61 +318,77 @@ tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
                                 tu_wddm_adapter_callback callback,
                                 void *data)
 {
-   if (runtime == NULL || runtime->factory == NULL || callback == NULL)
+   if (runtime == NULL || runtime->dispatch.EnumAdapters2 == NULL ||
+       runtime->dispatch.QueryAdapterInfo == NULL ||
+       runtime->dispatch.CloseAdapter == NULL || callback == NULL)
       return false;
 
-   for (UINT index = 0;; index++) {
-      IDXGIAdapter1 *dxgi_adapter = NULL;
-      HRESULT hr = runtime->factory->EnumAdapters1(index, &dxgi_adapter);
-      if (hr == DXGI_ERROR_NOT_FOUND)
-         break;
-      if (FAILED(hr) || dxgi_adapter == NULL)
-         return false;
+   D3DKMT_ENUMADAPTERS2 enumeration = {};
+   NTSTATUS status = runtime->dispatch.EnumAdapters2(&enumeration);
+   if (!NT_SUCCESS(status))
+      return false;
+   if (enumeration.NumAdapters == 0)
+      return true;
+   if (enumeration.NumAdapters > SIZE_MAX / sizeof(D3DKMT_ADAPTERINFO))
+      return false;
 
-      DXGI_ADAPTER_DESC1 desc = {};
-      hr = dxgi_adapter->GetDesc1(&desc);
-      if (SUCCEEDED(hr)) {
-         struct tu_wddm_adapter_info identity = {};
-         identity.luid = desc.AdapterLuid;
-         identity.vendor_id = desc.VendorId;
-         identity.device_id = desc.DeviceId;
-         identity.subsystem_id = desc.SubSysId;
-         identity.revision = desc.Revision;
-         identity.dedicated_video_memory = desc.DedicatedVideoMemory;
-         identity.dedicated_system_memory = desc.DedicatedSystemMemory;
-         identity.shared_system_memory = desc.SharedSystemMemory;
-         WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, identity.description,
-                             static_cast<int>(sizeof(identity.description)), NULL, NULL);
+   const ULONG capacity = enumeration.NumAdapters;
+   D3DKMT_ADAPTERINFO *adapters = static_cast<D3DKMT_ADAPTERINFO *>(
+      calloc(capacity, sizeof(*adapters)));
+   if (adapters == NULL)
+      return false;
 
-         struct tu_wddm_adapter adapter = {};
-         if (tu_wddm_adapter_open(runtime, &identity, &adapter)) {
-            identity.private_info = adapter.private_info;
-            bool keep_going = callback(&identity, data);
-            bool closed = tu_wddm_adapter_close(&adapter);
-            dxgi_adapter->Release();
-            /* A false callback result is an explicit enumeration abort.  Do
-             * not turn it into success merely because the adapter close
-             * succeeded: callers use the return value to propagate probe and
-             * allocation failures after already-published devices are
-             * cleaned up. */
-            if (!closed || !keep_going)
-               return false;
-            continue;
-         }
-
-         /* A failed probe may retain a handle when CloseAdapter itself
-          * failed.  Do not let enumeration silently abandon that owner. */
-         bool closed = adapter.handle == 0 || tu_wddm_adapter_close(&adapter);
-         dxgi_adapter->Release();
-         if (!closed)
-            return false;
-         continue;
-      }
-
-      dxgi_adapter->Release();
+   enumeration.NumAdapters = capacity;
+   enumeration.pAdapters = adapters;
+   status = runtime->dispatch.EnumAdapters2(&enumeration);
+   if (!NT_SUCCESS(status) || enumeration.NumAdapters > capacity) {
+      free(adapters);
+      return false;
    }
 
-   return true;
+   bool enumeration_ok = true;
+   for (ULONG index = 0; index < enumeration.NumAdapters; index++) {
+      D3DKMT_ADAPTERINFO *entry = &adapters[index];
+      if (entry->hAdapter == 0) {
+         enumeration_ok = false;
+         break;
+      }
+
+      struct tu_wddm_adapter_info identity = {};
+      identity.luid = entry->AdapterLuid;
+      if (tu_wddm_query_private_info(runtime, entry->hAdapter,
+                                     &identity.private_info) &&
+          !callback(&identity, data))
+         enumeration_ok = false;
+
+      D3DKMT_CLOSEADAPTER close = {};
+      close.hAdapter = entry->hAdapter;
+      if (NT_SUCCESS(runtime->dispatch.CloseAdapter(&close)))
+         entry->hAdapter = 0;
+      else
+         enumeration_ok = false;
+
+      if (!enumeration_ok)
+         break;
+   }
+
+   /* EnumAdapters2 returns owned handles for the whole array.  Close entries
+    * not visited after a callback abort, as well as one failed close retry,
+    * before releasing the array. */
+   for (ULONG index = 0; index < enumeration.NumAdapters; index++) {
+      if (adapters[index].hAdapter == 0)
+         continue;
+
+      D3DKMT_CLOSEADAPTER close = {};
+      close.hAdapter = adapters[index].hAdapter;
+      if (NT_SUCCESS(runtime->dispatch.CloseAdapter(&close)))
+         adapters[index].hAdapter = 0;
+      else
+         enumeration_ok = false;
+   }
+
+   free(adapters);
+   return enumeration_ok;
 }
 
 bool

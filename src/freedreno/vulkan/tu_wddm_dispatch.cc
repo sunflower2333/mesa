@@ -33,6 +33,7 @@ tu_wddm_dispatch_init(struct tu_wddm_dispatch *dispatch)
    if (dispatch->name == NULL) \
       goto fail
 
+   TU_WDDM_LOAD(EnumAdapters2);
    TU_WDDM_LOAD(OpenAdapterFromLuid);
    TU_WDDM_LOAD(CloseAdapter);
    TU_WDDM_LOAD(QueryAdapterInfo);

@@ -51,6 +51,8 @@ def main() -> int:
     knl_header = (VULKAN_DIR / "tu_knl.h").read_text(encoding="utf-8")
     wddm_source = (VULKAN_DIR / "tu_knl_wddm.cc").read_text(encoding="utf-8")
     wddm_header = (VULKAN_DIR / "tu_knl_wddm.h").read_text(encoding="utf-8")
+    dispatch_source = (VULKAN_DIR / "tu_wddm_dispatch.cc").read_text(encoding="utf-8")
+    dispatch_header = (VULKAN_DIR / "tu_wddm_dispatch.h").read_text(encoding="utf-8")
     transport_fixture = (TEST_DIR / "tu_wddm_transport_compile.cpp").read_text(encoding="utf-8")
 
     retired_heap_api = "tu_wddm_select_heap_size"
@@ -64,7 +66,36 @@ def main() -> int:
 
     wddm = canonical(wddm_source)
     header = canonical(wddm_header)
+    dispatch = canonical(dispatch_source)
+    dispatch_api = canonical(dispatch_header)
     fixture = canonical(transport_fixture)
+
+    for retired_dxgi_api in (
+        "IDXGIFactory",
+        "EnumAdapters1",
+        "CreateDXGIFactory",
+        'LoadLibraryExW(L"dxgi.dll"',
+    ):
+        if retired_dxgi_api in wddm_source or retired_dxgi_api in wddm_header:
+            fail(f"WDDM adapter discovery still depends on DXGI: {retired_dxgi_api}")
+    if "PFND3DKMT_ENUMADAPTERS2EnumAdapters2;" not in dispatch_api:
+        fail("the WDDM dispatch table must expose D3DKMTEnumAdapters2")
+    if "TU_WDDM_LOAD(EnumAdapters2);" not in dispatch:
+        fail("D3DKMTEnumAdapters2 must be loaded from the system thunk table")
+    foreach_adapter = canonical(function_body("tu_wddm_runtime_foreach_adapter", wddm_source))
+    require_order(
+        foreach_adapter,
+        (
+            "runtime->dispatch.EnumAdapters2(&enumeration)",
+            "enumeration.pAdapters=adapters;",
+            "runtime->dispatch.EnumAdapters2(&enumeration)",
+            "tu_wddm_query_private_info(runtime,entry->hAdapter,&identity.private_info)",
+            "callback(&identity,data)",
+            "runtime->dispatch.CloseAdapter(&close)",
+        ),
+        "WDDM discovery must enumerate KMT handles, claim the private ABI, and close ownership",
+    )
+
     if "TU_WDDM_MAX_RENDER_ALLOCATIONS=1024" not in header:
         fail("WDDM allocation-list capacity must match the KMD 1024-reference contract")
     if "TU_WDDM_MAX_RENDER_ALLOCATIONS==1024" not in fixture:
