@@ -22,6 +22,35 @@ print_status(const char *operation, NTSTATUS status)
           static_cast<unsigned long>(status));
 }
 
+void
+print_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info)
+{
+   printf("    header: magic=0x%08x version=%u size=%u reserved=0x%08x\n",
+          info->Header.Magic, info->Header.Version, info->Header.Size,
+          info->Header.Reserved);
+   printf("    capabilities=0x%016llx reset=%llu\n",
+          static_cast<unsigned long long>(info->Capabilities),
+          static_cast<unsigned long long>(info->ResetGeneration));
+   printf("    msm=%u.%u.%u gpu=%u chip=0x%016llx\n",
+          info->MsmMajorVersion, info->MsmMinorVersion,
+          info->MsmPatchVersion, info->GpuId,
+          static_cast<unsigned long long>(info->ChipId));
+   printf("    gmem: size=%u base=0x%016llx highest-bank-bit=%u "
+          "priorities=%u\n",
+          info->GmemSize, static_cast<unsigned long long>(info->GmemBase),
+          info->HighestBankBit, info->PriorityCount);
+   printf("    coherent=%u ubwc=0x%016llx macrotile=0x%016llx\n",
+          info->HasCachedCoherentMemory,
+          static_cast<unsigned long long>(info->UbwcSwizzle),
+          static_cast<unsigned long long>(info->MacrotileMode));
+   printf("    uche-trap=0x%016llx ray-tracing=%u max-frequency=%u "
+          "reserved=[0x%016llx,0x%016llx]\n",
+          static_cast<unsigned long long>(info->UcheTrapBase),
+          info->HasRayTracing, info->MaxFrequency,
+          static_cast<unsigned long long>(info->Reserved[0]),
+          static_cast<unsigned long long>(info->Reserved[1]));
+}
+
 NTSTATUS
 query_private_info(tu_wddm_dispatch *dispatch,
                    D3DKMT_HANDLE adapter,
@@ -58,17 +87,12 @@ probe_adapter(tu_wddm_dispatch *dispatch,
    VIOGPU_WDDM_ADAPTER_INFO enumerated_info = {};
    NTSTATUS status = query_private_info(dispatch, enumerated->hAdapter,
                                         &enumerated_info);
-   printf("  QueryAdapterInfo(enum): status=0x%08lx valid=%u magic=0x%08x "
-          "version=%u size=%u reset=%llu gpu=%u chip=0x%llx\n",
+   printf("  QueryAdapterInfo(enum): status=0x%08lx valid=%u\n",
           static_cast<unsigned long>(status),
           static_cast<unsigned>(
              NT_SUCCESS(status) &&
-             tu_wddm_validate_adapter_info(&enumerated_info)),
-          enumerated_info.Header.Magic, enumerated_info.Header.Version,
-          enumerated_info.Header.Size,
-          static_cast<unsigned long long>(enumerated_info.ResetGeneration),
-          enumerated_info.GpuId,
-          static_cast<unsigned long long>(enumerated_info.ChipId));
+             tu_wddm_validate_adapter_info(&enumerated_info)));
+   print_adapter_info(&enumerated_info);
    if (!NT_SUCCESS(status) ||
        !tu_wddm_validate_adapter_info(&enumerated_info))
       return false;
@@ -97,6 +121,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
              NT_SUCCESS(status) &&
              memcmp(&opened_info, &enumerated_info,
                     sizeof(opened_info)) == 0));
+   print_adapter_info(&opened_info);
    if (!NT_SUCCESS(status) ||
        !tu_wddm_validate_adapter_info(&opened_info) ||
        memcmp(&opened_info, &enumerated_info, sizeof(opened_info)) != 0)
