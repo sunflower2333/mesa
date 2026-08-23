@@ -16,6 +16,7 @@ on:
       - "src/freedreno/vulkan/tests/tu_wddm_abi_manifest_entries.h"
       - "src/freedreno/vulkan/tests/tu_wddm_abi_expected.txt"
       - "src/freedreno/vulkan/tests/tu_wddm_render_test.cpp"
+      - "src/freedreno/vulkan/tests/tu_wddm_kmt_probe.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_vulkan_probe.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp"
@@ -69,6 +70,7 @@ jobs:
           src\freedreno\vulkan\tu_wddm_dispatch.cc
           src\freedreno\vulkan\tu_knl_wddm.cc
           src\freedreno\vulkan\tests\tu_wddm_render_test.cpp
+          src\freedreno\vulkan\tests\tu_wddm_kmt_probe.cpp
           src\freedreno\vulkan\tests\tu_wddm_transport_compile.cpp
 
       - name: Link ARM64 fake-dispatch fixture
@@ -350,6 +352,17 @@ jobs:
           src\freedreno\vulkan\tests\tu_wddm_vulkan_probe.cpp
           /Fe:tu_wddm_vulkan_probe_arm64.exe
 
+      - name: Build ARM64 direct KMT bring-up probe
+        shell: cmd
+        run: >-
+          cl /nologo /std:c++17 /W4 /WX /EHsc
+          /MT
+          /I src\freedreno\vulkan
+          src\freedreno\vulkan\tu_wddm_dispatch.cc
+          src\freedreno\vulkan\tu_knl_wddm.cc
+          src\freedreno\vulkan\tests\tu_wddm_kmt_probe.cpp
+          /Fe:tu_wddm_kmt_probe_arm64.exe
+
       - name: Build ARM64 compute, offscreen graphics, and Win32 WSI probes
         shell: pwsh
         run: |
@@ -403,7 +416,8 @@ jobs:
           }
           Write-Host 'ARM64 Vulkan runtime probe linked; it requires the app-local Turnip DLL at runtime.'
 
-          foreach ($name in @('tu_wddm_vulkan_compute_probe_arm64.exe',
+          foreach ($name in @('tu_wddm_kmt_probe_arm64.exe',
+                              'tu_wddm_vulkan_compute_probe_arm64.exe',
                               'tu_wddm_vulkan_graphics_probe_arm64.exe',
                               'tu_wddm_win32_probe_arm64.exe')) {
             $path = Join-Path $PWD $name
@@ -431,7 +445,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: tu-wddm-vulkan-probe-arm64
-          path: tu_wddm_vulkan_probe_arm64.exe
+          path: |
+            tu_wddm_kmt_probe_arm64.exe
+            tu_wddm_vulkan_probe_arm64.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -560,6 +576,7 @@ jobs:
           Copy-Item -LiteralPath 'src/freedreno/vulkan/TURNIP_WDDM_ICD.md' `
             -Destination $stageDir
           foreach ($workload in @(
+            'tu_wddm_kmt_probe_arm64.exe',
             'tu_wddm_vulkan_probe_arm64.exe',
             'tu_wddm_vulkan_compute_probe_arm64.exe',
             'tu_wddm_vulkan_graphics_probe_arm64.exe',

@@ -36,7 +36,12 @@ set could exceed that capacity. The temporary reference arrays are allocated
 to the actual count. This preserves residency correctness but remains a
 bounded scalability limit.
 
-The ARM64 bundle also contains four runtime probes. `tu_wddm_vulkan_probe_arm64.exe`
+The ARM64 bundle also contains a direct KMT diagnostic and four runtime probes.
+`tu_wddm_kmt_probe_arm64.exe` enumerates adapters through
+`D3DKMTEnumAdapters2`, claims only the DroidVM private endpoint, and reports
+the exact status of adapter, device, context, and context-info bring-up while
+closing every acquired handle. It does not load Vulkan or a D3D UMD.
+`tu_wddm_vulkan_probe_arm64.exe`
 checks ICD loading, adapter identity, queue discovery, and device creation;
 `tu_wddm_vulkan_compute_probe_arm64.exe` takes `tu_wddm_compute.spv`, submits a
 real storage-buffer compute dispatch, waits on a Vulkan fence, and verifies all
