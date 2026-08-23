@@ -246,6 +246,7 @@ jobs:
             '-Dshader-cache=disabled',
             '-Dzlib=enabled',
             '-Dzstd=disabled',
+            '-Db_vscrt=static_from_buildtype',
             '-Dtools=[]',
             '-Dbuild-tests=false',
             '-Dwerror=false',
@@ -344,6 +345,7 @@ jobs:
         shell: cmd
         run: >-
           cl /nologo /std:c++17 /W4 /WX /EHsc
+          /MT
           /I include
           src\freedreno\vulkan\tests\tu_wddm_vulkan_probe.cpp
           /Fe:tu_wddm_vulkan_probe_arm64.exe
@@ -369,15 +371,15 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fragmentShader -PathType Leaf)) {
             throw 'graphics fragment shader compilation failed'
           }
-          cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
+          cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
             src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp `
             /Fe:tu_wddm_vulkan_compute_probe_arm64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
+          cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
             src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp `
             /Fe:tu_wddm_vulkan_graphics_probe_arm64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cl /nologo /std:c++17 /W4 /WX /EHsc /I include `
+          cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
             src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp `
             /Fe:tu_wddm_win32_probe_arm64.exe user32.lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -394,6 +396,11 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not ($headers -match 'AA64 machine')) {
             throw 'Vulkan runtime probe machine type does not match ARM64'
           }
+          $probeDependents = & dumpbin /dependents $probe 2>&1
+          if ($LASTEXITCODE -ne 0 -or
+              $probeDependents -match '(?i)\b(?:msvcp|vcruntime)[0-9_]*\.dll\b') {
+            throw 'Vulkan runtime probe has an undeclared dynamic MSVC runtime dependency'
+          }
           Write-Host 'ARM64 Vulkan runtime probe linked; it requires the app-local Turnip DLL at runtime.'
 
           foreach ($name in @('tu_wddm_vulkan_compute_probe_arm64.exe',
@@ -406,6 +413,11 @@ jobs:
             $probeHeaders = & dumpbin /headers $path 2>&1
             if ($LASTEXITCODE -ne 0 -or -not ($probeHeaders -match 'AA64 machine')) {
               throw "$name machine type does not match ARM64"
+            }
+            $probeDependents = & dumpbin /dependents $path 2>&1
+            if ($LASTEXITCODE -ne 0 -or
+                $probeDependents -match '(?i)\b(?:msvcp|vcruntime)[0-9_]*\.dll\b') {
+              throw "$name has an undeclared dynamic MSVC runtime dependency"
             }
           }
           foreach ($shader in @('tu_wddm_compute.spv', 'tu_wddm_graphics.vert.spv',
@@ -488,6 +500,16 @@ jobs:
           }
 
           foreach ($pe in @($libraries[0], $zlibLibraries[0])) {
+            $peDependents = & dumpbin /dependents $pe.FullName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              throw "dumpbin dependents failed for $($pe.Name)"
+            }
+            if ($peDependents -match '(?i)\b(?:msvcp|vcruntime)[0-9_]*\.dll\b') {
+              throw "$($pe.Name) has an undeclared dynamic MSVC runtime dependency"
+            }
+          }
+
+          foreach ($pe in @($libraries[0], $zlibLibraries[0])) {
             $headers = & dumpbin /headers $pe.FullName 2>&1
             if ($LASTEXITCODE -ne 0 -or -not ($headers -match 'AA64 machine')) {
               throw "$($pe.Name) is not an ARM64 PE image"
@@ -521,6 +543,7 @@ jobs:
           }
           $installerText = Get-Content -LiteralPath $installerSource.Path -Raw
           foreach ($fragment in @(
+            'function Get-Sha256',
             'function Get-VulkanDriverValueSnapshot',
             'function Restore-VulkanDriverValue',
             'function New-IcdTransactionRoot',

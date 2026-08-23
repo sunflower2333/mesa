@@ -61,6 +61,27 @@ function Get-PeMachine
    }
 }
 
+function Get-Sha256
+{
+   param([Parameter(Mandatory = $true)][string]$Path)
+
+   $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                             [IO.FileShare]::Read)
+   try {
+      $sha256 = [Security.Cryptography.SHA256]::Create()
+      try {
+         $hash = $sha256.ComputeHash($stream)
+         return [BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant()
+      }
+      finally {
+         $sha256.Dispose()
+      }
+   }
+   finally {
+      $stream.Dispose()
+   }
+}
+
 function Assert-BundleIntegrity
 {
    param([Parameter(Mandatory = $true)][string]$Root)
@@ -84,7 +105,7 @@ function Assert-BundleIntegrity
       if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
          throw "SHA256SUMS references a missing file: $name"
       }
-      $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+      $actual = Get-Sha256 -Path $path
       if ($actual -ne $expected) {
          throw "Bundle hash mismatch for $name"
       }

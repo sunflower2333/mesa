@@ -6,6 +6,10 @@ staged hash and both PE machine types before changing the system Vulkan ICD
 registry. Install, upgrade, and uninstall use a transaction directory beside
 the final install root; any file or registry failure restores the previous
 three-file set and exact registry value before returning an error.
+The ICD, zlib, and workload probes use the static MSVC runtime so the bundle
+does not depend on a separately installed ARM64 Visual C++ redistributable.
+`-WhatIf` still performs the read-only hash and PE validation before declining
+the registry and file transaction.
 
 The WDDM build exposes `VK_KHR_win32_surface` and uses Mesa's existing CPU/GDI
 Win32 WSI path. It deliberately does not select the generic D3D12/DXGI
