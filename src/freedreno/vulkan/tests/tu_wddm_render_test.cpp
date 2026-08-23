@@ -200,7 +200,7 @@ fake_enum_adapters2(const D3DKMT_ENUMADAPTERS2 *input)
 }
 
 NTSTATUS APIENTRY
-fake_enumerated_query_adapter_info(D3DKMT_QUERYADAPTERINFO *query)
+fake_enumerated_query_adapter_info(const D3DKMT_QUERYADAPTERINFO *query)
 {
    enumeration_fixture *fixture = current_enumeration_fixture;
    CHECK(fixture != NULL);
