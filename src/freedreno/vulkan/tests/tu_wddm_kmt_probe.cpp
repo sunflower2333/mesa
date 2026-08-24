@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * Direct ARM64 D3DKMT bring-up probe for the DroidVM Turnip private endpoint.
- * It does not load Vulkan or a D3D UMD.  Every acquired KMT handle is closed
- * before exit, including adapters rejected by the private ABI query.
+ * It does not load Vulkan or a D3D UMD.  It exercises the bounded KMT
+ * allocation lock/unlock lifecycle after Context/VA bring-up. Every acquired
+ * KMT handle is closed before exit, including adapters rejected by the private
+ * ABI query.
  */
 
 #include "../tu_knl_wddm.h"
@@ -111,6 +113,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
    D3DKMT_HANDLE opened_adapter = open.hAdapter;
    D3DKMT_HANDLE device_handle = 0;
    D3DKMT_HANDLE context_handle = 0;
+   VIOGPU_WDDM_CONTEXT_INFO context_info = {};
 
    VIOGPU_WDDM_ADAPTER_INFO opened_info = {};
    printf("  QueryAdapterInfo(open): begin\n");
@@ -187,20 +190,19 @@ probe_adapter(tu_wddm_dispatch *dispatch,
    }
 
    {
-      VIOGPU_WDDM_CONTEXT_INFO info = {};
-      info.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
-      info.Header.Version = VIOGPU_WDDM_ABI_VERSION;
-      info.Header.Size = static_cast<uint32_t>(sizeof(info));
-      info.Opcode = VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO;
-      info.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
-      info.ExpectedResetGeneration = opened_info.ResetGeneration;
+      context_info.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+      context_info.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+      context_info.Header.Size = static_cast<uint32_t>(sizeof(context_info));
+      context_info.Opcode = VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO;
+      context_info.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+      context_info.ExpectedResetGeneration = opened_info.ResetGeneration;
 
       D3DKMT_ESCAPE escape = {};
       escape.hAdapter = opened_adapter;
       escape.hDevice = device_handle;
       escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
-      escape.pPrivateDriverData = &info;
-      escape.PrivateDriverDataSize = static_cast<UINT>(sizeof(info));
+      escape.pPrivateDriverData = &context_info;
+      escape.PrivateDriverDataSize = static_cast<UINT>(sizeof(context_info));
       escape.hContext = context_handle;
       printf("  Escape(GET_CONTEXT_INFO): begin\n");
       status = dispatch->Escape(&escape);
@@ -210,14 +212,94 @@ probe_adapter(tu_wddm_dispatch *dispatch,
              static_cast<unsigned>(
                 NT_SUCCESS(status) &&
                 tu_wddm_validate_context_info(
-                   &info, opened_info.ResetGeneration)),
-             static_cast<unsigned long long>(info.VaStart),
-             static_cast<unsigned long long>(info.VaSize),
-             static_cast<unsigned long long>(info.ResetGeneration),
-             info.ContextId, info.SubmitQueueId);
+                   &context_info, opened_info.ResetGeneration)),
+             static_cast<unsigned long long>(context_info.VaStart),
+             static_cast<unsigned long long>(context_info.VaSize),
+             static_cast<unsigned long long>(context_info.ResetGeneration),
+             context_info.ContextId, context_info.SubmitQueueId);
       ready = NT_SUCCESS(status) &&
-              tu_wddm_validate_context_info(&info,
+              tu_wddm_validate_context_info(&context_info,
                                             opened_info.ResetGeneration);
+   }
+
+   if (ready) {
+      /* Reuse the production WDDM ownership helpers so this probe exercises
+       * the exact private allocation ABI used by Turnip. The requested IOVA
+       * is the first page of this context's VA slice; no command is submitted
+       * by this phase. */
+      tu_wddm_runtime runtime = {};
+      runtime.dispatch = *dispatch;
+      tu_wddm_device device = {};
+      device.adapter.runtime = &runtime;
+      device.adapter.luid = enumerated->AdapterLuid;
+      device.adapter.handle = opened_adapter;
+      device.adapter.private_info = opened_info;
+      device.handle = device_handle;
+
+      tu_wddm_context context = {};
+      context.device = &device;
+      context.handle = context_handle;
+      context.info = context_info;
+
+      tu_wddm_allocation_desc desc = {};
+      desc.size = 4096;
+      desc.alignment = 4096;
+      desc.requested_iova = context_info.VaStart;
+      desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE |
+                   VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+
+      tu_wddm_allocation allocation = {};
+      printf("  CreateAllocation(native 4KiB): begin\n");
+      const bool created =
+         tu_wddm_allocation_create(&context, &desc, &allocation);
+      printf("  CreateAllocation(native 4KiB): success=%u handle=0x%08x\n",
+             static_cast<unsigned>(created), allocation.handle);
+      bool allocation_ready = created;
+      bool locked = false;
+      bool unlocked = false;
+      if (created) {
+         void *map = nullptr;
+         printf("  Lock(native 4KiB): begin\n");
+         locked = tu_wddm_allocation_lock(&allocation, &map);
+         printf("  Lock(native 4KiB): success=%u map=%p\n",
+                static_cast<unsigned>(locked), map);
+         if (locked && map != nullptr) {
+            static_cast<unsigned char *>(map)[0] = 0xA5;
+            printf("  Unlock(native 4KiB): begin\n");
+            unlocked = tu_wddm_allocation_unlock(&allocation);
+            if (!unlocked) {
+               /* A transient thunk failure must not leave the owner behind
+                * when the probe can safely retry the exact Unlock operation. */
+               printf("  Unlock(native 4KiB): retry\n");
+               unlocked = tu_wddm_allocation_unlock(&allocation);
+            }
+            printf("  Unlock(native 4KiB): success=%u\n",
+                   static_cast<unsigned>(unlocked));
+         }
+         allocation_ready = locked && unlocked;
+      }
+
+      bool allocation_clean = true;
+      if (allocation.handle != 0 && allocation.locked) {
+         /* A failed Unlock keeps ownership in the helper. Give the thunk one
+          * final bounded cleanup attempt before Context teardown. */
+         printf("  Unlock(native 4KiB): cleanup retry\n");
+         allocation_clean = tu_wddm_allocation_unlock(&allocation);
+      }
+      if (allocation.handle != 0 && !allocation.locked) {
+         printf("  DestroyAllocation(native 4KiB): begin\n");
+         bool destroyed = tu_wddm_allocation_destroy(&allocation);
+         if (!destroyed) {
+            printf("  DestroyAllocation(native 4KiB): retry\n");
+            destroyed = tu_wddm_allocation_destroy(&allocation);
+         }
+         printf("  DestroyAllocation(native 4KiB): success=%u\n",
+                static_cast<unsigned>(destroyed));
+         allocation_clean = allocation_clean && destroyed;
+      } else if (allocation.handle != 0) {
+         allocation_clean = false;
+      }
+      ready = allocation_ready && allocation_clean && allocation.handle == 0;
    }
 
 cleanup:
