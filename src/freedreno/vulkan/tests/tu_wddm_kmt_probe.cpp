@@ -85,6 +85,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
               const D3DKMT_ADAPTERINFO *enumerated)
 {
    VIOGPU_WDDM_ADAPTER_INFO enumerated_info = {};
+   printf("  QueryAdapterInfo(enum): begin\n");
    NTSTATUS status = query_private_info(dispatch, enumerated->hAdapter,
                                         &enumerated_info);
    printf("  QueryAdapterInfo(enum): status=0x%08lx valid=%u\n",
@@ -99,6 +100,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
 
    D3DKMT_OPENADAPTERFROMLUID open = {};
    open.AdapterLuid = enumerated->AdapterLuid;
+   printf("  OpenAdapterFromLuid: begin\n");
    status = dispatch->OpenAdapterFromLuid(&open);
    printf("  OpenAdapterFromLuid: status=0x%08lx handle=0x%08x\n",
           static_cast<unsigned long>(status), open.hAdapter);
@@ -111,6 +113,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
    D3DKMT_HANDLE context_handle = 0;
 
    VIOGPU_WDDM_ADAPTER_INFO opened_info = {};
+   printf("  QueryAdapterInfo(open): begin\n");
    status = query_private_info(dispatch, opened_adapter, &opened_info);
    printf("  QueryAdapterInfo(open): status=0x%08lx valid=%u exact=%u\n",
           static_cast<unsigned long>(status),
@@ -130,6 +133,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
    {
       D3DKMT_CREATEDEVICE create = {};
       create.hAdapter = opened_adapter;
+      printf("  CreateDevice: begin\n");
       status = dispatch->CreateDevice(&create);
       printf("  CreateDevice: status=0x%08lx handle=0x%08x command=%u "
              "allocations=%u patches=%u\n",
@@ -145,6 +149,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       D3DKMT_GETDEVICESTATE state = {};
       state.hDevice = device_handle;
       state.StateType = D3DKMT_DEVICESTATE_EXECUTION;
+      printf("  GetDeviceState: begin\n");
       status = dispatch->GetDeviceState(&state);
       printf("  GetDeviceState: status=0x%08lx execution=%u\n",
              static_cast<unsigned long>(status),
@@ -169,6 +174,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       create.pPrivateDriverData = &private_data;
       create.PrivateDriverDataSize = static_cast<UINT>(sizeof(private_data));
       create.ClientHint = D3DKMT_CLIENTHINT_VULKAN;
+      printf("  CreateContext: begin\n");
       status = dispatch->CreateContext(&create);
       printf("  CreateContext: status=0x%08lx handle=0x%08x command=%u "
              "allocations=%u patches=%u\n",
@@ -196,6 +202,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       escape.pPrivateDriverData = &info;
       escape.PrivateDriverDataSize = static_cast<UINT>(sizeof(info));
       escape.hContext = context_handle;
+      printf("  Escape(GET_CONTEXT_INFO): begin\n");
       status = dispatch->Escape(&escape);
       printf("  Escape(GET_CONTEXT_INFO): status=0x%08lx valid=%u "
              "va=0x%llx+0x%llx reset=%llu context=%u queue=%u\n",
@@ -240,6 +247,12 @@ cleanup:
 int
 main()
 {
+   /* KMT calls can each wait for a bounded host response.  Keep every phase
+    * visible when the probe is run through SSH, even before process exit. */
+   (void)setvbuf(stdout, nullptr, _IONBF, 0);
+   (void)setvbuf(stderr, nullptr, _IONBF, 0);
+   printf("tu WDDM KMT probe: begin\n");
+
    tu_wddm_dispatch dispatch = {};
    if (!tu_wddm_dispatch_init(&dispatch)) {
       fprintf(stderr, "tu WDDM KMT probe: thunk initialization failed\n");
@@ -247,6 +260,7 @@ main()
    }
 
    D3DKMT_ENUMADAPTERS2 enumeration = {};
+   printf("EnumAdapters2(count): begin\n");
    NTSTATUS status = dispatch.EnumAdapters2(&enumeration);
    printf("EnumAdapters2(count): status=0x%08lx capacity=%lu\n",
           static_cast<unsigned long>(status), enumeration.NumAdapters);
@@ -266,6 +280,7 @@ main()
 
    enumeration.NumAdapters = capacity;
    enumeration.pAdapters = adapters;
+   printf("EnumAdapters2(fill): begin\n");
    status = dispatch.EnumAdapters2(&enumeration);
    printf("EnumAdapters2(fill): status=0x%08lx count=%lu\n",
           static_cast<unsigned long>(status), enumeration.NumAdapters);
