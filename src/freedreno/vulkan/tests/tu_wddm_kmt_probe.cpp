@@ -4,59 +4,114 @@
  *
  * Direct ARM64 D3DKMT bring-up probe for the DroidVM Turnip private endpoint.
  * It does not load Vulkan or a D3D UMD.  It exercises the bounded KMT
- * allocation lock/unlock lifecycle after Context/VA bring-up. Every acquired
- * KMT handle is closed before exit, including adapters rejected by the private
- * ABI query.
+ * allocation lock/unlock lifecycle after Context/VA bring-up. With the
+ * explicit --submit-nop argument it additionally submits one CP_NOP through
+ * the Native Context path and waits for the private fence endpoint. Every
+ * acquired KMT handle is closed before exit, including adapters rejected by
+ * the private ABI query.
  */
 
 #include "../tu_knl_wddm.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 namespace {
 
+enum : uint32_t {
+   kMsmCcmdGemSubmit = 7,
+   kMsmPipe3d0 = 0x10,
+   kMsmSubmitNoImplicit = 0x80000000U,
+   kMsmSubmitBoRead = 0x0001,
+   kMsmSubmitBoWrite = 0x0002,
+   kMsmSubmitBoNoImplicit = 0x0008,
+   kMsmSubmitCmdBuf = 0x0001,
+};
+
+#pragma pack(push, 1)
+struct test_msm_submit_request {
+   uint32_t command;
+   uint32_t length;
+   uint32_t sequence;
+   uint32_t response_offset;
+   uint32_t flags;
+   uint32_t queue_id;
+   uint32_t bo_count;
+   uint32_t command_count;
+   uint32_t fence;
+};
+
+struct test_msm_submit_bo {
+   uint32_t flags;
+   uint32_t handle;
+   uint64_t presumed;
+};
+
+struct test_msm_submit_command {
+   uint32_t type;
+   uint32_t submit_index;
+   uint32_t submit_offset;
+   uint32_t size;
+   uint32_t padding;
+   uint32_t relocation_count;
+   uint64_t iova;
+};
+
+struct test_msm_submit_one_bo {
+   test_msm_submit_request request;
+   test_msm_submit_bo bo;
+   test_msm_submit_command command;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(test_msm_submit_request) == 36, "MSM request fixture drift");
+static_assert(sizeof(test_msm_submit_bo) == 16, "MSM BO fixture drift");
+static_assert(sizeof(test_msm_submit_command) == 32, "MSM command fixture drift");
+static_assert(sizeof(test_msm_submit_one_bo) == 84, "MSM submit fixture drift");
+
+/* pm4_pkt7_hdr(CP_NOP, 0): a one-dword packet with no payload.  Keep this
+ * probe independent of generated register headers while retaining the exact
+ * opcode- and parity-bit encoding used by Turnip. */
+constexpr uint32_t kCpNop = 0x70900000U;
+static_assert(kCpNop == (0x70000000U | (0x10U << 16) | (1U << 23)),
+              "CP_NOP packet encoding drift");
+
+bool
+fence_reached(uint32_t completed, uint32_t target)
+{
+   return completed == target || static_cast<int32_t>(completed - target) > 0;
+}
+
 void
 print_status(const char *operation, NTSTATUS status)
 {
-   printf("%s: status=0x%08lx\n", operation,
-          static_cast<unsigned long>(status));
+   printf("%s: status=0x%08lx\n", operation, static_cast<unsigned long>(status));
 }
 
 void
 print_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info)
 {
-   printf("    header: magic=0x%08x version=%u size=%u reserved=0x%08x\n",
-          info->Header.Magic, info->Header.Version, info->Header.Size,
-          info->Header.Reserved);
-   printf("    capabilities=0x%016llx reset=%llu\n",
-          static_cast<unsigned long long>(info->Capabilities),
+   printf("    header: magic=0x%08x version=%u size=%u reserved=0x%08x\n", info->Header.Magic, info->Header.Version,
+          info->Header.Size, info->Header.Reserved);
+   printf("    capabilities=0x%016llx reset=%llu\n", static_cast<unsigned long long>(info->Capabilities),
           static_cast<unsigned long long>(info->ResetGeneration));
-   printf("    msm=%u.%u.%u gpu=%u chip=0x%016llx\n",
-          info->MsmMajorVersion, info->MsmMinorVersion,
-          info->MsmPatchVersion, info->GpuId,
-          static_cast<unsigned long long>(info->ChipId));
+   printf("    msm=%u.%u.%u gpu=%u chip=0x%016llx\n", info->MsmMajorVersion, info->MsmMinorVersion,
+          info->MsmPatchVersion, info->GpuId, static_cast<unsigned long long>(info->ChipId));
    printf("    gmem: size=%u base=0x%016llx highest-bank-bit=%u "
           "priorities=%u\n",
-          info->GmemSize, static_cast<unsigned long long>(info->GmemBase),
-          info->HighestBankBit, info->PriorityCount);
-   printf("    coherent=%u ubwc=0x%016llx macrotile=0x%016llx\n",
-          info->HasCachedCoherentMemory,
-          static_cast<unsigned long long>(info->UbwcSwizzle),
-          static_cast<unsigned long long>(info->MacrotileMode));
+          info->GmemSize, static_cast<unsigned long long>(info->GmemBase), info->HighestBankBit, info->PriorityCount);
+   printf("    coherent=%u ubwc=0x%016llx macrotile=0x%016llx\n", info->HasCachedCoherentMemory,
+          static_cast<unsigned long long>(info->UbwcSwizzle), static_cast<unsigned long long>(info->MacrotileMode));
    printf("    uche-trap=0x%016llx ray-tracing=%u max-frequency=%u "
           "reserved=[0x%016llx,0x%016llx]\n",
-          static_cast<unsigned long long>(info->UcheTrapBase),
-          info->HasRayTracing, info->MaxFrequency,
-          static_cast<unsigned long long>(info->Reserved[0]),
-          static_cast<unsigned long long>(info->Reserved[1]));
+          static_cast<unsigned long long>(info->UcheTrapBase), info->HasRayTracing, info->MaxFrequency,
+          static_cast<unsigned long long>(info->Reserved[0]), static_cast<unsigned long long>(info->Reserved[1]));
 }
 
 NTSTATUS
-query_private_info(tu_wddm_dispatch *dispatch,
-                   D3DKMT_HANDLE adapter,
-                   VIOGPU_WDDM_ADAPTER_INFO *info)
+query_private_info(tu_wddm_dispatch *dispatch, D3DKMT_HANDLE adapter, VIOGPU_WDDM_ADAPTER_INFO *info)
 {
    memset(info, 0, sizeof(*info));
    D3DKMT_QUERYADAPTERINFO query = {};
@@ -83,29 +138,142 @@ close_adapter(tu_wddm_dispatch *dispatch, D3DKMT_HANDLE *handle)
 }
 
 bool
-probe_adapter(tu_wddm_dispatch *dispatch,
-              const D3DKMT_ADAPTERINFO *enumerated)
+run_submit_nop_probe(tu_wddm_dispatch *dispatch,
+                     const D3DKMT_ADAPTERINFO *enumerated,
+                     D3DKMT_HANDLE adapter_handle,
+                     D3DKMT_HANDLE device_handle,
+                     D3DKMT_HANDLE context_handle,
+                     const D3DKMT_CREATECONTEXT *context_create,
+                     const VIOGPU_WDDM_ADAPTER_INFO *adapter_info,
+                     const VIOGPU_WDDM_CONTEXT_INFO *context_info)
+{
+   if (dispatch == nullptr || enumerated == nullptr || adapter_info == nullptr || context_info == nullptr ||
+       context_create == nullptr || adapter_handle == 0 || device_handle == 0 || context_handle == 0 ||
+       context_create->pCommandBuffer == nullptr || context_create->pAllocationList == nullptr ||
+       context_create->pPatchLocationList == nullptr)
+      return false;
+
+   tu_wddm_runtime runtime = {};
+   runtime.dispatch = *dispatch;
+   tu_wddm_device device = {};
+   device.adapter.runtime = &runtime;
+   device.adapter.luid = enumerated->AdapterLuid;
+   device.adapter.handle = adapter_handle;
+   device.adapter.private_info = *adapter_info;
+   device.handle = device_handle;
+
+   tu_wddm_context context = {};
+   context.device = &device;
+   context.handle = context_handle;
+   context.command_buffer = context_create->pCommandBuffer;
+   context.command_buffer_size = context_create->CommandBufferSize;
+   context.allocation_list = context_create->pAllocationList;
+   context.allocation_list_size = context_create->AllocationListSize;
+   context.patch_location_list = context_create->pPatchLocationList;
+   context.patch_location_list_size = context_create->PatchLocationListSize;
+   context.info = *context_info;
+
+   tu_wddm_allocation_desc desc = {};
+   desc.size = 4096;
+   desc.alignment = 4096;
+   desc.requested_iova = context_info->VaStart;
+   desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+
+   tu_wddm_allocation allocation = {};
+   printf("  Submit probe CreateAllocation: begin\n");
+   bool created = tu_wddm_allocation_create(&context, &desc, &allocation);
+   printf("  Submit probe CreateAllocation: success=%u handle=0x%08x\n", static_cast<unsigned>(created),
+          allocation.handle);
+   if (!created && allocation.handle == 0)
+      return false;
+
+   bool prepared = false;
+   void *map = nullptr;
+   if (created) {
+      printf("  Submit probe Lock command BO: begin\n");
+   }
+   if (created && tu_wddm_allocation_lock(&allocation, &map) && map != nullptr) {
+      memset(map, 0, 4096);
+      memcpy(map, &kCpNop, sizeof(kCpNop));
+      prepared = tu_wddm_allocation_unlock(&allocation);
+      if (!prepared)
+         prepared = tu_wddm_allocation_unlock(&allocation);
+   }
+   printf("  Submit probe command BO prepared=%u\n", static_cast<unsigned>(prepared));
+
+   bool submitted = false;
+   bool completed = false;
+   if (prepared) {
+      test_msm_submit_one_bo submit = {};
+      submit.request.command = kMsmCcmdGemSubmit;
+      submit.request.length = sizeof(submit);
+      submit.request.sequence = 1;
+      submit.request.flags = kMsmPipe3d0 | kMsmSubmitNoImplicit;
+      submit.request.queue_id = context_info->SubmitQueueId;
+      submit.request.bo_count = 1;
+      submit.request.command_count = 1;
+      submit.request.fence = 1;
+      submit.bo.flags = kMsmSubmitBoRead | kMsmSubmitBoWrite | kMsmSubmitBoNoImplicit;
+      submit.command.type = kMsmSubmitCmdBuf;
+      submit.command.submit_index = 0;
+      submit.command.submit_offset = 0;
+      submit.command.size = sizeof(kCpNop);
+
+      tu_wddm_render_reference reference = {};
+      reference.allocation = &allocation;
+      reference.flags = VIOGPU_WDDM_REFERENCE_READ | VIOGPU_WDDM_REFERENCE_WRITE;
+      reference.allocation_offset = 0;
+      reference.length = 4096;
+      reference.patch_offset =
+         static_cast<uint32_t>(offsetof(test_msm_submit_one_bo, bo) + offsetof(test_msm_submit_bo, presumed));
+
+      printf("  Submit probe Render(NOP): begin\n");
+      submitted = tu_wddm_context_render(&context, &submit, sizeof(submit), &reference, 1);
+      printf("  Submit probe Render(NOP): success=%u fence=%u\n", static_cast<unsigned>(submitted),
+             context.last_submitted_fence);
+      if (submitted) {
+         completed = tu_wddm_context_wait_fence(&context, submit.request.fence,
+                                                UINT64_C(5) * UINT64_C(1000) * UINT64_C(1000) * UINT64_C(1000));
+         uint32_t completed_fence = 0;
+         bool queried = tu_wddm_context_get_completed_fence(&context, &completed_fence);
+         printf("  Submit probe fence: completed=%u query=%u value=%u\n", static_cast<unsigned>(completed),
+                static_cast<unsigned>(queried), completed_fence);
+         completed = completed && queried && fence_reached(completed_fence, submit.request.fence);
+      }
+   }
+
+   bool cleaned = true;
+   if (allocation.handle != 0 && allocation.locked)
+      cleaned = tu_wddm_allocation_unlock(&allocation);
+   if (allocation.handle != 0 && !allocation.locked) {
+      bool destroyed = tu_wddm_allocation_destroy(&allocation);
+      if (!destroyed)
+         destroyed = tu_wddm_allocation_destroy(&allocation);
+      cleaned = cleaned && destroyed;
+   } else if (allocation.handle != 0) {
+      cleaned = false;
+   }
+   printf("  Submit probe allocation cleanup=%u\n", static_cast<unsigned>(cleaned));
+   return prepared && submitted && completed && cleaned && allocation.handle == 0;
+}
+
+bool
+probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, bool submit_nop)
 {
    VIOGPU_WDDM_ADAPTER_INFO enumerated_info = {};
    printf("  QueryAdapterInfo(enum): begin\n");
-   NTSTATUS status = query_private_info(dispatch, enumerated->hAdapter,
-                                        &enumerated_info);
-   printf("  QueryAdapterInfo(enum): status=0x%08lx valid=%u\n",
-          static_cast<unsigned long>(status),
-          static_cast<unsigned>(
-             NT_SUCCESS(status) &&
-             tu_wddm_validate_adapter_info(&enumerated_info)));
+   NTSTATUS status = query_private_info(dispatch, enumerated->hAdapter, &enumerated_info);
+   printf("  QueryAdapterInfo(enum): status=0x%08lx valid=%u\n", static_cast<unsigned long>(status),
+          static_cast<unsigned>(NT_SUCCESS(status) && tu_wddm_validate_adapter_info(&enumerated_info)));
    print_adapter_info(&enumerated_info);
-   if (!NT_SUCCESS(status) ||
-       !tu_wddm_validate_adapter_info(&enumerated_info))
+   if (!NT_SUCCESS(status) || !tu_wddm_validate_adapter_info(&enumerated_info))
       return false;
 
    D3DKMT_OPENADAPTERFROMLUID open = {};
    open.AdapterLuid = enumerated->AdapterLuid;
    printf("  OpenAdapterFromLuid: begin\n");
    status = dispatch->OpenAdapterFromLuid(&open);
-   printf("  OpenAdapterFromLuid: status=0x%08lx handle=0x%08x\n",
-          static_cast<unsigned long>(status), open.hAdapter);
+   printf("  OpenAdapterFromLuid: status=0x%08lx handle=0x%08x\n", static_cast<unsigned long>(status), open.hAdapter);
    if (!NT_SUCCESS(status) || open.hAdapter == 0)
       return false;
 
@@ -113,23 +281,18 @@ probe_adapter(tu_wddm_dispatch *dispatch,
    D3DKMT_HANDLE opened_adapter = open.hAdapter;
    D3DKMT_HANDLE device_handle = 0;
    D3DKMT_HANDLE context_handle = 0;
+   D3DKMT_CREATECONTEXT context_create = {};
    VIOGPU_WDDM_CONTEXT_INFO context_info = {};
 
    VIOGPU_WDDM_ADAPTER_INFO opened_info = {};
    printf("  QueryAdapterInfo(open): begin\n");
    status = query_private_info(dispatch, opened_adapter, &opened_info);
-   printf("  QueryAdapterInfo(open): status=0x%08lx valid=%u exact=%u\n",
-          static_cast<unsigned long>(status),
-          static_cast<unsigned>(
-             NT_SUCCESS(status) &&
-             tu_wddm_validate_adapter_info(&opened_info)),
-          static_cast<unsigned>(
-             NT_SUCCESS(status) &&
-             memcmp(&opened_info, &enumerated_info,
-                    sizeof(opened_info)) == 0));
+   printf(
+      "  QueryAdapterInfo(open): status=0x%08lx valid=%u exact=%u\n", static_cast<unsigned long>(status),
+      static_cast<unsigned>(NT_SUCCESS(status) && tu_wddm_validate_adapter_info(&opened_info)),
+      static_cast<unsigned>(NT_SUCCESS(status) && memcmp(&opened_info, &enumerated_info, sizeof(opened_info)) == 0));
    print_adapter_info(&opened_info);
-   if (!NT_SUCCESS(status) ||
-       !tu_wddm_validate_adapter_info(&opened_info) ||
+   if (!NT_SUCCESS(status) || !tu_wddm_validate_adapter_info(&opened_info) ||
        memcmp(&opened_info, &enumerated_info, sizeof(opened_info)) != 0)
       goto cleanup;
 
@@ -140,8 +303,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       status = dispatch->CreateDevice(&create);
       printf("  CreateDevice: status=0x%08lx handle=0x%08x command=%u "
              "allocations=%u patches=%u\n",
-             static_cast<unsigned long>(status), create.hDevice,
-             create.CommandBufferSize, create.AllocationListSize,
+             static_cast<unsigned long>(status), create.hDevice, create.CommandBufferSize, create.AllocationListSize,
              create.PatchLocationListSize);
       if (!NT_SUCCESS(status) || create.hDevice == 0)
          goto cleanup;
@@ -154,11 +316,9 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       state.StateType = D3DKMT_DEVICESTATE_EXECUTION;
       printf("  GetDeviceState: begin\n");
       status = dispatch->GetDeviceState(&state);
-      printf("  GetDeviceState: status=0x%08lx execution=%u\n",
-             static_cast<unsigned long>(status),
+      printf("  GetDeviceState: status=0x%08lx execution=%u\n", static_cast<unsigned long>(status),
              static_cast<unsigned>(state.ExecutionState));
-      if (!NT_SUCCESS(status) ||
-          state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE)
+      if (!NT_SUCCESS(status) || state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE)
          goto cleanup;
    }
 
@@ -170,23 +330,21 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       private_data.ExpectedResetGeneration = opened_info.ResetGeneration;
       private_data.Flags = VIOGPU_WDDM_CONTEXT_FLAGS_NONE;
 
-      D3DKMT_CREATECONTEXT create = {};
-      create.hDevice = device_handle;
-      create.NodeOrdinal = 0;
-      create.EngineAffinity = 1;
-      create.pPrivateDriverData = &private_data;
-      create.PrivateDriverDataSize = static_cast<UINT>(sizeof(private_data));
-      create.ClientHint = D3DKMT_CLIENTHINT_VULKAN;
+      context_create.hDevice = device_handle;
+      context_create.NodeOrdinal = 0;
+      context_create.EngineAffinity = 1;
+      context_create.pPrivateDriverData = &private_data;
+      context_create.PrivateDriverDataSize = static_cast<UINT>(sizeof(private_data));
+      context_create.ClientHint = D3DKMT_CLIENTHINT_VULKAN;
       printf("  CreateContext: begin\n");
-      status = dispatch->CreateContext(&create);
+      status = dispatch->CreateContext(&context_create);
       printf("  CreateContext: status=0x%08lx handle=0x%08x command=%u "
              "allocations=%u patches=%u\n",
-             static_cast<unsigned long>(status), create.hContext,
-             create.CommandBufferSize, create.AllocationListSize,
-             create.PatchLocationListSize);
-      if (!NT_SUCCESS(status) || create.hContext == 0)
+             static_cast<unsigned long>(status), context_create.hContext, context_create.CommandBufferSize,
+             context_create.AllocationListSize, context_create.PatchLocationListSize);
+      if (!NT_SUCCESS(status) || context_create.hContext == 0)
          goto cleanup;
-      context_handle = create.hContext;
+      context_handle = context_create.hContext;
    }
 
    {
@@ -209,17 +367,13 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       printf("  Escape(GET_CONTEXT_INFO): status=0x%08lx valid=%u "
              "va=0x%llx+0x%llx reset=%llu context=%u queue=%u\n",
              static_cast<unsigned long>(status),
-             static_cast<unsigned>(
-                NT_SUCCESS(status) &&
-                tu_wddm_validate_context_info(
-                   &context_info, opened_info.ResetGeneration)),
+             static_cast<unsigned>(NT_SUCCESS(status) &&
+                                   tu_wddm_validate_context_info(&context_info, opened_info.ResetGeneration)),
              static_cast<unsigned long long>(context_info.VaStart),
              static_cast<unsigned long long>(context_info.VaSize),
-             static_cast<unsigned long long>(context_info.ResetGeneration),
-             context_info.ContextId, context_info.SubmitQueueId);
-      ready = NT_SUCCESS(status) &&
-              tu_wddm_validate_context_info(&context_info,
-                                            opened_info.ResetGeneration);
+             static_cast<unsigned long long>(context_info.ResetGeneration), context_info.ContextId,
+             context_info.SubmitQueueId);
+      ready = NT_SUCCESS(status) && tu_wddm_validate_context_info(&context_info, opened_info.ResetGeneration);
    }
 
    if (ready) {
@@ -245,15 +399,13 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       desc.size = 4096;
       desc.alignment = 4096;
       desc.requested_iova = context_info.VaStart;
-      desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE |
-                   VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+      desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
 
       tu_wddm_allocation allocation = {};
       printf("  CreateAllocation(native 4KiB): begin\n");
-      const bool created =
-         tu_wddm_allocation_create(&context, &desc, &allocation);
-      printf("  CreateAllocation(native 4KiB): success=%u handle=0x%08x\n",
-             static_cast<unsigned>(created), allocation.handle);
+      const bool created = tu_wddm_allocation_create(&context, &desc, &allocation);
+      printf("  CreateAllocation(native 4KiB): success=%u handle=0x%08x\n", static_cast<unsigned>(created),
+             allocation.handle);
       bool allocation_ready = created;
       bool locked = false;
       bool unlocked = false;
@@ -261,8 +413,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
          void *map = nullptr;
          printf("  Lock(native 4KiB): begin\n");
          locked = tu_wddm_allocation_lock(&allocation, &map);
-         printf("  Lock(native 4KiB): success=%u map=%p\n",
-                static_cast<unsigned>(locked), map);
+         printf("  Lock(native 4KiB): success=%u map=%p\n", static_cast<unsigned>(locked), map);
          if (locked && map != nullptr) {
             static_cast<unsigned char *>(map)[0] = 0xA5;
             printf("  Unlock(native 4KiB): begin\n");
@@ -273,8 +424,7 @@ probe_adapter(tu_wddm_dispatch *dispatch,
                printf("  Unlock(native 4KiB): retry\n");
                unlocked = tu_wddm_allocation_unlock(&allocation);
             }
-            printf("  Unlock(native 4KiB): success=%u\n",
-                   static_cast<unsigned>(unlocked));
+            printf("  Unlock(native 4KiB): success=%u\n", static_cast<unsigned>(unlocked));
          }
          allocation_ready = locked && unlocked;
       }
@@ -293,13 +443,17 @@ probe_adapter(tu_wddm_dispatch *dispatch,
             printf("  DestroyAllocation(native 4KiB): retry\n");
             destroyed = tu_wddm_allocation_destroy(&allocation);
          }
-         printf("  DestroyAllocation(native 4KiB): success=%u\n",
-                static_cast<unsigned>(destroyed));
+         printf("  DestroyAllocation(native 4KiB): success=%u\n", static_cast<unsigned>(destroyed));
          allocation_clean = allocation_clean && destroyed;
       } else if (allocation.handle != 0) {
          allocation_clean = false;
       }
       ready = allocation_ready && allocation_clean && allocation.handle == 0;
+
+      if (ready && submit_nop) {
+         ready = run_submit_nop_probe(dispatch, enumerated, opened_adapter, device_handle, context_handle,
+                                      &context_create, &opened_info, &context_info);
+      }
    }
 
 cleanup:
@@ -327,13 +481,22 @@ cleanup:
 } /* namespace */
 
 int
-main()
+main(int argc, char **argv)
 {
    /* KMT calls can each wait for a bounded host response.  Keep every phase
     * visible when the probe is run through SSH, even before process exit. */
-   (void)setvbuf(stdout, nullptr, _IONBF, 0);
-   (void)setvbuf(stderr, nullptr, _IONBF, 0);
-   printf("tu WDDM KMT probe: begin\n");
+   (void) setvbuf(stdout, nullptr, _IONBF, 0);
+   (void) setvbuf(stderr, nullptr, _IONBF, 0);
+   bool submit_nop = false;
+   if (argc > 1) {
+      if (argc == 2 && strcmp(argv[1], "--submit-nop") == 0)
+         submit_nop = true;
+      else {
+         fprintf(stderr, "usage: %s [--submit-nop]\n", argv[0]);
+         return 2;
+      }
+   }
+   printf("tu WDDM KMT probe: begin submit_nop=%u\n", static_cast<unsigned>(submit_nop));
 
    tu_wddm_dispatch dispatch = {};
    if (!tu_wddm_dispatch_init(&dispatch)) {
@@ -344,8 +507,8 @@ main()
    D3DKMT_ENUMADAPTERS2 enumeration = {};
    printf("EnumAdapters2(count): begin\n");
    NTSTATUS status = dispatch.EnumAdapters2(&enumeration);
-   printf("EnumAdapters2(count): status=0x%08lx capacity=%lu\n",
-          static_cast<unsigned long>(status), enumeration.NumAdapters);
+   printf("EnumAdapters2(count): status=0x%08lx capacity=%lu\n", static_cast<unsigned long>(status),
+          enumeration.NumAdapters);
    if (!NT_SUCCESS(status) || enumeration.NumAdapters == 0 ||
        enumeration.NumAdapters > SIZE_MAX / sizeof(D3DKMT_ADAPTERINFO)) {
       tu_wddm_dispatch_finish(&dispatch);
@@ -353,8 +516,7 @@ main()
    }
 
    const ULONG capacity = enumeration.NumAdapters;
-   D3DKMT_ADAPTERINFO *adapters = static_cast<D3DKMT_ADAPTERINFO *>(
-      calloc(capacity, sizeof(*adapters)));
+   D3DKMT_ADAPTERINFO *adapters = static_cast<D3DKMT_ADAPTERINFO *>(calloc(capacity, sizeof(*adapters)));
    if (adapters == NULL) {
       tu_wddm_dispatch_finish(&dispatch);
       return 1;
@@ -364,27 +526,21 @@ main()
    enumeration.pAdapters = adapters;
    printf("EnumAdapters2(fill): begin\n");
    status = dispatch.EnumAdapters2(&enumeration);
-   printf("EnumAdapters2(fill): status=0x%08lx count=%lu\n",
-          static_cast<unsigned long>(status), enumeration.NumAdapters);
+   printf("EnumAdapters2(fill): status=0x%08lx count=%lu\n", static_cast<unsigned long>(status),
+          enumeration.NumAdapters);
 
    bool ready = false;
    if (NT_SUCCESS(status) && enumeration.NumAdapters <= capacity) {
       for (ULONG index = 0; index < enumeration.NumAdapters; index++) {
-         printf("adapter[%lu]: handle=0x%08x luid=%08lx:%08lx sources=%lu\n",
-                index, adapters[index].hAdapter,
+         printf("adapter[%lu]: handle=0x%08x luid=%08lx:%08lx sources=%lu\n", index, adapters[index].hAdapter,
                 static_cast<unsigned long>(adapters[index].AdapterLuid.HighPart),
-                static_cast<unsigned long>(adapters[index].AdapterLuid.LowPart),
-                adapters[index].NumOfSources);
-         if (adapters[index].hAdapter != 0 &&
-             probe_adapter(&dispatch, &adapters[index]))
+                static_cast<unsigned long>(adapters[index].AdapterLuid.LowPart), adapters[index].NumOfSources);
+         if (adapters[index].hAdapter != 0 && probe_adapter(&dispatch, &adapters[index], submit_nop))
             ready = true;
       }
    }
 
-   const ULONG close_count = NT_SUCCESS(status) &&
-                             enumeration.NumAdapters <= capacity
-                                ? enumeration.NumAdapters
-                                : 0;
+   const ULONG close_count = NT_SUCCESS(status) && enumeration.NumAdapters <= capacity ? enumeration.NumAdapters : 0;
    for (ULONG index = 0; index < close_count; index++)
       close_adapter(&dispatch, &adapters[index].hAdapter);
 

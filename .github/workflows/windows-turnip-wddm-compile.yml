@@ -353,7 +353,8 @@ jobs:
           $kmtProbe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_kmt_probe.cpp' -Raw
           foreach ($fragment in @('tu_wddm_allocation_create', 'tu_wddm_allocation_lock',
                                   'tu_wddm_allocation_unlock', 'tu_wddm_allocation_destroy',
-                                  'CreateAllocation(native 4KiB)', 'DestroyAllocation(native 4KiB)')) {
+                                  'CreateAllocation(native 4KiB)', 'DestroyAllocation(native 4KiB)',
+                                  '--submit-nop', 'tu_wddm_context_render', 'kCpNop')) {
             if ($kmtProbe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
               throw "KMT probe is missing bounded allocation lifecycle phase: $fragment"
             }

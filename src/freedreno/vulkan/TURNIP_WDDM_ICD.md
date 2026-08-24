@@ -45,6 +45,13 @@ unlocks it, and destroys it through the same UMD ownership helpers used by
 Turnip. It does not submit a GPU command or load Vulkan/D3D UMD code. A failed
 unlock or destroy is reported as a failed probe rather than being hidden by
 parent-context cleanup.
+Pass `--submit-nop` to add an explicit, bounded Native Context submit phase:
+the probe writes one type-7 `CP_NOP` into a CPU-visible BO, submits a single
+MSM command stream through `D3DKMTRender`, waits up to five seconds for the
+private completed-fence endpoint, and then destroys the BO. The default mode
+omits this GPU submission so adapter/allocation diagnostics remain non-invasive;
+the submit mode is a device-runtime test and is not executed by the cross-build
+CI job. A failed submit, fence query, or cleanup is surfaced as a failed probe.
 `tu_wddm_vulkan_probe_arm64.exe`
 checks ICD loading, adapter identity, queue discovery, and device creation;
 `tu_wddm_vulkan_compute_probe_arm64.exe` takes `tu_wddm_compute.spv`, submits a
