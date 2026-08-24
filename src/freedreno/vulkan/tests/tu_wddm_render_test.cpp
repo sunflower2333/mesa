@@ -608,7 +608,7 @@ check_render_packet(const D3DKMT_RENDER *render)
    CHECK(submit.bo.presumed == 0);
 
    CHECK(fixture->context.allocation_list[0].hAllocation == kAllocationHandle);
-   CHECK(fixture->context.allocation_list[0].WriteOperation ==
+   CHECK((fixture->context.allocation_list[0].WriteOperation != 0) ==
          ((fixture->expected_reference_flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0));
    CHECK(fixture->context.patch_location_list[0].AllocationIndex == 0);
    CHECK(fixture->context.patch_location_list[0].SlotId == 0);
