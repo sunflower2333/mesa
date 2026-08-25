@@ -322,6 +322,80 @@ run_allocation_lifecycle_probe(tu_wddm_context *context)
 }
 
 bool
+run_context_lifecycle_probe(tu_wddm_dispatch *dispatch,
+                            D3DKMT_HANDLE adapter_handle,
+                            D3DKMT_HANDLE device_handle,
+                            const VIOGPU_WDDM_ADAPTER_INFO *adapter_info)
+{
+   if (dispatch == nullptr || adapter_info == nullptr || adapter_handle == 0 || device_handle == 0)
+      return false;
+
+   printf("  Stress context lifecycle: begin iterations=%u\n", kLifecycleIterations);
+   for (uint32_t iteration = 0; iteration < kLifecycleIterations; iteration++) {
+      VIOGPU_WDDM_CONTEXT_CREATE private_data = {};
+      private_data.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+      private_data.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+      private_data.Header.Size = static_cast<uint32_t>(sizeof(private_data));
+      private_data.ExpectedResetGeneration = adapter_info->ResetGeneration;
+      private_data.Flags = VIOGPU_WDDM_CONTEXT_FLAGS_NONE;
+
+      D3DKMT_CREATECONTEXT create = {};
+      create.hDevice = device_handle;
+      create.NodeOrdinal = 0;
+      create.EngineAffinity = 1;
+      create.pPrivateDriverData = &private_data;
+      create.PrivateDriverDataSize = static_cast<UINT>(sizeof(private_data));
+      create.ClientHint = D3DKMT_CLIENTHINT_VULKAN;
+      NTSTATUS status = dispatch->CreateContext(&create);
+      if (!NT_SUCCESS(status) || create.hContext == 0) {
+         printf("  Stress context lifecycle: CreateContext failed iteration=%u status=0x%08lx handle=0x%08x\n",
+                iteration, static_cast<unsigned long>(status), create.hContext);
+         return false;
+      }
+
+      VIOGPU_WDDM_CONTEXT_INFO context_info = {};
+      context_info.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+      context_info.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+      context_info.Header.Size = static_cast<uint32_t>(sizeof(context_info));
+      context_info.Opcode = VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO;
+      context_info.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+      context_info.ExpectedResetGeneration = adapter_info->ResetGeneration;
+
+      D3DKMT_ESCAPE escape = {};
+      escape.hAdapter = adapter_handle;
+      escape.hDevice = device_handle;
+      escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+      escape.pPrivateDriverData = &context_info;
+      escape.PrivateDriverDataSize = static_cast<UINT>(sizeof(context_info));
+      escape.hContext = create.hContext;
+      status = dispatch->Escape(&escape);
+      const bool queried =
+         NT_SUCCESS(status) && tu_wddm_validate_context_info(&context_info, adapter_info->ResetGeneration);
+
+      D3DKMT_DESTROYCONTEXT destroy = {};
+      destroy.hContext = create.hContext;
+      NTSTATUS destroy_status = dispatch->DestroyContext(&destroy);
+      if (!NT_SUCCESS(destroy_status)) {
+         destroy_status = dispatch->DestroyContext(&destroy);
+      }
+
+      if (!queried || !NT_SUCCESS(destroy_status)) {
+         printf("  Stress context lifecycle: failed iteration=%u query=%u query_status=0x%08lx "
+                "destroy_status=0x%08lx\n",
+                iteration, static_cast<unsigned>(queried), static_cast<unsigned long>(status),
+                static_cast<unsigned long>(destroy_status));
+         return false;
+      }
+
+      if ((iteration + 1) % 1000 == 0)
+         printf("  Stress context lifecycle: completed=%u\n", iteration + 1);
+   }
+
+   printf("  Stress context lifecycle: passed iterations=%u\n", kLifecycleIterations);
+   return true;
+}
+
+bool
 probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, bool submit_nop, bool stress_lifecycle)
 {
    VIOGPU_WDDM_ADAPTER_INFO enumerated_info = {};
@@ -515,7 +589,8 @@ probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, 
       ready = allocation_ready && allocation_clean && allocation.handle == 0;
 
       if (ready && stress_lifecycle)
-         ready = run_allocation_lifecycle_probe(&context);
+         ready = run_context_lifecycle_probe(dispatch, opened_adapter, device_handle, &opened_info) &&
+                 run_allocation_lifecycle_probe(&context);
 
       if (ready && submit_nop) {
          ready = run_submit_nop_probe(dispatch, enumerated, opened_adapter, device_handle, context_handle,
