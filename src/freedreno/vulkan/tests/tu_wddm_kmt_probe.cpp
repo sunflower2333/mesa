@@ -8,7 +8,10 @@
  * explicit --submit-nop argument it additionally submits one CP_NOP through
  * the Native Context path and waits for the private fence endpoint. Every
  * acquired KMT handle is closed before exit, including adapters rejected by
- * the private ABI query.
+ * the private ABI query. The explicit --stress-lifecycle argument repeats the
+ * allocation lock/unlock/destroy cycle 10,000 times at one requested IOVA to
+ * expose retained KMT owners and requested-IOVA leaks without making the
+ * default bring-up probe invasive.
  */
 
 #include "../tu_knl_wddm.h"
@@ -75,8 +78,9 @@ static_assert(sizeof(test_msm_submit_one_bo) == 84, "MSM submit fixture drift");
  * probe independent of generated register headers while retaining the exact
  * opcode- and parity-bit encoding used by Turnip. */
 constexpr uint32_t kCpNop = 0x70900000U;
-static_assert(kCpNop == (0x70000000U | (0x10U << 16) | (1U << 23)),
-              "CP_NOP packet encoding drift");
+static_assert(kCpNop == (0x70000000U | (0x10U << 16) | (1U << 23)), "CP_NOP packet encoding drift");
+
+constexpr uint32_t kLifecycleIterations = 10000;
 
 bool
 fence_reached(uint32_t completed, uint32_t target)
@@ -258,7 +262,67 @@ run_submit_nop_probe(tu_wddm_dispatch *dispatch,
 }
 
 bool
-probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, bool submit_nop)
+run_allocation_lifecycle_probe(tu_wddm_context *context)
+{
+   if (context == nullptr || context->info.VaStart == 0 || context->info.VaSize < 4096)
+      return false;
+
+   tu_wddm_allocation_desc desc = {};
+   desc.size = 4096;
+   desc.alignment = 4096;
+   desc.requested_iova = context->info.VaStart;
+   desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+
+   printf("  Stress lifecycle: begin iterations=%u iova=0x%llx\n", kLifecycleIterations,
+          static_cast<unsigned long long>(desc.requested_iova));
+   for (uint32_t iteration = 0; iteration < kLifecycleIterations; iteration++) {
+      tu_wddm_allocation allocation = {};
+      if (!tu_wddm_allocation_create(context, &desc, &allocation)) {
+         printf("  Stress lifecycle: CreateAllocation failed iteration=%u handle=0x%08x\n", iteration,
+                allocation.handle);
+         if (allocation.handle != 0)
+            (void) tu_wddm_allocation_destroy(&allocation);
+         return false;
+      }
+
+      void *map = nullptr;
+      bool locked = tu_wddm_allocation_lock(&allocation, &map);
+      bool unlocked = false;
+      if (locked && map != nullptr) {
+         static_cast<unsigned char *>(map)[0] = static_cast<unsigned char>(iteration);
+         unlocked = tu_wddm_allocation_unlock(&allocation);
+         if (!unlocked)
+            unlocked = tu_wddm_allocation_unlock(&allocation);
+      }
+
+      bool destroyed = true;
+      if (allocation.handle != 0 && allocation.locked)
+         destroyed = tu_wddm_allocation_unlock(&allocation);
+      if (allocation.handle != 0 && !allocation.locked) {
+         destroyed = tu_wddm_allocation_destroy(&allocation);
+         if (!destroyed)
+            destroyed = tu_wddm_allocation_destroy(&allocation);
+      } else if (allocation.handle != 0) {
+         destroyed = false;
+      }
+
+      if (!locked || map == nullptr || !unlocked || !destroyed || allocation.handle != 0) {
+         printf("  Stress lifecycle: failed iteration=%u lock=%u unlock=%u destroy=%u handle=0x%08x\n", iteration,
+                static_cast<unsigned>(locked), static_cast<unsigned>(unlocked), static_cast<unsigned>(destroyed),
+                allocation.handle);
+         return false;
+      }
+
+      if ((iteration + 1) % 1000 == 0)
+         printf("  Stress lifecycle: completed=%u\n", iteration + 1);
+   }
+
+   printf("  Stress lifecycle: passed iterations=%u\n", kLifecycleIterations);
+   return true;
+}
+
+bool
+probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, bool submit_nop, bool stress_lifecycle)
 {
    VIOGPU_WDDM_ADAPTER_INFO enumerated_info = {};
    printf("  QueryAdapterInfo(enum): begin\n");
@@ -450,6 +514,9 @@ probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, 
       }
       ready = allocation_ready && allocation_clean && allocation.handle == 0;
 
+      if (ready && stress_lifecycle)
+         ready = run_allocation_lifecycle_probe(&context);
+
       if (ready && submit_nop) {
          ready = run_submit_nop_probe(dispatch, enumerated, opened_adapter, device_handle, context_handle,
                                       &context_create, &opened_info, &context_info);
@@ -488,15 +555,19 @@ main(int argc, char **argv)
    (void) setvbuf(stdout, nullptr, _IONBF, 0);
    (void) setvbuf(stderr, nullptr, _IONBF, 0);
    bool submit_nop = false;
-   if (argc > 1) {
-      if (argc == 2 && strcmp(argv[1], "--submit-nop") == 0)
+   bool stress_lifecycle = false;
+   for (int argument = 1; argument < argc; argument++) {
+      if (strcmp(argv[argument], "--submit-nop") == 0)
          submit_nop = true;
+      else if (strcmp(argv[argument], "--stress-lifecycle") == 0)
+         stress_lifecycle = true;
       else {
-         fprintf(stderr, "usage: %s [--submit-nop]\n", argv[0]);
+         fprintf(stderr, "usage: %s [--submit-nop] [--stress-lifecycle]\n", argv[0]);
          return 2;
       }
    }
-   printf("tu WDDM KMT probe: begin submit_nop=%u\n", static_cast<unsigned>(submit_nop));
+   printf("tu WDDM KMT probe: begin submit_nop=%u stress_lifecycle=%u\n", static_cast<unsigned>(submit_nop),
+          static_cast<unsigned>(stress_lifecycle));
 
    tu_wddm_dispatch dispatch = {};
    if (!tu_wddm_dispatch_init(&dispatch)) {
@@ -535,7 +606,7 @@ main(int argc, char **argv)
          printf("adapter[%lu]: handle=0x%08x luid=%08lx:%08lx sources=%lu\n", index, adapters[index].hAdapter,
                 static_cast<unsigned long>(adapters[index].AdapterLuid.HighPart),
                 static_cast<unsigned long>(adapters[index].AdapterLuid.LowPart), adapters[index].NumOfSources);
-         if (adapters[index].hAdapter != 0 && probe_adapter(&dispatch, &adapters[index], submit_nop))
+         if (adapters[index].hAdapter != 0 && probe_adapter(&dispatch, &adapters[index], submit_nop, stress_lifecycle))
             ready = true;
       }
    }

@@ -52,6 +52,11 @@ private completed-fence endpoint, and then destroys the BO. The default mode
 omits this GPU submission so adapter/allocation diagnostics remain non-invasive;
 the submit mode is a device-runtime test and is not executed by the cross-build
 CI job. A failed submit, fence query, or cleanup is surfaced as a failed probe.
+Pass `--stress-lifecycle` to repeat the same 4 KiB native allocation,
+CPU-visible lock/unlock, and destroy sequence 10,000 times at one requested IOVA.
+This is the bounded P2 lifecycle/IOVA-retirement workload; it is opt-in because
+it is intentionally more invasive than the default bring-up probe. Combine it
+with `--submit-nop` only after the lifecycle run passes.
 `tu_wddm_vulkan_probe_arm64.exe`
 checks ICD loading, adapter identity, queue discovery, and device creation;
 `tu_wddm_vulkan_compute_probe_arm64.exe` takes `tu_wddm_compute.spv`, submits a
