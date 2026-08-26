@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - wip/windows-turnip-wddm
   workflow_dispatch:
 
 permissions:
