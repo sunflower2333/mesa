@@ -194,6 +194,34 @@ def main() -> int:
         "WDDM queue waits must reject unsubmitted fences before polling KMT",
     )
 
+    if "structtu_device*owner;" not in wddm:
+        fail("WDDM sync objects must retain their VkDevice owner")
+    sync_current = canonical(function_body("tu_wddm_sync_is_current", wddm_source))
+    require_order(
+        sync_current,
+        (
+            "sync->owner!=NULL",
+            "sync->owner->wddm_initialized",
+            "sync->context==&sync->owner->wddm_context",
+        ),
+        "WDDM sync validity must bind the context to its owning VkDevice",
+    )
+    for function_name in (
+        "tu_wddm_sync_signal",
+        "tu_wddm_sync_reset",
+        "tu_wddm_sync_move",
+        "tu_wddm_sync_wait",
+    ):
+        sync_function = canonical(function_body(function_name, wddm_source))
+        if "tu_wddm_sync_belongs_to_device" not in sync_function:
+            fail(f"{function_name} must reject a sync from another VkDevice")
+    sync_finish = canonical(function_body("tu_wddm_sync_finish", wddm_source))
+    require_order(
+        sync_finish,
+        ("sync->owner=NULL", "sync->context=NULL", "tu_wddm_sync_state_set(sync,0)"),
+        "WDDM sync teardown must clear owner and context before reuse",
+    )
+
     if "device->heap.size=tu_get_system_heap_size(device);" not in wddm:
         fail("unprotected WDDM must budget pageable guest RAM instead of a fixed pool")
 

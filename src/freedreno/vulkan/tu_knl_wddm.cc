@@ -1234,6 +1234,11 @@ static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) +
 
 struct tu_wddm_sync {
    struct vk_sync base;
+   /* vk_sync callbacks receive the device that owns the operation.  Keep the
+    * owner explicitly instead of inferring it from the context pointer: a
+    * sync object from another VkDevice must fail closed before it can read or
+    * mutate this context's fence state. */
+   struct tu_device *owner;
    struct tu_wddm_context *context;
    uint64_t reset_generation;
    alignas(8) uint64_t state;
@@ -1281,11 +1286,24 @@ tu_wddm_sync_from_vk(struct vk_sync *sync)
 static bool
 tu_wddm_sync_is_current(const struct tu_wddm_sync *sync)
 {
-   return sync != NULL && sync->context != NULL && sync->context->device != NULL &&
+   return sync != NULL && sync->owner != NULL && sync->owner->wddm_initialized &&
+          sync->context != NULL && sync->context == &sync->owner->wddm_context &&
+          sync->context->device != NULL &&
           sync->context->handle != 0 && sync->reset_generation != 0 &&
           sync->reset_generation == sync->context->info.ResetGeneration &&
           sync->reset_generation ==
              sync->context->device->adapter.private_info.ResetGeneration;
+}
+
+static bool
+tu_wddm_sync_belongs_to_device(const struct tu_wddm_sync *sync,
+                               struct vk_device *base_device)
+{
+   if (base_device == NULL || !tu_wddm_sync_is_current(sync))
+      return false;
+
+   const struct tu_device *device = container_of(base_device, struct tu_device, vk);
+   return sync->owner == device;
 }
 
 static VkResult
@@ -1295,6 +1313,7 @@ tu_wddm_sync_init(struct vk_device *_device, struct vk_sync *base,
    struct tu_device *device = container_of(_device, struct tu_device, vk);
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
 
+   sync->owner = device;
    sync->context = &device->wddm_context;
    sync->reset_generation = sync->context->info.ResetGeneration;
    tu_wddm_sync_state_set(sync,
@@ -1307,6 +1326,7 @@ tu_wddm_sync_finish(struct vk_device *device, struct vk_sync *base)
 {
    (void)device;
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
+   sync->owner = NULL;
    sync->context = NULL;
    sync->reset_generation = 0;
    tu_wddm_sync_state_set(sync, 0);
@@ -1316,10 +1336,9 @@ static VkResult
 tu_wddm_sync_signal(struct vk_device *device, struct vk_sync *base,
                     uint64_t value)
 {
-   (void)device;
    (void)value;
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
-   if (!tu_wddm_sync_is_current(sync))
+   if (!tu_wddm_sync_belongs_to_device(sync, device))
       return VK_ERROR_DEVICE_LOST;
 
    tu_wddm_sync_state_set(sync, TU_WDDM_SYNC_SIGNALED);
@@ -1329,9 +1348,8 @@ tu_wddm_sync_signal(struct vk_device *device, struct vk_sync *base,
 static VkResult
 tu_wddm_sync_reset(struct vk_device *device, struct vk_sync *base)
 {
-   (void)device;
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
-   if (!tu_wddm_sync_is_current(sync))
+   if (!tu_wddm_sync_belongs_to_device(sync, device))
       return VK_ERROR_DEVICE_LOST;
 
    tu_wddm_sync_state_set(sync, 0);
@@ -1342,10 +1360,11 @@ static VkResult
 tu_wddm_sync_move(struct vk_device *device, struct vk_sync *dst_base,
                   struct vk_sync *src_base)
 {
-   (void)device;
    struct tu_wddm_sync *dst = tu_wddm_sync_from_vk(dst_base);
    struct tu_wddm_sync *src = tu_wddm_sync_from_vk(src_base);
-   if (!tu_wddm_sync_is_current(src) || !tu_wddm_sync_is_current(dst))
+   if (!tu_wddm_sync_belongs_to_device(src, device) ||
+       !tu_wddm_sync_belongs_to_device(dst, device) ||
+       src->owner != dst->owner)
       return VK_ERROR_DEVICE_LOST;
 
    const uint64_t state = p_atomic_xchg(&src->state, 0);
@@ -1364,9 +1383,9 @@ tu_wddm_sync_wait(struct vk_device *_device, struct vk_sync *base,
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
 
    for (;;) {
-      if (!tu_wddm_sync_is_current(sync))
+      if (!tu_wddm_sync_belongs_to_device(sync, _device))
          return vk_device_set_lost(_device,
-                                   "WDDM sync wait observed a stale context");
+                                   "WDDM sync wait observed a stale or foreign context");
 
       const uint64_t state = tu_wddm_sync_state_read(sync);
       const uint32_t fence = static_cast<uint32_t>(state);
