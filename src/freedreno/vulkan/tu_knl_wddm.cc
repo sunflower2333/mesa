@@ -1493,6 +1493,13 @@ tu_wddm_bo_valid(const struct tu_bo *bo)
           bo->wddm_allocation->handle != 0 && bo->wddm_allocation->context != NULL;
 }
 
+static inline bool
+tu_wddm_bo_valid_for_device(const struct tu_device *dev, const struct tu_bo *bo)
+{
+   return dev != NULL && tu_wddm_bo_valid(bo) &&
+          bo->wddm_allocation->context->device == &dev->wddm_device;
+}
+
 static void
 tu_wddm_remove_bo_locked(struct tu_device *dev, struct tu_bo *bo)
 {
@@ -1888,7 +1895,7 @@ tu_wddm_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 static VkResult
 tu_wddm_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
 {
-   if (placed_addr != NULL || !tu_wddm_bo_valid(bo))
+   if (placed_addr != NULL || !tu_wddm_bo_valid_for_device(dev, bo))
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
    void *map = NULL;
    if (!tu_wddm_allocation_lock(bo->wddm_allocation, &map))
@@ -1901,7 +1908,7 @@ tu_wddm_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
 static VkResult
 tu_wddm_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
 {
-   if (reserve || !tu_wddm_bo_valid(bo))
+   if (reserve || !tu_wddm_bo_valid_for_device(dev, bo))
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
    if (!tu_wddm_allocation_unlock(bo->wddm_allocation))
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
@@ -1912,15 +1919,14 @@ tu_wddm_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
 static void
 tu_wddm_bo_allow_dump(struct tu_device *dev, struct tu_bo *bo)
 {
-   (void)dev;
-   if (bo != NULL)
+   if (tu_wddm_bo_valid_for_device(dev, bo))
       bo->dump = true;
 }
 
 static void
 tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 {
-   if (!tu_wddm_bo_valid(bo) || p_atomic_read(&bo->refcnt) <= 0 ||
+   if (!tu_wddm_bo_valid_for_device(dev, bo) || p_atomic_read(&bo->refcnt) <= 0 ||
        !p_atomic_dec_zero(&bo->refcnt))
       return;
 
@@ -1986,7 +1992,7 @@ static void
 tu_wddm_bo_set_metadata(struct tu_device *dev, struct tu_bo *bo,
                         void *metadata, uint32_t metadata_size)
 {
-   if (dev == NULL || !tu_wddm_bo_valid(bo) ||
+   if (!tu_wddm_bo_valid_for_device(dev, bo) ||
        metadata == NULL || metadata_size == 0 ||
        metadata_size > TU_WDDM_MAX_BO_METADATA_SIZE)
       return;
@@ -2005,7 +2011,7 @@ static int
 tu_wddm_bo_get_metadata(struct tu_device *dev, struct tu_bo *bo,
                         void *metadata, uint32_t metadata_size)
 {
-   if (dev == NULL || !tu_wddm_bo_valid(bo) ||
+   if (!tu_wddm_bo_valid_for_device(dev, bo) ||
        metadata == NULL || metadata_size == 0)
       return -EINVAL;
 
@@ -2020,13 +2026,14 @@ tu_wddm_bo_get_metadata(struct tu_device *dev, struct tu_bo *bo,
 }
 
 static bool
-tu_wddm_submit_add_reference(struct tu_wddm_submit *submit, struct tu_bo *bo,
-                             uint32_t access)
+tu_wddm_submit_add_reference(struct tu_device *device,
+                             struct tu_wddm_submit *submit,
+                             struct tu_bo *bo, uint32_t access)
 {
-   if (submit == NULL)
+   if (device == NULL || submit == NULL)
       return false;
 
-   if (!tu_wddm_bo_valid(bo) || access == 0 ||
+   if (!tu_wddm_bo_valid_for_device(device, bo) || access == 0 ||
        (access & ~(TU_SUBMIT_BO_ACCESS_READ | TU_SUBMIT_BO_ACCESS_WRITE)) != 0 ||
        ((access & TU_SUBMIT_BO_ACCESS_WRITE) != 0 && bo->gpu_read_only)) {
       submit->failed = true;
@@ -2099,10 +2106,10 @@ tu_wddm_submit_add_entries(struct tu_device *device, void *_submit,
 
    for (unsigned i = 0; i < num_entries; i++) {
       const struct tu_cs_entry *entry = &entries[i];
-      if (!tu_wddm_bo_valid(entry->bo) || entry->size == 0 ||
+      if (!tu_wddm_bo_valid_for_device(device, entry->bo) || entry->size == 0 ||
           (entry->size & 3) != 0 || entry->offset > entry->bo->size ||
           entry->size > entry->bo->size - entry->offset ||
-          !tu_wddm_submit_add_reference(submit, (struct tu_bo *)entry->bo,
+          !tu_wddm_submit_add_reference(device, submit, (struct tu_bo *)entry->bo,
                                         TU_SUBMIT_BO_ACCESS_READ)) {
          submit->failed = true;
          return;
@@ -2137,7 +2144,7 @@ tu_wddm_submit_add_bos(struct tu_device *device, void *_submit,
       return;
    }
    for (unsigned i = 0; i < num_bos; i++)
-      tu_wddm_submit_add_reference(submit, bos[i], access_flags);
+      tu_wddm_submit_add_reference(device, submit, bos[i], access_flags);
 }
 
 static bool
@@ -2151,13 +2158,13 @@ tu_wddm_submit_add_live_bos(struct tu_device *device,
    mtx_lock(&device->bo_mutex);
    for (uint32_t i = 0; i < device->wddm_bo_count && !submit->failed; i++) {
       struct tu_bo *bo = device->wddm_bos[i];
-      if (!tu_wddm_bo_valid(bo))
+      if (!tu_wddm_bo_valid_for_device(device, bo))
          continue;
       const uint32_t access = bo->gpu_read_only
                                  ? TU_SUBMIT_BO_ACCESS_READ
                                  : TU_SUBMIT_BO_ACCESS_READ |
                                       TU_SUBMIT_BO_ACCESS_WRITE;
-      tu_wddm_submit_add_reference(submit, bo, access);
+      tu_wddm_submit_add_reference(device, submit, bo, access);
    }
    mtx_unlock(&device->bo_mutex);
    return !submit->failed;

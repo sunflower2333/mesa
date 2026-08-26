@@ -106,6 +106,8 @@ def main() -> int:
         fail("the maximum reference/command packet must have a compile-time 64 KiB fit proof")
     if "structtu_wddm_render_referencerender_refs[" in wddm:
         fail("the 1024-entry UMD reference table must not live on the stack")
+    if "bo->wddm_allocation->context->device==&dev->wddm_device" not in wddm:
+        fail("WDDM BO validation must bind each allocation to the calling device context")
 
     add_bo = canonical(function_body("tu_wddm_add_bo_locked", wddm_source))
     if "dev->wddm_bo_count>=TU_WDDM_MAX_RENDER_ALLOCATIONS" not in add_bo:
@@ -125,8 +127,8 @@ def main() -> int:
     if "free(allocation->metadata);" not in bo_destroy:
         fail("WDDM allocation teardown must release retained app-local metadata")
     set_metadata = canonical(function_body("tu_wddm_bo_set_metadata", wddm_source))
-    if "dev==NULL||!tu_wddm_bo_valid(bo)" not in set_metadata:
-        fail("WDDM metadata writes must reject stale or foreign BO handles")
+    if "!tu_wddm_bo_valid_for_device(dev,bo)" not in set_metadata:
+        fail("WDDM metadata writes must reject stale or foreign-device BO handles")
     require_order(
         set_metadata,
         (
@@ -139,8 +141,8 @@ def main() -> int:
         "WDDM metadata writes must be bounded and replace owned storage transactionally",
     )
     get_metadata = canonical(function_body("tu_wddm_bo_get_metadata", wddm_source))
-    if "dev==NULL||!tu_wddm_bo_valid(bo)" not in get_metadata:
-        fail("WDDM metadata reads must reject stale or foreign BO handles")
+    if "!tu_wddm_bo_valid_for_device(dev,bo)" not in get_metadata:
+        fail("WDDM metadata reads must reject stale or foreign-device BO handles")
     require_order(
         get_metadata,
         (
@@ -151,6 +153,10 @@ def main() -> int:
         ),
         "WDDM metadata reads must fail closed for absent/short buffers and copy the retained value",
     )
+
+    add_reference = canonical(function_body("tu_wddm_submit_add_reference", wddm_source))
+    if "!tu_wddm_bo_valid_for_device(device,bo)" not in add_reference:
+        fail("WDDM submit references must reject foreign-device BO handles")
 
     add_live = canonical(function_body("tu_wddm_submit_add_live_bos", wddm_source))
     queue_submit = canonical(function_body("tu_wddm_queue_submit_locked", wddm_source))
