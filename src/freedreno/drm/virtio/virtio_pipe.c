@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdint.h>
+
 #include "util/libsync.h"
 #include "util/slab.h"
 
@@ -229,6 +231,19 @@ static const struct fd_pipe_funcs funcs = {
    .destroy = virtio_pipe_destroy,
 };
 
+static int64_t
+virtio_wait_spin_ns(void)
+{
+   int64_t spin_us = debug_get_num_option("FD_POLL_SPIN_US", 1200);
+
+   if (spin_us <= 0)
+      return 0;
+   if (spin_us > INT64_MAX / 1000)
+      return INT64_MAX;
+
+   return spin_us * 1000;
+}
+
 struct fd_pipe *
 virtio_pipe_new(struct fd_device *dev, enum fd_pipe_id id, uint32_t prio)
 {
@@ -260,8 +275,7 @@ virtio_pipe_new(struct fd_device *dev, enum fd_pipe_id id, uint32_t prio)
     * first.  Guest-allocated bo's are not really cached-coherent, so those
     * reads need explicit cache maintenance to ever observe the write.
     */
-   pipe->wait_spin_ns =
-      (int64_t)debug_get_num_option("FD_POLL_SPIN_US", 1200) * 1000;
+   pipe->wait_spin_ns = virtio_wait_spin_ns();
    pipe->control_needs_inval = vdrm->supports_guest_alloc;
 
    virtio_pipe->gpu_id = vdrm->caps.u.msm.gpu_id;

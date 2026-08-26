@@ -26,6 +26,10 @@ on:
       - "src/freedreno/vulkan/tests/tu_wddm_graphics.frag"
       - "src/freedreno/vulkan/tests/tu_wddm_transport_compile.cpp"
       - "src/freedreno/vulkan/tests/check_tu_wddm_policy.py"
+      - "src/freedreno/drm/freedreno_pipe.c"
+      - "src/freedreno/drm/freedreno_priv.h"
+      - "src/freedreno/drm/virtio/virtio_pipe.c"
+      - "src/freedreno/drm/tests/check_virtio_fence_policy.py"
       - "src/freedreno/tests/**"
       - "src/freedreno/vulkan/**"
       - "meson.build"
@@ -150,6 +154,10 @@ jobs:
       - name: Verify WDDM pageable-memory and residency policy
         shell: pwsh
         run: python src/freedreno/vulkan/tests/check_tu_wddm_policy.py
+
+      - name: Verify virtio guest-fence cache policy
+        shell: pwsh
+        run: python src/freedreno/drm/tests/check_virtio_fence_policy.py
 
       - name: Install Windows flex and bison
         shell: pwsh
