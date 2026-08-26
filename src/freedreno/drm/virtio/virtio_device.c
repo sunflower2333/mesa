@@ -15,6 +15,31 @@
 
 static int virtio_execbuf_flush(struct fd_device *dev);
 
+static int
+query_context_va_range(struct fd_device *dev, uint64_t *va_start,
+                       uint64_t *va_size)
+{
+   struct drm_msm_param req = {
+      .pipe = MSM_PIPE_3D0,
+      .param = MSM_PARAM_VA_START,
+   };
+   int ret;
+
+   ret = virtio_simple_ioctl(dev, DRM_IOCTL_MSM_GET_PARAM, &req);
+   if (ret)
+      return ret;
+
+   *va_start = req.value;
+   req.param = MSM_PARAM_VA_SIZE;
+
+   ret = virtio_simple_ioctl(dev, DRM_IOCTL_MSM_GET_PARAM, &req);
+   if (ret)
+      return ret;
+
+   *va_size = req.value;
+   return 0;
+}
+
 static void
 virtio_device_destroy(struct fd_device *dev)
 {
@@ -146,6 +171,20 @@ virtio_device_new(int fd, drmVersionPtr version)
    p_atomic_set(&virtio_dev->next_blob_id, 1);
    virtio_dev->shmem = to_msm_shmem(vdrm->shmem);
    virtio_dev->vdrm = vdrm;
+
+   /* The capset range may describe the renderer-wide address space.  Native
+    * contexts can receive disjoint VA slices, so use the range queried on
+    * this device context when the host exposes it.  Older hosts keep the
+    * capset range as the fallback. */
+   uint64_t context_va_start = 0;
+   uint64_t context_va_size = 0;
+   if (!query_context_va_range(dev, &context_va_start, &context_va_size) &&
+       context_va_start && context_va_size) {
+      caps.u.msm.va_start = context_va_start;
+      caps.u.msm.va_size = context_va_size;
+      vdrm->caps.u.msm.va_start = context_va_start;
+      vdrm->caps.u.msm.va_size = context_va_size;
+   }
 
    util_queue_init(&dev->submit_queue, "sq", 8, 1, 0, NULL);
 
