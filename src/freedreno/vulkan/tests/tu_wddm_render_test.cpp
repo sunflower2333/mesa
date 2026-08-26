@@ -612,7 +612,9 @@ check_render_packet(const D3DKMT_RENDER *render)
    CHECK(render->hContext == kContextHandle);
    CHECK(render->CommandOffset == 0);
    CHECK(render->AllocationCount == 1);
+   CHECK(render->pAllocationList == fixture->context.allocation_list);
    CHECK(render->PatchLocationCount == 1);
+   CHECK(render->pPatchLocationList == fixture->context.patch_location_list);
    CHECK(render->pNewCommandBuffer == fixture->context.command_buffer);
    CHECK(render->pNewAllocationList == fixture->context.allocation_list);
    CHECK(render->pNewPatchLocationList == fixture->context.patch_location_list);
@@ -677,7 +679,9 @@ check_two_bo_render_packet(const D3DKMT_RENDER *render)
    CHECK(render->hContext == kContextHandle);
    CHECK(render->CommandOffset == 0);
    CHECK(render->AllocationCount == 2);
+   CHECK(render->pAllocationList == fixture->context.allocation_list);
    CHECK(render->PatchLocationCount == 2);
+   CHECK(render->pPatchLocationList == fixture->context.patch_location_list);
 
    const BYTE *packet = static_cast<const BYTE *>(fixture->context.command_buffer);
    const VIOGPU_WDDM_RENDER_COMMAND *header = reinterpret_cast<const VIOGPU_WDDM_RENDER_COMMAND *>(packet);
