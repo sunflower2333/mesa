@@ -113,6 +113,24 @@ valid_adapter_info()
    return info;
 }
 
+VIOGPU_WDDM_CONTEXT_INFO
+valid_context_info()
+{
+   VIOGPU_WDDM_CONTEXT_INFO info = {};
+   info.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   info.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   info.Header.Size = static_cast<uint32_t>(sizeof(info));
+   info.Opcode = VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO;
+   info.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+   info.ExpectedResetGeneration = kResetGeneration;
+   info.VaStart = kVaStart;
+   info.VaSize = kVaSize;
+   info.ResetGeneration = kResetGeneration;
+   info.ContextId = kContextId;
+   info.SubmitQueueId = kSubmitQueueId;
+   return info;
+}
+
 void
 test_priority_contract()
 {
@@ -127,6 +145,41 @@ test_priority_contract()
    CHECK(tu_wddm_submitqueue_priority_is_supported(0));
    CHECK(!tu_wddm_submitqueue_priority_is_supported(1));
    CHECK(!tu_wddm_submitqueue_priority_is_supported(-1));
+}
+
+void
+test_context_info_contract()
+{
+   VIOGPU_WDDM_CONTEXT_INFO info = valid_context_info();
+   CHECK(tu_wddm_validate_context_info(&info, kResetGeneration));
+   CHECK(!tu_wddm_validate_context_info(NULL, kResetGeneration));
+   CHECK(!tu_wddm_validate_context_info(&info, 0));
+
+   info = valid_context_info();
+   info.ExpectedResetGeneration++;
+   CHECK(!tu_wddm_validate_context_info(&info, kResetGeneration));
+   info = valid_context_info();
+   info.ResetGeneration++;
+   CHECK(!tu_wddm_validate_context_info(&info, kResetGeneration));
+   info = valid_context_info();
+   info.ContextId = 0;
+   CHECK(!tu_wddm_validate_context_info(&info, kResetGeneration));
+   info = valid_context_info();
+   info.SubmitQueueId = 0;
+   CHECK(!tu_wddm_validate_context_info(&info, kResetGeneration));
+
+   info = valid_context_info();
+   info.VaStart++;
+   CHECK(!tu_wddm_validate_context_info(&info, kResetGeneration));
+   info = valid_context_info();
+   info.VaSize++;
+   CHECK(!tu_wddm_validate_context_info(&info, kResetGeneration));
+   info = valid_context_info();
+   info.VaStart = UINT64_MAX & ~UINT64_C(4095);
+   info.VaSize = UINT64_C(4096);
+   CHECK(!tu_wddm_validate_context_info(&info, kResetGeneration));
+   info.VaStart -= UINT64_C(4096);
+   CHECK(tu_wddm_validate_context_info(&info, kResetGeneration));
 }
 
 void
@@ -1718,6 +1771,7 @@ int
 main()
 {
    test_priority_contract();
+   test_context_info_contract();
    test_device_luid_contract();
    test_kmt_adapter_enumeration();
    test_device_execution_state();
