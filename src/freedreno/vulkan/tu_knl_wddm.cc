@@ -1650,10 +1650,20 @@ tu_wddm_device_get_gpu_timestamp(struct tu_device *dev, uint64_t *ts)
 static int
 tu_wddm_device_get_suspend_count(struct tu_device *dev, uint64_t *suspend_count)
 {
-   (void)dev;
    if (suspend_count != NULL)
       *suspend_count = 0;
-   return -ENOSYS;
+   if (dev == NULL || suspend_count == NULL || !dev->wddm_initialized ||
+       dev->wddm_context.handle == 0)
+      return -EINVAL;
+
+   /* The private endpoint has no separate suspend counter.  Refreshing the
+    * context snapshot gives Perfetto the same epoch semantics as the DRM
+    * MSM SUSPENDS parameter: a reset/resume invalidates the old GPU clock,
+    * while ordinary submissions leave the value unchanged. */
+   if (!tu_wddm_context_get_info(&dev->wddm_context))
+      return -ENODEV;
+   *suspend_count = dev->wddm_context.info.ResetGeneration;
+   return 0;
 }
 
 static VkResult
