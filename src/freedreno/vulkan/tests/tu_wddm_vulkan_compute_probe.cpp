@@ -350,8 +350,10 @@ main(int argc, char **argv)
       cleanup();
       return report("host-visible buffer allocation failed", result);
    }
+   /* Seed the same storage buffer that the shader reads and writes.  The
+    * result therefore proves the CPU-to-GPU handoff as well as readback. */
    for (uint32_t i = 0; i < kElementCount; i++)
-      static_cast<uint32_t *>(mapped)[i] = UINT32_C(0xdeadbeef);
+      static_cast<uint32_t *>(mapped)[i] = UINT32_C(0x1000) + i * 5;
    if ((memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
       VkMappedMemoryRange range = {};
       range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -471,7 +473,7 @@ main(int argc, char **argv)
    cmd_dispatch(command_buffer, kElementCount / 64, 1, 1);
    VkBufferMemoryBarrier barrier = {};
    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-   barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+   barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -510,7 +512,8 @@ main(int argc, char **argv)
    }
    uint64_t checksum = 0;
    for (uint32_t i = 0; i < kElementCount; i++) {
-      const uint32_t expected = i * 3 + 7;
+      const uint32_t input = UINT32_C(0x1000) + i * 5;
+      const uint32_t expected = input * 3 + 7;
       const uint32_t actual = static_cast<uint32_t *>(mapped)[i];
       if (actual != expected) {
          cleanup();
