@@ -159,6 +159,10 @@ jobs:
         shell: pwsh
         run: python src/freedreno/drm/tests/check_virtio_fence_policy.py
 
+      - name: Verify Turnip guest-pool global-state policy
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/check_tu_guest_pool_policy.py
+
       - name: Install Windows flex and bison
         shell: pwsh
         run: |
