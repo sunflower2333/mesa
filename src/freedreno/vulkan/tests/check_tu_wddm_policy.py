@@ -173,6 +173,27 @@ def main() -> int:
         "Native Context render must reject inactive devices before mutating KMT buffers",
     )
 
+    context_wait = canonical(function_body("tu_wddm_context_wait_fence", wddm_source))
+    require_order(
+        context_wait,
+        (
+            "tu_wddm_fence_was_submitted(context,fence)",
+            "GetTickCount64()",
+            "tu_wddm_context_get_completed_fence(context,&completed)",
+        ),
+        "WDDM context waits must reject unsubmitted fences before polling KMT",
+    )
+    queue_wait = canonical(function_body("tu_wddm_queue_wait_fence", wddm_source))
+    require_order(
+        queue_wait,
+        (
+            "tu_wddm_fence_was_submitted(&queue->device->wddm_context,fence)",
+            "os_time_get_nano()",
+            "tu_wddm_context_get_completed_fence(&queue->device->wddm_context,&completed)",
+        ),
+        "WDDM queue waits must reject unsubmitted fences before polling KMT",
+    )
+
     if "device->heap.size=tu_get_system_heap_size(device);" not in wddm:
         fail("unprotected WDDM must budget pageable guest RAM instead of a fixed pool")
 

@@ -1727,6 +1727,7 @@ test_completed_fence_query_and_wait()
    test_fixture fixture;
    init_fixture(&fixture);
    fixture.completed_fence = 7;
+   fixture.context.last_submitted_fence = 7;
 
    uint32_t completed = 0;
    CHECK(tu_wddm_context_get_completed_fence(&fixture.context, &completed));
@@ -1737,7 +1738,27 @@ test_completed_fence_query_and_wait()
 
    /* Sequence one is after UINT32_MAX when the 32-bit queue fence wraps. */
    fixture.completed_fence = 1;
+   fixture.context.last_submitted_fence = 1;
    CHECK(tu_wddm_context_wait_fence(&fixture.context, UINT32_MAX, 0));
+}
+
+void
+test_wait_rejects_unsubmitted_fence()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.completed_fence = 7;
+   fixture.context.last_submitted_fence = 7;
+
+   /* A completion query cannot prove ownership of a future serial.  Reject
+    * the target before touching the KMT escape endpoint instead of polling
+    * forever for work that this context never submitted. */
+   CHECK(!tu_wddm_context_wait_fence(&fixture.context, 8, UINT64_MAX));
+   CHECK(fixture.escape_calls == 0);
+
+   fixture.context.last_submitted_fence = 0;
+   CHECK(!tu_wddm_context_wait_fence(&fixture.context, 7, UINT64_MAX));
+   CHECK(fixture.escape_calls == 0);
 }
 
 void
@@ -1746,6 +1767,7 @@ test_completed_fence_wait_rejects_inactive_device()
    test_fixture fixture;
    init_fixture(&fixture);
    fixture.completed_fence = 7;
+   fixture.context.last_submitted_fence = 7;
    fixture.execution_state = D3DKMT_DEVICEEXECUTION_RESET;
 
    CHECK(!tu_wddm_context_wait_fence(&fixture.context, 7, 0));
@@ -1822,6 +1844,7 @@ main()
    test_successful_render_with_partial_replacements_fails_closed();
    test_successful_render_with_oversized_replacements_fails_closed();
    test_completed_fence_query_and_wait();
+   test_wait_rejects_unsubmitted_fence();
    test_completed_fence_wait_rejects_inactive_device();
    test_completed_fence_identity_rejected();
    current_fixture = NULL;

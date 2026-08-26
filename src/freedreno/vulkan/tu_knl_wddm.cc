@@ -97,6 +97,22 @@ tu_wddm_fence_after(uint32_t a, uint32_t b)
    return a != b && static_cast<int32_t>(a - b) > 0;
 }
 
+/* A wait target must belong to this context's submitted serial stream.  The
+ * private completion endpoint only reports the contiguous retired prefix; it
+ * cannot distinguish an arbitrary future fence from work that is merely
+ * pending.  Rejecting unowned targets before polling prevents an accidental
+ * infinite wait and keeps the KMT query scoped to this context's ownership. */
+static inline bool
+tu_wddm_fence_was_submitted(const struct tu_wddm_context *context,
+                            uint32_t fence)
+{
+   if (context == NULL || fence == 0 || context->last_submitted_fence == 0)
+      return false;
+
+   return fence == context->last_submitted_fence ||
+          tu_wddm_fence_after(context->last_submitted_fence, fence);
+}
+
 static constexpr uint64_t
 tu_wddm_fence_distance(uint32_t submitted, uint32_t completed)
 {
@@ -616,6 +632,8 @@ tu_wddm_context_wait_fence(struct tu_wddm_context *context,
 {
    if (fence == 0 || context == NULL || context->device == NULL ||
        context->device->adapter.runtime == NULL)
+      return false;
+   if (!tu_wddm_fence_was_submitted(context, fence))
       return false;
 
    const ULONGLONG start_ms = GetTickCount64();
@@ -2441,6 +2459,9 @@ tu_wddm_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
       return VK_SUCCESS;
    if (!queue->device->wddm_initialized)
       return VK_ERROR_DEVICE_LOST;
+   if (!tu_wddm_fence_was_submitted(&queue->device->wddm_context, fence))
+      return vk_device_set_lost(
+         &queue->device->vk, "WDDM queue wait targeted an unsubmitted fence");
 
    const uint64_t start = (uint64_t)os_time_get_nano();
    for (;;) {
