@@ -125,6 +125,8 @@ def main() -> int:
     if "free(allocation->metadata);" not in bo_destroy:
         fail("WDDM allocation teardown must release retained app-local metadata")
     set_metadata = canonical(function_body("tu_wddm_bo_set_metadata", wddm_source))
+    if "dev==NULL||!tu_wddm_bo_valid(bo)" not in set_metadata:
+        fail("WDDM metadata writes must reject stale or foreign BO handles")
     require_order(
         set_metadata,
         (
@@ -137,6 +139,8 @@ def main() -> int:
         "WDDM metadata writes must be bounded and replace owned storage transactionally",
     )
     get_metadata = canonical(function_body("tu_wddm_bo_get_metadata", wddm_source))
+    if "dev==NULL||!tu_wddm_bo_valid(bo)" not in get_metadata:
+        fail("WDDM metadata reads must reject stale or foreign BO handles")
     require_order(
         get_metadata,
         (

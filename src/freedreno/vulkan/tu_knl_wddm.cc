@@ -1986,7 +1986,7 @@ static void
 tu_wddm_bo_set_metadata(struct tu_device *dev, struct tu_bo *bo,
                         void *metadata, uint32_t metadata_size)
 {
-   if (dev == NULL || bo == NULL || bo->wddm_allocation == NULL ||
+   if (dev == NULL || !tu_wddm_bo_valid(bo) ||
        metadata == NULL || metadata_size == 0 ||
        metadata_size > TU_WDDM_MAX_BO_METADATA_SIZE)
       return;
@@ -2005,7 +2005,7 @@ static int
 tu_wddm_bo_get_metadata(struct tu_device *dev, struct tu_bo *bo,
                         void *metadata, uint32_t metadata_size)
 {
-   if (dev == NULL || bo == NULL || bo->wddm_allocation == NULL ||
+   if (dev == NULL || !tu_wddm_bo_valid(bo) ||
        metadata == NULL || metadata_size == 0)
       return -EINVAL;
 
