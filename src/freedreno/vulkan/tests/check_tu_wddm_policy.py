@@ -161,6 +161,18 @@ def main() -> int:
         "WDDM submit must close residency before handing the packet to KMT",
     )
 
+    render = canonical(function_body("tu_wddm_context_render", wddm_source))
+    require_order(
+        render,
+        (
+            "tu_wddm_validate_context_info(&context->info,context->device->adapter.private_info.ResetGeneration)",
+            "tu_wddm_device_execution_active(context->device)",
+            "memset(packet,0,static_cast<size_t>(command_length))",
+            "runtime->dispatch.Render(&render)",
+        ),
+        "Native Context render must reject inactive devices before mutating KMT buffers",
+    )
+
     if "device->heap.size=tu_get_system_heap_size(device);" not in wddm:
         fail("unprotected WDDM must budget pageable guest RAM instead of a fixed pool")
 

@@ -1417,6 +1417,25 @@ test_valid_render()
 }
 
 void
+test_render_rejects_inactive_device()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.execution_state = D3DKMT_DEVICEEXECUTION_RESET;
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(fixture.get_device_state_calls == 1);
+   CHECK(fixture.render_calls == 0);
+   CHECK(fixture.context.last_submitted_fence == 0);
+}
+
+void
 test_submission_retirement_snapshot()
 {
    test_fixture fixture;
@@ -1790,6 +1809,7 @@ main()
    test_null_lock_data_is_rolled_back();
    test_null_lock_data_rollback_retains_owner();
    test_valid_render();
+   test_render_rejects_inactive_device();
    test_submission_retirement_snapshot();
    test_duplicate_fence_rejected_before_render();
    test_context_render_fence_wrap();

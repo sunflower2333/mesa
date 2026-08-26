@@ -1065,6 +1065,13 @@ tu_wddm_context_render(struct tu_wddm_context *context,
        !tu_wddm_validate_context_info(&context->info, context->device->adapter.private_info.ResetGeneration))
       return false;
 
+   /* Render is the only path that can publish a new Host submission.  Keep
+    * the execution-state check adjacent to the context/epoch validation so a
+    * reset or stopped device cannot consume a DMA buffer or mutate the KMT
+    * replacement lists before the KMD reset gate rejects it. */
+   if (!tu_wddm_device_execution_active(context->device))
+      return false;
+
    const uint64_t references_size = static_cast<uint64_t>(reference_count) *
                                     sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE);
    const uint64_t command_offset = sizeof(VIOGPU_WDDM_RENDER_COMMAND) + references_size;
