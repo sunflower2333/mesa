@@ -19,6 +19,7 @@
 #include "util/libsync.h"
 #include "util/u_debug.h"
 #include "util/u_process.h"
+#include "vk_drm_syncobj.h"
 #include "vk_util.h"
 
 #include "tu_cmd_buffer.h"
@@ -237,6 +238,9 @@ virtio_device_init(struct tu_device *dev)
 
    if (fd < 0)
       dev->vk.sync = vdrm_vpipe_get_sync(vdev->vdrm);
+
+   if (fd >= 0)
+      dev->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
 
    return VK_SUCCESS;
 }
@@ -747,6 +751,15 @@ tu_empty_submit_disabled(void)
 }
 
 static bool
+tu_empty_submit_copy_disabled(void)
+{
+   static int no_copy = -1;
+   if (no_copy < 0)
+      no_copy = debug_get_bool_option("TU_NO_EMPTY_SUBMIT_COPY", false);
+   return no_copy;
+}
+
+static bool
 tu_empty_submit_can_skip(struct tu_queue *queue,
                          struct tu_msm_queue_submit *submit,
                          struct vk_sync_wait *waits, uint32_t wait_count,
@@ -826,6 +839,42 @@ tu_empty_submit_fastpath(struct tu_queue *queue,
          struct tu_virtio_sync *s = to_tu_virtio_sync(signals[i].sync);
          s->submit_seqno = queue->fence;
          p_atomic_set(&s->owner, queue);
+      }
+   }
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+tu_empty_submit_copy_payloads(struct tu_queue *queue,
+                              struct vk_sync_wait *waits, uint32_t wait_count,
+                              struct vk_sync_signal *signals, uint32_t signal_count)
+{
+   struct tu_device *dev = queue->device;
+   const struct vk_sync_type *poll_type =
+      &dev->physical_device->poll_sync_type;
+
+   if (tu_empty_submit_disabled() || tu_empty_submit_copy_disabled())
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   if (dev->fd < 0 || !dev->vk.copy_sync_payloads)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   /* Resolve command-less submissions with arbitrary waits (for example a
+    * WSI acquire fence or a cross-queue dependency) using guest-local syncobj
+    * operations.  This avoids a host round trip while preserving the wait
+    * union semantics required by the Vulkan queue contract. */
+   VkResult result = dev->vk.copy_sync_payloads(&dev->vk, wait_count, waits,
+                                                signal_count, signals);
+   if (result != VK_SUCCESS)
+      return result;
+
+   /* Signals now carry payloads unrelated to this queue's userspace fence.
+    * Drop the optional poll record so future waits use the syncobj payload. */
+   for (uint32_t i = 0; i < signal_count; i++) {
+      if (signals[i].sync->type == poll_type) {
+         struct tu_virtio_sync *sync = to_tu_virtio_sync(signals[i].sync);
+         p_atomic_set(&sync->owner, (struct tu_queue *)NULL);
       }
    }
 
@@ -1436,6 +1485,16 @@ virtio_queue_submit(struct tu_queue *queue, void *_submit,
                                 signals, signal_count,
                                 u_trace_submission_data))
       return tu_empty_submit_fastpath(queue, signals, signal_count);
+
+   /* A command-less submission with arbitrary waits can still be resolved
+    * entirely in the guest when DRM syncobj payload copying is available. */
+   if (submit->commands.size == 0 && submit->binds.size == 0 &&
+       !u_trace_submission_data) {
+      VkResult copy_result = tu_empty_submit_copy_payloads(queue, waits, wait_count,
+                                                           signals, signal_count);
+      if (copy_result == VK_SUCCESS)
+         return VK_SUCCESS;
+   }
 
 #if HAVE_PERFETTO
    struct tu_perfetto_clocks clocks;

@@ -49,6 +49,7 @@ def main() -> int:
     pipe = (DRM_DIR / "freedreno_pipe.c").read_text(encoding="utf-8")
     priv = (DRM_DIR / "freedreno_priv.h").read_text(encoding="utf-8")
     virtio = (DRM_DIR / "virtio" / "virtio_pipe.c").read_text(encoding="utf-8")
+    virtio_submit = (DRM_DIR.parent / "vulkan" / "tu_knl_drm_virtio.cc").read_text(encoding="utf-8")
 
     if '"util/cache_ops.h"' not in pipe or '"util/os_time.h"' not in pipe:
         fail("freedreno waits must include cache maintenance and monotonic time helpers")
@@ -112,6 +113,43 @@ def main() -> int:
             "pipe->control_mem->bo_reuse=NO_CACHE",
         ),
         "control-fence reset must be published before cache invalidation can resume",
+    )
+
+    if '"vk_drm_syncobj.h"' not in virtio_submit:
+        fail("virtio Turnip submits must include the DRM sync-payload implementation")
+    device_init = canonical(function_body("virtio_device_init", virtio_submit))
+    require_order(
+        device_init,
+        (
+            "if(fd<0)dev->vk.sync=vdrm_vpipe_get_sync(vdev->vdrm)",
+            "if(fd>=0)dev->vk.copy_sync_payloads=vk_drm_syncobj_copy_payloads",
+        ),
+        "DRM-backed virtio devices must expose guest-local sync-payload copying",
+    )
+    copy_disabled = canonical(function_body("tu_empty_submit_copy_disabled", virtio_submit))
+    if 'debug_get_bool_option("TU_NO_EMPTY_SUBMIT_COPY",false)' not in copy_disabled:
+        fail("the arbitrary-wait empty-submit path must retain an explicit A/B disable switch")
+    copy_payloads = canonical(function_body("tu_empty_submit_copy_payloads", virtio_submit))
+    require_order(
+        copy_payloads,
+        (
+            "if(tu_empty_submit_disabled()||tu_empty_submit_copy_disabled())",
+            "if(dev->fd<0||!dev->vk.copy_sync_payloads)",
+            "dev->vk.copy_sync_payloads(&dev->vk,wait_count,waits,signal_count,signals)",
+            "p_atomic_set(&sync->owner,(structtu_queue*)NULL)",
+        ),
+        "arbitrary-wait empty submits must fail closed and invalidate stale poll ownership",
+    )
+    queue_submit = canonical(function_body("virtio_queue_submit", virtio_submit))
+    require_order(
+        queue_submit,
+        (
+            "tu_empty_submit_can_skip(queue,submit,waits,wait_count,signals,signal_count,u_trace_submission_data)",
+            "tu_empty_submit_fastpath(queue,signals,signal_count)",
+            "if(submit->commands.size==0&&submit->binds.size==0&&!u_trace_submission_data)",
+            "tu_empty_submit_copy_payloads(queue,waits,wait_count,signals,signal_count)",
+        ),
+        "virtio queue submit must try guest-local payload copying before host execution",
     )
 
     print("freedreno virtio guest-fence policy passed")
