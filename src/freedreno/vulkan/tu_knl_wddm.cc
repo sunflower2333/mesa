@@ -1166,12 +1166,10 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    render.CommandOffset = 0;
    render.CommandLength = static_cast<UINT>(command_length);
    render.AllocationCount = reference_count;
-   /* D3DKMTRender consumes the current allocation and patch lists through
-    * these input pointers.  The pNew* fields below are replacement storage
-    * returned by the KMD and are not substitutes for the input lists. */
-   render.pAllocationList = context->allocation_list;
-   render.pPatchLocationList = context->patch_location_list;
    render.PatchLocationCount = reference_count;
+   /* D3DKMT_RENDER exposes the command, allocation, and patch lists through
+    * pNew* in/out fields: callers provide the current storage and KMT may
+    * return replacement storage for the next submission. */
    render.NewCommandBufferSize = context->command_buffer_size;
    render.NewAllocationListSize = context->allocation_list_size;
    render.NewPatchLocationListSize = context->patch_location_list_size;
