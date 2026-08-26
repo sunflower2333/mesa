@@ -98,6 +98,8 @@ def main() -> int:
 
     if "TU_WDDM_MAX_RENDER_ALLOCATIONS=1024" not in header:
         fail("WDDM allocation-list capacity must match the KMD 1024-reference contract")
+    if "TU_WDDM_MAX_BO_METADATA_SIZE=4096" not in header:
+        fail("WDDM BO metadata must retain a bounded app-local storage contract")
     if "TU_WDDM_MAX_RENDER_ALLOCATIONS==1024" not in fixture:
         fail("the compile fixture must pin the shared 1024-reference contract")
     if "maximumWDDMsubmitnolongerfitstheDMAbuffer" not in wddm:
@@ -117,6 +119,33 @@ def main() -> int:
             "capacity_available?VK_ERROR_OUT_OF_HOST_MEMORY:VK_ERROR_OUT_OF_DEVICE_MEMORY",
         ),
         "WDDM allocation must report capacity exhaustion before it can break submit residency",
+    )
+
+    bo_destroy = canonical(function_body("tu_wddm_allocation_destroy", wddm_source))
+    if "free(allocation->metadata);" not in bo_destroy:
+        fail("WDDM allocation teardown must release retained app-local metadata")
+    set_metadata = canonical(function_body("tu_wddm_bo_set_metadata", wddm_source))
+    require_order(
+        set_metadata,
+        (
+            "metadata_size>TU_WDDM_MAX_BO_METADATA_SIZE",
+            "void*copy=malloc(metadata_size);",
+            "memcpy(copy,metadata,metadata_size);",
+            "free(bo->wddm_allocation->metadata);",
+            "bo->wddm_allocation->metadata_size=metadata_size;",
+        ),
+        "WDDM metadata writes must be bounded and replace owned storage transactionally",
+    )
+    get_metadata = canonical(function_body("tu_wddm_bo_get_metadata", wddm_source))
+    require_order(
+        get_metadata,
+        (
+            "allocation->metadata==NULL||allocation->metadata_size==0",
+            "metadata_size<allocation->metadata_size",
+            "memcpy(metadata,allocation->metadata,allocation->metadata_size);",
+            "return0;",
+        ),
+        "WDDM metadata reads must fail closed for absent/short buffers and copy the retained value",
     )
 
     add_live = canonical(function_body("tu_wddm_submit_add_live_bos", wddm_source))

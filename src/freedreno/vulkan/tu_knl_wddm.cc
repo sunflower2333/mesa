@@ -857,6 +857,7 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
    if (!NT_SUCCESS(status))
       return false;
 
+   free(allocation->metadata);
    memset(allocation, 0, sizeof(*allocation));
    return true;
 }
@@ -1931,21 +1932,37 @@ static void
 tu_wddm_bo_set_metadata(struct tu_device *dev, struct tu_bo *bo,
                         void *metadata, uint32_t metadata_size)
 {
-   (void)dev;
-   (void)bo;
-   (void)metadata;
-   (void)metadata_size;
+   if (dev == NULL || bo == NULL || bo->wddm_allocation == NULL ||
+       metadata == NULL || metadata_size == 0 ||
+       metadata_size > TU_WDDM_MAX_BO_METADATA_SIZE)
+      return;
+
+   void *copy = malloc(metadata_size);
+   if (copy == NULL)
+      return;
+
+   memcpy(copy, metadata, metadata_size);
+   free(bo->wddm_allocation->metadata);
+   bo->wddm_allocation->metadata = copy;
+   bo->wddm_allocation->metadata_size = metadata_size;
 }
 
 static int
 tu_wddm_bo_get_metadata(struct tu_device *dev, struct tu_bo *bo,
                         void *metadata, uint32_t metadata_size)
 {
-   (void)dev;
-   (void)bo;
-   (void)metadata;
-   (void)metadata_size;
-   return -ENOSYS;
+   if (dev == NULL || bo == NULL || bo->wddm_allocation == NULL ||
+       metadata == NULL || metadata_size == 0)
+      return -EINVAL;
+
+   const struct tu_wddm_allocation *allocation = bo->wddm_allocation;
+   if (allocation->metadata == NULL || allocation->metadata_size == 0)
+      return -ENOENT;
+   if (metadata_size < allocation->metadata_size)
+      return -ENOSPC;
+
+   memcpy(metadata, allocation->metadata, allocation->metadata_size);
+   return 0;
 }
 
 static bool

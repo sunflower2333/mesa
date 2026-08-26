@@ -71,6 +71,10 @@ struct tu_instance;
 enum {
    TU_WDDM_MAX_RENDER_ALLOCATIONS = 1024,
    TU_WDDM_MAX_RENDER_COMMAND_SIZE = 64 * 1024,
+   /* Image metadata is an app-local property on WDDM.  Keep a small bound so
+    * a malformed caller cannot turn SetPrivateData into an unbounded heap
+    * allocation. */
+   TU_WDDM_MAX_BO_METADATA_SIZE = 4096,
 };
 
 struct tu_wddm_allocation_desc {
@@ -96,6 +100,8 @@ struct tu_wddm_allocation {
    uint64_t vma_size;
    void *map;
    bool locked;
+   void *metadata;
+   uint32_t metadata_size;
 };
 
 struct tu_wddm_render_reference {
