@@ -342,11 +342,17 @@ jobs:
           }
           $computeProbe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp' -Raw
           foreach ($fragment in @('QueueSubmit', 'WaitForFences', 'CmdDispatch', 'MapMemory',
-                                  'seed = data_buffer.values[index]',
                                   'UINT32_C(0x1000) + i * 5',
                                   'VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT')) {
             if ($computeProbe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
               throw "compute workload probe is missing required operation: $fragment"
+            }
+          }
+          $computeShader = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_compute.comp' -Raw
+          foreach ($fragment in @('uint seed = data_buffer.values[index]',
+                                  'data_buffer.values[index] = seed * 3u + 7u')) {
+            if ($computeShader.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+              throw "compute shader is missing CPU-seeded transform: $fragment"
             }
           }
           $graphicsProbe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp' -Raw
