@@ -1579,6 +1579,7 @@ test_malformed_render_rejected()
    /* The packed MSM wire ABI uses four-byte field alignment.  Reject a slot
     * that would make the 64-bit presumed value start at an invalid offset. */
    reference.patch_offset++;
+   CHECK((reference.patch_offset & (sizeof(uint32_t) - 1)) != 0);
    CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
    CHECK(fixture.render_calls == 0);
    reference.patch_offset--;
