@@ -970,6 +970,7 @@ tu_wddm_render_reference_valid(const struct tu_wddm_context *context,
                                (reference->allocation_offset <= reference->allocation->private_info.Size
                                    ? reference->allocation_offset
                                    : reference->allocation->private_info.Size) ||
+       (reference->patch_offset & (sizeof(uint32_t) - 1)) != 0 ||
        reference->patch_offset > command_stream_size - sizeof(uint64_t) ||
        ((reference->allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0 &&
           (reference->flags & VIOGPU_WDDM_REFERENCE_WRITE) != 0))
