@@ -224,6 +224,22 @@ def main() -> int:
         "WDDM queue waits must reject unsubmitted fences before polling KMT",
     )
 
+    fence_distance = canonical(wddm_source)
+    if "TU_WDDM_FENCE_HALF_RANGE=UINT64_C(1)<<31" not in fence_distance:
+        fail("WDDM fence accounting must define the 32-bit serial half-range")
+    if "static_assert(tu_wddm_fence_distance(UINT32_C(0x80000000),0)==TU_WDDM_FENCE_HALF_RANGE" not in fence_distance:
+        fail("WDDM fence accounting must pin the ambiguous half-range boundary")
+    pending_fences = canonical(function_body("tu_wddm_pending_fence_count", wddm_source))
+    require_order(
+        pending_fences,
+        (
+            "constuint64_tdistance=tu_wddm_fence_distance(submitted,completed)",
+            "if(distance>=TU_WDDM_FENCE_HALF_RANGE)returnfalse",
+            "*pending=static_cast<uint32_t>(distance)",
+        ),
+        "WDDM pending-fence accounting must reject ambiguous half-range distances before narrowing",
+    )
+
     if "structtu_device*owner;" not in wddm:
         fail("WDDM sync objects must retain their VkDevice owner")
     sync_current = canonical(function_body("tu_wddm_sync_is_current", wddm_source))

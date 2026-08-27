@@ -52,6 +52,8 @@ enum : uint32_t {
    TU_WDDM_MAX_PENDING_SUBMISSIONS = 4096,
 };
 
+static constexpr uint64_t TU_WDDM_FENCE_HALF_RANGE = UINT64_C(1) << 31;
+
 #pragma pack(push, 1)
 struct tu_wddm_msm_submit_request {
    uint32_t command;
@@ -127,6 +129,8 @@ static_assert(tu_wddm_fence_distance(4096, 0) == 4096,
               "WDDM initial fence distance changed");
 static_assert(tu_wddm_fence_distance(1, UINT32_MAX) == 1,
               "WDDM wrapped fence distance changed");
+static_assert(tu_wddm_fence_distance(UINT32_C(0x80000000), 0) == TU_WDDM_FENCE_HALF_RANGE,
+              "WDDM half-range fence distance changed");
 
 static void
 tu_wddm_init_header(VIOGPU_WDDM_ABI_HEADER *header, uint32_t size)
@@ -2350,7 +2354,7 @@ tu_wddm_pending_fence_count(uint32_t submitted, uint32_t completed,
       return false;
 
    const uint64_t distance = tu_wddm_fence_distance(submitted, completed);
-   if (distance > UINT32_MAX)
+   if (distance >= TU_WDDM_FENCE_HALF_RANGE)
       return false;
    *pending = static_cast<uint32_t>(distance);
    return true;
