@@ -46,6 +46,8 @@ enum : uint32_t {
    TU_WDDM_MSM_SUBMIT_BO_NO_IMPLICIT = 0x0008,
    TU_WDDM_MSM_SUBMIT_CMD_BUF = 0x0001,
    TU_WDDM_MSM_SUBMIT_CMD_IB_TARGET_BUF = 0x0002,
+   /* Keep native-context command packets within the KMD's bounded ring. */
+   TU_WDDM_MAX_SUBMIT_COMMANDS = 256,
    /* Must match VioGpuWddmContextFenceTrackerCapacity in the dedicated KMD. */
    TU_WDDM_MAX_PENDING_SUBMISSIONS = 4096,
 };
@@ -999,7 +1001,8 @@ tu_wddm_native_submit_valid(const void *command_stream,
        request.sequence == 0 || request.response_offset != 0 || request.flags == 0 ||
        (request.flags & ~valid_submit_flags) != 0 || (request.flags & TU_WDDM_MSM_PIPE_3D0) != TU_WDDM_MSM_PIPE_3D0 ||
        request.queue_id != submit_queue_id || request.fence == 0 || request.bo_count != reference_count ||
-       request.bo_count == 0 || request.command_count == 0)
+       request.bo_count == 0 || request.command_count == 0 ||
+       request.command_count > TU_WDDM_MAX_SUBMIT_COMMANDS)
       return false;
 
    const uint64_t bo_bytes = static_cast<uint64_t>(request.bo_count) * sizeof(tu_wddm_msm_submit_bo);
@@ -1220,7 +1223,6 @@ tu_wddm_context_render(struct tu_wddm_context *context,
  * limits are also enforced by the private ABI/KMD, so rejecting an oversized
  * packet here keeps the UMD from constructing a request the KMD cannot own. */
 enum {
-   TU_WDDM_MAX_SUBMIT_COMMANDS = 256,
    TU_WDDM_MAX_SUBMIT_REFERENCES = TU_WDDM_MAX_RENDER_ALLOCATIONS,
 };
 

@@ -32,6 +32,8 @@ enum : uint32_t {
    TEST_MSM_SUBMIT_CMD_BUF = 0x0001,
 };
 
+constexpr unsigned kTooManySubmitCommands = 257;
+
 #pragma pack(push, 1)
 struct test_msm_submit_request {
    uint32_t command;
@@ -71,6 +73,12 @@ struct test_msm_submit_two_bos {
    test_msm_submit_request request;
    test_msm_submit_bo bos[2];
    test_msm_submit_command command;
+};
+
+struct test_msm_submit_too_many_commands {
+   test_msm_submit_request request;
+   test_msm_submit_bo bo;
+   test_msm_submit_command commands[kTooManySubmitCommands];
 };
 #pragma pack(pop)
 
@@ -1598,6 +1606,29 @@ test_malformed_render_rejected()
 }
 
 void
+test_command_count_bound_rejected()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   test_msm_submit_too_many_commands submit = {};
+   submit.request = valid_submit().request;
+   submit.request.length = sizeof(submit);
+   submit.request.command_count = kTooManySubmitCommands;
+   submit.bo = valid_submit().bo;
+   for (unsigned i = 0; i < kTooManySubmitCommands; i++)
+      submit.commands[i] = valid_submit().command;
+
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(!tu_wddm_context_render(&fixture.context, &submit, sizeof(submit),
+                                 &reference, 1));
+   CHECK(fixture.render_calls == 0);
+}
+
+void
 test_queue_id_mismatch_rejected()
 {
    test_fixture fixture;
@@ -1837,6 +1868,7 @@ main()
    test_context_render_fence_wrap();
    test_valid_two_bo_render();
    test_malformed_render_rejected();
+   test_command_count_bound_rejected();
    test_queue_id_mismatch_rejected();
    test_failed_render_updates_buffers();
    test_failed_render_with_untouched_replacements_is_retryable();

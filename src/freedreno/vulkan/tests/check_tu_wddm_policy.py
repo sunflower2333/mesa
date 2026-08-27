@@ -106,6 +106,11 @@ def main() -> int:
         fail("the maximum reference/command packet must have a compile-time 64 KiB fit proof")
     if "structtu_wddm_render_referencerender_refs[" in wddm:
         fail("the 1024-entry UMD reference table must not live on the stack")
+    native_submit = canonical(
+        function_body("tu_wddm_native_submit_valid", wddm_source)
+    )
+    if "request.command_count>TU_WDDM_MAX_SUBMIT_COMMANDS" not in native_submit:
+        fail("native WDDM submit validation must enforce the 256-command KMD bound")
     if "bo->wddm_allocation->context->device==&dev->wddm_device" not in wddm:
         fail("WDDM BO validation must bind each allocation to the calling device context")
 
