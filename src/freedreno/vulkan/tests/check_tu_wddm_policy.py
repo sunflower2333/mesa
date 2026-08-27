@@ -154,6 +154,19 @@ def main() -> int:
         "WDDM metadata reads must fail closed for absent/short buffers and copy the retained value",
     )
 
+    bo_unmap = canonical(function_body("tu_wddm_bo_unmap", wddm_source))
+    for fragment in (
+        "!tu_wddm_bo_valid_for_device(dev,bo)",
+        "(void)reserve;",
+        "tu_wddm_allocation_unlock(bo->wddm_allocation)",
+        "bo->map=NULL;",
+        "returnVK_SUCCESS;",
+    ):
+        if bo_unmap.count(fragment) != 1:
+            fail(f"WDDM BO unmap must preserve allocation ownership while releasing the CPU mapping: {fragment}")
+    if "if(reserve" in bo_unmap or "reserve||" in bo_unmap:
+        fail("WDDM BO unmap must accept the Vulkan reserve-address flag")
+
     add_reference = canonical(function_body("tu_wddm_submit_add_reference", wddm_source))
     if "!tu_wddm_bo_valid_for_device(device,bo)" not in add_reference:
         fail("WDDM submit references must reject foreign-device BO handles")

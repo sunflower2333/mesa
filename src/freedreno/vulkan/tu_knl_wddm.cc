@@ -1911,8 +1911,13 @@ tu_wddm_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
 static VkResult
 tu_wddm_bo_unmap(struct tu_device *dev, struct tu_bo *bo, bool reserve)
 {
-   if (reserve || !tu_wddm_bo_valid_for_device(dev, bo))
+   if (!tu_wddm_bo_valid_for_device(dev, bo))
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
+
+   /* The KMT Unlock drops only the CPU mapping.  The WDDM allocation and its
+    * requested GPU IOVA stay owned until bo_finish, so the address reservation
+    * required by VK_MEMORY_UNMAP_RESERVE_BIT_EXT is already preserved. */
+   (void)reserve;
    if (!tu_wddm_allocation_unlock(bo->wddm_allocation))
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
    bo->map = NULL;

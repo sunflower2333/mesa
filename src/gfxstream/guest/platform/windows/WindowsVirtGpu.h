@@ -7,6 +7,9 @@
 
 #include "VirtGpu.h"
 
+/* The Windows gfxstream fallback has no VirtIO ioctl endpoint.  Keep the
+ * object shape available for builds, but fail closed until a transport-backed
+ * implementation is added. */
 class WindowsVirtGpuResource : public std::enable_shared_from_this<WindowsVirtGpuResource>,
                                public VirtGpuResource {
    public:

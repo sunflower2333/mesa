@@ -13,4 +13,5 @@ libplatform_virtgpu_windows = static_library(
     files_libplatform_virtgpu_windows,
     cpp_args: gfxstream_guest_args,
     include_directories: [inc_platform_virtgpu, inc_src, inc_include],
+    dependencies: [idep_mesautil],
 )
