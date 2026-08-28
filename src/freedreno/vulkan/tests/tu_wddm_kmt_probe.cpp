@@ -82,6 +82,57 @@ static_assert(kCpNop == (0x70000000U | (0x10U << 16) | (1U << 23)), "CP_NOP pack
 
 constexpr uint32_t kLifecycleIterations = 10000;
 
+enum probe_stage {
+   kProbeStageEnumeration,
+   kProbeStageOpenAdapter,
+   kProbeStageCreateDevice,
+   kProbeStageCreateContext,
+   kProbeStageAllocation,
+};
+
+const char *
+probe_stage_name(probe_stage stage)
+{
+   switch (stage) {
+   case kProbeStageEnumeration:
+      return "enumeration";
+   case kProbeStageOpenAdapter:
+      return "open";
+   case kProbeStageCreateDevice:
+      return "device";
+   case kProbeStageCreateContext:
+      return "context";
+   case kProbeStageAllocation:
+      return "allocation";
+   }
+
+   return "unknown";
+}
+
+bool
+parse_probe_stage(const char *argument, probe_stage *stage)
+{
+   static const char prefix[] = "--stage=";
+   if (argument == nullptr || stage == nullptr || strncmp(argument, prefix, sizeof(prefix) - 1) != 0)
+      return false;
+
+   const char *value = argument + sizeof(prefix) - 1;
+   if (strcmp(value, "enumeration") == 0)
+      *stage = kProbeStageEnumeration;
+   else if (strcmp(value, "open") == 0)
+      *stage = kProbeStageOpenAdapter;
+   else if (strcmp(value, "device") == 0)
+      *stage = kProbeStageCreateDevice;
+   else if (strcmp(value, "context") == 0)
+      *stage = kProbeStageCreateContext;
+   else if (strcmp(value, "allocation") == 0)
+      *stage = kProbeStageAllocation;
+   else
+      return false;
+
+   return true;
+}
+
 bool
 fence_reached(uint32_t completed, uint32_t target)
 {
@@ -396,7 +447,11 @@ run_context_lifecycle_probe(tu_wddm_dispatch *dispatch,
 }
 
 bool
-probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, bool submit_nop, bool stress_lifecycle)
+probe_adapter(tu_wddm_dispatch *dispatch,
+              const D3DKMT_ADAPTERINFO *enumerated,
+              probe_stage stage,
+              bool submit_nop,
+              bool stress_lifecycle)
 {
    VIOGPU_WDDM_ADAPTER_INFO enumerated_info = {};
    printf("  QueryAdapterInfo(enum): begin\n");
@@ -433,6 +488,10 @@ probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, 
    if (!NT_SUCCESS(status) || !tu_wddm_validate_adapter_info(&opened_info) ||
        memcmp(&opened_info, &enumerated_info, sizeof(opened_info)) != 0)
       goto cleanup;
+   if (stage == kProbeStageOpenAdapter) {
+      ready = true;
+      goto cleanup;
+   }
 
    {
       D3DKMT_CREATEDEVICE create = {};
@@ -459,6 +518,10 @@ probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, 
       if (!NT_SUCCESS(status) || state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE)
          goto cleanup;
    }
+   if (stage == kProbeStageCreateDevice) {
+      ready = true;
+      goto cleanup;
+   }
 
    {
       VIOGPU_WDDM_CONTEXT_CREATE private_data = {};
@@ -483,6 +546,10 @@ probe_adapter(tu_wddm_dispatch *dispatch, const D3DKMT_ADAPTERINFO *enumerated, 
       if (!NT_SUCCESS(status) || context_create.hContext == 0)
          goto cleanup;
       context_handle = context_create.hContext;
+   }
+   if (stage == kProbeStageCreateContext) {
+      ready = true;
+      goto cleanup;
    }
 
    {
@@ -631,18 +698,28 @@ main(int argc, char **argv)
    (void) setvbuf(stderr, nullptr, _IONBF, 0);
    bool submit_nop = false;
    bool stress_lifecycle = false;
+   probe_stage stage = kProbeStageAllocation;
    for (int argument = 1; argument < argc; argument++) {
       if (strcmp(argv[argument], "--submit-nop") == 0)
          submit_nop = true;
       else if (strcmp(argv[argument], "--stress-lifecycle") == 0)
          stress_lifecycle = true;
+      else if (parse_probe_stage(argv[argument], &stage))
+         continue;
       else {
-         fprintf(stderr, "usage: %s [--submit-nop] [--stress-lifecycle]\n", argv[0]);
+         fprintf(stderr,
+                 "usage: %s [--stage=enumeration|open|device|context|allocation] "
+                 "[--submit-nop] [--stress-lifecycle]\n",
+                 argv[0]);
          return 2;
       }
    }
-   printf("tu WDDM KMT probe: begin submit_nop=%u stress_lifecycle=%u\n", static_cast<unsigned>(submit_nop),
-          static_cast<unsigned>(stress_lifecycle));
+   if (stage != kProbeStageAllocation && (submit_nop || stress_lifecycle)) {
+      fprintf(stderr, "submit and stress probes require --stage=allocation\n");
+      return 2;
+   }
+   printf("tu WDDM KMT probe: begin stage=%s submit_nop=%u stress_lifecycle=%u\n", probe_stage_name(stage),
+          static_cast<unsigned>(submit_nop), static_cast<unsigned>(stress_lifecycle));
 
    tu_wddm_dispatch dispatch = {};
    if (!tu_wddm_dispatch_init(&dispatch)) {
@@ -675,13 +752,15 @@ main(int argc, char **argv)
    printf("EnumAdapters2(fill): status=0x%08lx count=%lu\n", static_cast<unsigned long>(status),
           enumeration.NumAdapters);
 
-   bool ready = false;
+   bool ready = stage == kProbeStageEnumeration && NT_SUCCESS(status) && enumeration.NumAdapters > 0 &&
+                enumeration.NumAdapters <= capacity;
    if (NT_SUCCESS(status) && enumeration.NumAdapters <= capacity) {
       for (ULONG index = 0; index < enumeration.NumAdapters; index++) {
          printf("adapter[%lu]: handle=0x%08x luid=%08lx:%08lx sources=%lu\n", index, adapters[index].hAdapter,
                 static_cast<unsigned long>(adapters[index].AdapterLuid.HighPart),
                 static_cast<unsigned long>(adapters[index].AdapterLuid.LowPart), adapters[index].NumOfSources);
-         if (adapters[index].hAdapter != 0 && probe_adapter(&dispatch, &adapters[index], submit_nop, stress_lifecycle))
+         if (stage != kProbeStageEnumeration && adapters[index].hAdapter != 0 &&
+             probe_adapter(&dispatch, &adapters[index], stage, submit_nop, stress_lifecycle))
             ready = true;
       }
    }
@@ -693,10 +772,10 @@ main(int argc, char **argv)
    free(adapters);
    tu_wddm_dispatch_finish(&dispatch);
    if (!ready) {
-      fprintf(stderr, "tu WDDM KMT probe: no adapter completed context bring-up\n");
+      fprintf(stderr, "tu WDDM KMT probe: no adapter completed stage=%s\n", probe_stage_name(stage));
       return 1;
    }
 
-   printf("tu WDDM KMT probe passed\n");
+   printf("tu WDDM KMT probe passed stage=%s\n", probe_stage_name(stage));
    return 0;
 }
