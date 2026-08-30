@@ -382,9 +382,9 @@ run_allocation_lifecycle_probe(tu_wddm_context *context)
       }
 
       if (!locked || map == nullptr || !unlocked || !destroyed || allocation.handle != 0) {
-         printf("  Stress lifecycle: failed iteration=%u lock=%u unlock=%u destroy=%u handle=0x%08x\n", iteration,
+         printf("  Stress lifecycle: failed iteration=%u lock=%u unlock=%u destroy=%u destroy_status=0x%08x handle=0x%08x\n", iteration,
                 static_cast<unsigned>(locked), static_cast<unsigned>(unlocked), static_cast<unsigned>(destroyed),
-                allocation.handle);
+                allocation.last_destroy_status, allocation.handle);
          return false;
       }
 

@@ -105,6 +105,7 @@ struct tu_wddm_allocation {
    /* Diagnostic breadcrumb for KMT probe failures; this is not part of the
     * WDDM private allocation ABI sent to the KMD. */
    uint32_t last_create_status;
+   uint32_t last_destroy_status;
 };
 
 struct tu_wddm_render_reference {

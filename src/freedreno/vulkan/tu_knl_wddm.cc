@@ -852,7 +852,8 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
          destroy.hDevice = context->device->handle;
          destroy.phAllocationList = &handle;
          destroy.AllocationCount = 1;
-         if (NT_SUCCESS(context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy)))
+         const NTSTATUS destroy_status = context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
+         if (destroy_status == STATUS_SUCCESS)
             memset(allocation, 0, sizeof(*allocation));
       }
       return false;
@@ -881,7 +882,8 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
    destroy.AllocationCount = 1;
 
    NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
-   if (!NT_SUCCESS(status))
+   allocation->last_destroy_status = static_cast<uint32_t>(status);
+   if (status != STATUS_SUCCESS)
       return false;
 
    free(allocation->metadata);

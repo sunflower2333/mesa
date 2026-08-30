@@ -21,6 +21,7 @@ constexpr D3DKMT_HANDLE kDeviceHandle = 2;
 constexpr D3DKMT_HANDLE kContextHandle = 3;
 constexpr D3DKMT_HANDLE kAllocationHandle = 4;
 constexpr NTSTATUS kStatusSuccess = static_cast<NTSTATUS>(0);
+constexpr NTSTATUS kStatusTimeout = static_cast<NTSTATUS>(0x102);
 constexpr NTSTATUS kStatusInvalidParameter = static_cast<NTSTATUS>(-1073741811L);
 
 enum : uint32_t {
@@ -1330,6 +1331,28 @@ test_failed_allocation_teardown_retains_owner()
 }
 
 void
+test_positive_allocation_destroy_status_retains_owner()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   fixture.destroy_allocation_status = kStatusTimeout;
+   CHECK(!tu_wddm_allocation_destroy(&allocation));
+   CHECK(allocation.last_destroy_status == static_cast<uint32_t>(kStatusTimeout));
+   CHECK(allocation.handle == kAllocationHandle);
+   CHECK(allocation.context == &fixture.context);
+
+   fixture.destroy_allocation_status = kStatusSuccess;
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(allocation.handle == 0);
+   CHECK(allocation.context == NULL);
+}
+
+void
 test_failed_unlock_retains_owner()
 {
    test_fixture fixture;
@@ -1861,6 +1884,7 @@ main()
    test_failed_allocation_creation_compensates();
    test_failed_allocation_rollback_retains_owner();
    test_failed_allocation_teardown_retains_owner();
+   test_positive_allocation_destroy_status_retains_owner();
    test_failed_unlock_retains_owner();
    test_null_lock_data_is_rolled_back();
    test_null_lock_data_rollback_retains_owner();
