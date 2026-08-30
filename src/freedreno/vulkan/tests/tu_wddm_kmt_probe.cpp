@@ -77,8 +77,32 @@ static_assert(sizeof(test_msm_submit_one_bo) == 84, "MSM submit fixture drift");
 /* pm4_pkt7_hdr(CP_NOP, 0): a one-dword packet with no payload.  Keep this
  * probe independent of generated register headers while retaining the exact
  * opcode- and parity-bit encoding used by Turnip. */
-constexpr uint32_t kCpNop = 0x70900000U;
-static_assert(kCpNop == (0x70000000U | (0x10U << 16) | (1U << 23)), "CP_NOP packet encoding drift");
+constexpr uint32_t
+pm4_odd_parity_bit_constexpr(uint32_t value)
+{
+   value ^= value >> 16;
+   value ^= value >> 8;
+   value ^= value >> 4;
+   value &= 0xfU;
+   return (~0x6996U >> value) & 1U;
+}
+
+constexpr uint32_t
+pm4_pkt7_hdr_constexpr(uint8_t opcode, uint16_t count)
+{
+   return 0x70000000U | static_cast<uint32_t>(count) |
+          (pm4_odd_parity_bit_constexpr(count) << 15) |
+          ((static_cast<uint32_t>(opcode) & 0x7fU) << 16) |
+          (pm4_odd_parity_bit_constexpr(opcode) << 23);
+}
+
+constexpr uint32_t kCpNop = pm4_pkt7_hdr_constexpr(0x10U, 0U);
+static_assert(kCpNop == 0x70108000U, "CP_NOP packet encoding drift");
+static_assert(((kCpNop >> 16) & 0x7fU) == 0x10U, "CP_NOP opcode drift");
+static_assert(((kCpNop >> 15) & 1U) == pm4_odd_parity_bit_constexpr(0U),
+              "CP_NOP count parity drift");
+static_assert(((kCpNop >> 23) & 1U) == pm4_odd_parity_bit_constexpr(0x10U),
+              "CP_NOP opcode parity drift");
 
 constexpr uint32_t kLifecycleIterations = 10000;
 
