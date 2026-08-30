@@ -375,8 +375,13 @@ run_allocation_lifecycle_probe(tu_wddm_context *context)
          destroyed = tu_wddm_allocation_unlock(&allocation);
       if (allocation.handle != 0 && !allocation.locked) {
          destroyed = tu_wddm_allocation_destroy(&allocation);
-         if (!destroyed)
+         printf("  Stress lifecycle: DestroyAllocation iteration=%u attempt=1 success=%u status=0x%08x handle=0x%08x\n",
+                iteration, static_cast<unsigned>(destroyed), allocation.last_destroy_status, allocation.handle);
+         if (!destroyed) {
             destroyed = tu_wddm_allocation_destroy(&allocation);
+            printf("  Stress lifecycle: DestroyAllocation iteration=%u attempt=2 success=%u status=0x%08x handle=0x%08x\n",
+                   iteration, static_cast<unsigned>(destroyed), allocation.last_destroy_status, allocation.handle);
+         }
       } else if (allocation.handle != 0) {
          destroyed = false;
       }
@@ -668,9 +673,13 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       if (allocation.handle != 0 && !allocation.locked) {
          printf("  DestroyAllocation(native 4KiB): begin\n");
          bool destroyed = tu_wddm_allocation_destroy(&allocation);
+         printf("  DestroyAllocation(native 4KiB): attempt=1 success=%u status=0x%08x handle=0x%08x\n",
+                static_cast<unsigned>(destroyed), allocation.last_destroy_status, allocation.handle);
          if (!destroyed) {
             printf("  DestroyAllocation(native 4KiB): retry\n");
             destroyed = tu_wddm_allocation_destroy(&allocation);
+            printf("  DestroyAllocation(native 4KiB): attempt=2 success=%u status=0x%08x handle=0x%08x\n",
+                   static_cast<unsigned>(destroyed), allocation.last_destroy_status, allocation.handle);
          }
          printf("  DestroyAllocation(native 4KiB): success=%u\n", static_cast<unsigned>(destroyed));
          allocation_clean = allocation_clean && destroyed;
