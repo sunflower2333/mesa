@@ -13,6 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The SDK headers do not consistently export STATUS_SUCCESS to user-mode
+ * translation units; its NTSTATUS value is defined by the WDK contract. */
+static constexpr NTSTATUS TU_WDDM_STATUS_SUCCESS = static_cast<NTSTATUS>(0);
+
 #ifdef TU_HAS_WDDM
 #include <errno.h>
 
@@ -853,7 +857,7 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
          destroy.phAllocationList = &handle;
          destroy.AllocationCount = 1;
          const NTSTATUS destroy_status = context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
-         if (destroy_status == STATUS_SUCCESS)
+         if (destroy_status == TU_WDDM_STATUS_SUCCESS)
             memset(allocation, 0, sizeof(*allocation));
       }
       return false;
@@ -883,7 +887,7 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
 
    NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
    allocation->last_destroy_status = static_cast<uint32_t>(status);
-   if (status != STATUS_SUCCESS)
+   if (status != TU_WDDM_STATUS_SUCCESS)
       return false;
 
    free(allocation->metadata);
