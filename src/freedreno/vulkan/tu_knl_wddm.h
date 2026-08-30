@@ -59,6 +59,9 @@ struct tu_wddm_context {
    uint32_t patch_location_list_size;
    VIOGPU_WDDM_CONTEXT_INFO info;
    uint32_t last_submitted_fence;
+   /* Retained only when KMT context teardown fails. */
+   uint32_t last_destroy_status;
+   uint32_t destroy_attempt_count;
 };
 
 struct tu_instance;

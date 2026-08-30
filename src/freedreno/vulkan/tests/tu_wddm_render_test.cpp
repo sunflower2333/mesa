@@ -23,6 +23,7 @@ constexpr D3DKMT_HANDLE kAllocationHandle = 4;
 constexpr NTSTATUS kStatusSuccess = static_cast<NTSTATUS>(0);
 constexpr NTSTATUS kStatusTimeout = static_cast<NTSTATUS>(0x102);
 constexpr NTSTATUS kStatusDeviceBusy = static_cast<NTSTATUS>(0x80000011L);
+constexpr NTSTATUS kStatusGraphicsAllocationBusy = static_cast<NTSTATUS>(0xc01e0102L);
 constexpr NTSTATUS kStatusInvalidParameter = static_cast<NTSTATUS>(-1073741811L);
 
 enum : uint32_t {
@@ -397,6 +398,7 @@ struct test_fixture {
    NTSTATUS create_allocation_status;
    NTSTATUS destroy_allocation_status;
    NTSTATUS create_context_status;
+   NTSTATUS destroy_context_busy_status;
    NTSTATUS destroy_context_status;
    NTSTATUS destroy_device_status;
    NTSTATUS close_adapter_status;
@@ -407,6 +409,7 @@ struct test_fixture {
    uint32_t next_allocation_list_size;
    uint32_t next_patch_list_size;
    unsigned busy_create_attempts;
+   unsigned busy_destroy_context_attempts;
    unsigned create_calls;
    unsigned destroy_allocation_calls;
    unsigned create_context_calls;
@@ -531,6 +534,10 @@ fake_destroy_context(const D3DKMT_DESTROYCONTEXT *destroy)
 
    fixture->destroy_context_calls++;
    CHECK(destroy->hContext == kContextHandle);
+   if (fixture->busy_destroy_context_attempts != 0) {
+      fixture->busy_destroy_context_attempts--;
+      return fixture->destroy_context_busy_status;
+   }
    return fixture->destroy_context_status;
 }
 
@@ -898,6 +905,7 @@ init_fixture(test_fixture *fixture)
    fixture->get_device_state_status = kStatusSuccess;
    fixture->execution_state = D3DKMT_DEVICEEXECUTION_ACTIVE;
    fixture->create_context_status = kStatusSuccess;
+   fixture->destroy_context_busy_status = kStatusDeviceBusy;
    fixture->destroy_context_status = kStatusSuccess;
    fixture->destroy_device_status = kStatusSuccess;
    fixture->close_adapter_status = kStatusSuccess;
@@ -1146,6 +1154,36 @@ test_context_info_failure_cleanup_retry()
    CHECK(fixture.destroy_context_calls == 2);
    CHECK(context.handle == 0);
    CHECK(context.device == NULL);
+}
+
+void
+test_context_close_retries_transient_busy()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.busy_destroy_context_attempts = 2;
+
+   CHECK(tu_wddm_context_close(&fixture.context));
+   CHECK(fixture.destroy_context_calls == 3);
+   CHECK(fixture.context.handle == 0);
+
+   init_fixture(&fixture);
+   fixture.destroy_context_busy_status = kStatusGraphicsAllocationBusy;
+   fixture.busy_destroy_context_attempts = 1;
+
+   CHECK(tu_wddm_context_close(&fixture.context));
+   CHECK(fixture.destroy_context_calls == 2);
+   CHECK(fixture.context.handle == 0);
+
+   init_fixture(&fixture);
+   fixture.destroy_context_status = kStatusInvalidParameter;
+
+   CHECK(!tu_wddm_context_close(&fixture.context));
+   CHECK(fixture.destroy_context_calls == 1);
+   CHECK(fixture.context.handle == kContextHandle);
+   CHECK(fixture.context.last_destroy_status ==
+         static_cast<uint32_t>(kStatusInvalidParameter));
+   CHECK(fixture.context.destroy_attempt_count == 1);
 }
 
 void
@@ -1899,6 +1937,7 @@ main()
    test_device_execution_state();
    test_context_buffer_contract_and_failed_destroy_retention();
    test_context_info_failure_cleanup_retry();
+   test_context_close_retries_transient_busy();
    test_context_lifecycle_loop();
    test_probe_owner_cleanup_retry();
    test_allocation_lifecycle_loop();

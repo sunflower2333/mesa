@@ -21,6 +21,10 @@ static constexpr NTSTATUS TU_WDDM_STATUS_SUCCESS = static_cast<NTSTATUS>(0);
  * so retry only the transient busy result while preserving real collisions. */
 static constexpr NTSTATUS TU_WDDM_STATUS_DEVICE_BUSY = static_cast<NTSTATUS>(0x80000011L);
 static constexpr uint32_t TU_WDDM_CREATE_BUSY_RETRIES = 1000;
+/* Context destroy can also race asynchronous VidSch submission retirement. */
+static constexpr NTSTATUS TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY =
+   static_cast<NTSTATUS>(0xc01e0102L);
+static constexpr uint32_t TU_WDDM_DESTROY_BUSY_RETRIES = 1000;
 
 #ifdef TU_HAS_WDDM
 #include <errno.h>
@@ -694,7 +698,21 @@ tu_wddm_context_close(struct tu_wddm_context *context)
 
    D3DKMT_DESTROYCONTEXT destroy = {};
    destroy.hContext = context->handle;
-   NTSTATUS status = context->device->adapter.runtime->dispatch.DestroyContext(&destroy);
+   NTSTATUS status = TU_WDDM_STATUS_SUCCESS;
+   for (uint32_t attempt = 0; attempt <= TU_WDDM_DESTROY_BUSY_RETRIES; attempt++) {
+      status = context->device->adapter.runtime->dispatch.DestroyContext(&destroy);
+      context->last_destroy_status = static_cast<uint32_t>(status);
+      context->destroy_attempt_count = attempt + 1;
+      if (NT_SUCCESS(status) ||
+          (status != TU_WDDM_STATUS_DEVICE_BUSY &&
+           status != TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY) ||
+          attempt == TU_WDDM_DESTROY_BUSY_RETRIES)
+         break;
+
+      /* D3DKMTDestroyAllocation can complete before VidMm invokes the KMD
+       * callback that drops the Native Context allocation reference. */
+      Sleep(1);
+   }
    if (!NT_SUCCESS(status))
       return false;
 
@@ -1701,6 +1719,10 @@ tu_wddm_device_finish(struct tu_device *dev)
       context_closed = tu_wddm_context_close(&dev->wddm_context);
       if (!context_closed) {
          dev->wddm_teardown_failed = true;
+         mesa_loge("failed to close WDDM context: status=0x%08x attempts=%u handle=%u",
+                   dev->wddm_context.last_destroy_status,
+                   dev->wddm_context.destroy_attempt_count,
+                   dev->wddm_context.handle);
          vk_device_set_lost(&dev->vk, "failed to close WDDM context");
          return;
       }
