@@ -22,6 +22,7 @@ constexpr D3DKMT_HANDLE kContextHandle = 3;
 constexpr D3DKMT_HANDLE kAllocationHandle = 4;
 constexpr NTSTATUS kStatusSuccess = static_cast<NTSTATUS>(0);
 constexpr NTSTATUS kStatusTimeout = static_cast<NTSTATUS>(0x102);
+constexpr NTSTATUS kStatusDeviceBusy = static_cast<NTSTATUS>(0x80000011L);
 constexpr NTSTATUS kStatusInvalidParameter = static_cast<NTSTATUS>(-1073741811L);
 
 enum : uint32_t {
@@ -405,6 +406,7 @@ struct test_fixture {
    uint32_t next_command_buffer_size;
    uint32_t next_allocation_list_size;
    uint32_t next_patch_list_size;
+   unsigned busy_create_attempts;
    unsigned create_calls;
    unsigned destroy_allocation_calls;
    unsigned create_context_calls;
@@ -465,6 +467,10 @@ fake_create_allocation(D3DKMT_CREATEALLOCATION *create)
       return kStatusInvalidParameter;
 
    memcpy(&fixture->created_private_info, allocation_info->pPrivateDriverData, sizeof(fixture->created_private_info));
+   if (fixture->busy_create_attempts != 0) {
+      fixture->busy_create_attempts--;
+      return kStatusDeviceBusy;
+   }
    allocation_info->hAllocation = fixture->next_allocation_handle++;
    return fixture->create_allocation_status;
 }
@@ -1195,6 +1201,24 @@ test_allocation_lifecycle_loop()
 }
 
 void
+test_busy_allocation_creation_retries_without_publishing_a_handle()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.busy_create_attempts = 3;
+
+   tu_wddm_allocation allocation = {};
+   const tu_wddm_allocation_desc desc = native_allocation_desc();
+   CHECK(tu_wddm_allocation_create(&fixture.context, &desc, &allocation));
+   CHECK(fixture.create_calls == 4);
+   CHECK(fixture.busy_create_attempts == 0);
+   CHECK(allocation.last_create_status == static_cast<uint32_t>(kStatusSuccess));
+   CHECK(allocation.handle == kAllocationHandle);
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(fixture.destroy_allocation_calls == 1);
+}
+
+void
 test_allocation_and_lock()
 {
    test_fixture fixture;
@@ -1878,6 +1902,7 @@ main()
    test_context_lifecycle_loop();
    test_probe_owner_cleanup_retry();
    test_allocation_lifecycle_loop();
+   test_busy_allocation_creation_retries_without_publishing_a_handle();
    test_allocation_and_lock();
    test_gpu_read_only_allocation_maps_cpu_writable();
    test_allocation_range_rejected();

@@ -16,6 +16,11 @@
 /* The SDK headers do not consistently export STATUS_SUCCESS to user-mode
  * translation units; its NTSTATUS value is defined by the WDK contract. */
 static constexpr NTSTATUS TU_WDDM_STATUS_SUCCESS = static_cast<NTSTATUS>(0);
+/* VidMm may defer the KMD DestroyAllocation callback after returning success.
+ * A fixed native IOVA remains reserved until that callback detaches its range,
+ * so retry only the transient busy result while preserving real collisions. */
+static constexpr NTSTATUS TU_WDDM_STATUS_DEVICE_BUSY = static_cast<NTSTATUS>(0x80000011L);
+static constexpr uint32_t TU_WDDM_CREATE_BUSY_RETRIES = 1000;
 
 #ifdef TU_HAS_WDDM
 #include <errno.h>
@@ -839,7 +844,15 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
    create.pAllocationInfo = &allocation_info;
    create.Flags.NonSecure = 1;
 
-   NTSTATUS status = context->device->adapter.runtime->dispatch.CreateAllocation(&create);
+   NTSTATUS status = TU_WDDM_STATUS_DEVICE_BUSY;
+   for (uint32_t attempt = 0; attempt <= TU_WDDM_CREATE_BUSY_RETRIES; ++attempt) {
+      allocation_info.hAllocation = 0;
+      status = context->device->adapter.runtime->dispatch.CreateAllocation(&create);
+      if (status != TU_WDDM_STATUS_DEVICE_BUSY || allocation_info.hAllocation != 0 ||
+          attempt == TU_WDDM_CREATE_BUSY_RETRIES)
+         break;
+      Sleep(1);
+   }
    allocation->last_create_status = static_cast<uint32_t>(status);
    if (!NT_SUCCESS(status) || allocation_info.hAllocation == 0) {
       /* A failing thunk is not allowed to leave a partially-created KMD
