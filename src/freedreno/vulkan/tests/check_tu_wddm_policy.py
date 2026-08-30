@@ -54,6 +54,15 @@ def main() -> int:
     dispatch_source = (VULKAN_DIR / "tu_wddm_dispatch.cc").read_text(encoding="utf-8")
     dispatch_header = (VULKAN_DIR / "tu_wddm_dispatch.h").read_text(encoding="utf-8")
     transport_fixture = (TEST_DIR / "tu_wddm_transport_compile.cpp").read_text(encoding="utf-8")
+    util_meson = (VULKAN_DIR.parents[2] / "src" / "util" / "meson.build").read_text(
+        encoding="utf-8"
+    )
+
+    if (
+        "host_machine.system() != 'windows'" not in util_meson
+        or "cache_ops_aarch64.c" not in util_meson
+    ):
+        fail("Windows ARM64 must not compile the CTR_EL0 cache-ops implementation")
 
     retired_heap_api = "tu_wddm_select_heap_size"
     for path, source in (

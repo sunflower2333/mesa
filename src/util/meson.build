@@ -186,7 +186,10 @@ files_mesa_util = files(
 
 libmesa_util_links = []
 
-if host_machine.cpu_family() == 'aarch64' and cc.get_id() != 'msvc'
+# Windows ARM64 user mode cannot safely execute the architectural cache
+# maintenance instructions used by cache_ops_aarch64.c. The WDDM backend
+# exposes coherent memory and routes Windows builds through the null stub.
+if host_machine.cpu_family() == 'aarch64' and host_machine.system() != 'windows' and cc.get_id() != 'msvc'
   files_mesa_util += files('cache_ops_aarch64.c')
 elif host_machine.cpu_family() in ['x86', 'x86_64'] and cc.get_id() != 'msvc'
   libmesa_util_clflush = static_library(
