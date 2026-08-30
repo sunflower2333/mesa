@@ -353,8 +353,8 @@ run_allocation_lifecycle_probe(tu_wddm_context *context)
    for (uint32_t iteration = 0; iteration < kLifecycleIterations; iteration++) {
       tu_wddm_allocation allocation = {};
       if (!tu_wddm_allocation_create(context, &desc, &allocation)) {
-         printf("  Stress lifecycle: CreateAllocation failed iteration=%u handle=0x%08x\n", iteration,
-                allocation.handle);
+         printf("  Stress lifecycle: CreateAllocation failed iteration=%u status=0x%08x handle=0x%08x\n", iteration,
+                allocation.last_create_status, allocation.handle);
          if (allocation.handle != 0)
             (void) tu_wddm_allocation_destroy(&allocation);
          return false;

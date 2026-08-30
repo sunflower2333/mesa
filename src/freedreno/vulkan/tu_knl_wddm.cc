@@ -801,10 +801,12 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
                           const struct tu_wddm_allocation_desc *desc,
                           struct tu_wddm_allocation *allocation)
 {
-   if (allocation == NULL || !tu_wddm_allocation_desc_valid(context, desc))
+   if (allocation == NULL)
       return false;
 
    memset(allocation, 0, sizeof(*allocation));
+   if (!tu_wddm_allocation_desc_valid(context, desc))
+      return false;
 
    VIOGPU_WDDM_ALLOCATION_INFO private_data = {};
    tu_wddm_init_header(&private_data.Header, tu_wddm_sizeof<VIOGPU_WDDM_ALLOCATION_INFO>());
@@ -834,6 +836,7 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
    create.Flags.NonSecure = 1;
 
    NTSTATUS status = context->device->adapter.runtime->dispatch.CreateAllocation(&create);
+   allocation->last_create_status = static_cast<uint32_t>(status);
    if (!NT_SUCCESS(status) || allocation_info.hAllocation == 0) {
       /* A failing thunk is not allowed to leave a partially-created KMD
        * allocation behind.  Some test/KMD implementations can return a
