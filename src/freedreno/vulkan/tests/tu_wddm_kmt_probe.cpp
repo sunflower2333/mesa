@@ -679,9 +679,16 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       }
       ready = allocation_ready && allocation_clean && allocation.handle == 0;
 
-      if (ready && stress_lifecycle)
-         ready = run_context_lifecycle_probe(dispatch, opened_adapter, device_handle, &opened_info) &&
-                 run_allocation_lifecycle_probe(&context);
+      if (ready && stress_lifecycle) {
+         /* Run the same fixed-IOVA allocation cycle on both sides of the
+          * context-only stress.  A failure only after context churn points to
+          * registration corruption; an early failure is allocation teardown. */
+         const bool allocation_before_context = run_allocation_lifecycle_probe(&context);
+         const bool context_lifecycle = allocation_before_context &&
+                                        run_context_lifecycle_probe(dispatch, opened_adapter, device_handle, &opened_info);
+         const bool allocation_after_context = context_lifecycle && run_allocation_lifecycle_probe(&context);
+         ready = allocation_before_context && context_lifecycle && allocation_after_context;
+      }
 
       if (ready && submit_nop) {
          ready = run_submit_nop_probe(dispatch, enumerated, opened_adapter, device_handle, context_handle,
