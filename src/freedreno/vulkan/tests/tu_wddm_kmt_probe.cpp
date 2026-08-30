@@ -684,9 +684,12 @@ probe_adapter(tu_wddm_dispatch *dispatch,
           * context-only stress.  A failure only after context churn points to
           * registration corruption; an early failure is allocation teardown. */
          const bool allocation_before_context = run_allocation_lifecycle_probe(&context);
-         const bool context_lifecycle = allocation_before_context &&
-                                        run_context_lifecycle_probe(dispatch, opened_adapter, device_handle, &opened_info);
-         const bool allocation_after_context = context_lifecycle && run_allocation_lifecycle_probe(&context);
+         const bool context_lifecycle =
+            run_context_lifecycle_probe(dispatch, opened_adapter, device_handle, &opened_info);
+         const bool allocation_after_context = run_allocation_lifecycle_probe(&context);
+         printf("  Stress lifecycle summary: allocation_before=%u context_only=%u allocation_after=%u\n",
+                static_cast<unsigned>(allocation_before_context), static_cast<unsigned>(context_lifecycle),
+                static_cast<unsigned>(allocation_after_context));
          ready = allocation_before_context && context_lifecycle && allocation_after_context;
       }
 
