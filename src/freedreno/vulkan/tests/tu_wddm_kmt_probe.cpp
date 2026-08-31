@@ -11,7 +11,12 @@
  * the private ABI query. The explicit --stress-lifecycle argument repeats the
  * allocation lock/unlock/destroy cycle 10,000 times at one requested IOVA to
  * expose retained KMT owners and requested-IOVA leaks without making the
- * default bring-up probe invasive.
+ * default bring-up probe invasive. The explicit --negative-iova argument
+ * requires KMD rejection of malformed, out-of-range, and overlapping native
+ * allocation ranges before proving that an ordinary allocation still works.
+ * The explicit --negative-submit argument sends one malformed private Render
+ * header, adopts every returned KMT buffer, and proves allocation cleanup plus
+ * an ACTIVE execution state afterward.
  */
 
 #include "../tu_knl_wddm.h"
@@ -105,6 +110,10 @@ static_assert(((kCpNop >> 23) & 1U) == pm4_odd_parity_bit_constexpr(0x10U),
               "CP_NOP opcode parity drift");
 
 constexpr uint32_t kLifecycleIterations = 10000;
+constexpr uint32_t kStatusInvalidParameter = UINT32_C(0xc000000d);
+constexpr uint32_t kStatusIllegalInstruction = UINT32_C(0xc000001d);
+constexpr uint32_t kStatusDeviceNotReady = UINT32_C(0xc00000a3);
+constexpr uint32_t kStatusDeviceBusy = UINT32_C(0x80000011);
 
 enum probe_stage {
    kProbeStageEnumeration,
@@ -214,6 +223,242 @@ close_adapter(tu_wddm_dispatch *dispatch, D3DKMT_HANDLE *handle)
    if (NT_SUCCESS(status))
       *handle = 0;
    return NT_SUCCESS(status);
+}
+
+bool
+probe_execution_active(tu_wddm_context *context, const char *label)
+{
+   if (context == nullptr || context->device == nullptr || context->device->adapter.runtime == nullptr ||
+       context->device->handle == 0)
+      return false;
+
+   D3DKMT_GETDEVICESTATE state = {};
+   state.hDevice = context->device->handle;
+   state.StateType = D3DKMT_DEVICESTATE_EXECUTION;
+   const NTSTATUS status = context->device->adapter.runtime->dispatch.GetDeviceState(&state);
+   const bool active = NT_SUCCESS(status) && state.ExecutionState == D3DKMT_DEVICEEXECUTION_ACTIVE;
+   printf("  %s execution state: status=0x%08lx state=%u active=%u\n", label, static_cast<unsigned long>(status),
+          static_cast<unsigned>(state.ExecutionState), static_cast<unsigned>(active));
+   return active;
+}
+
+bool
+destroy_raw_allocation(tu_wddm_context *context, D3DKMT_HANDLE handle)
+{
+   if (context == nullptr || context->device == nullptr || context->device->adapter.runtime == nullptr ||
+       context->device->handle == 0 || handle == 0)
+      return false;
+
+   D3DKMT_DESTROYALLOCATION destroy = {};
+   destroy.hDevice = context->device->handle;
+   destroy.phAllocationList = &handle;
+   destroy.AllocationCount = 1;
+   const NTSTATUS status = context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
+   printf("  Negative IOVA cleanup: status=0x%08lx handle=0x%08x\n", static_cast<unsigned long>(status), handle);
+   return NT_SUCCESS(status);
+}
+
+bool
+run_raw_negative_allocation(tu_wddm_context *context,
+                            const char *name,
+                            uint64_t requested_iova,
+                            uint32_t expected_status)
+{
+   if (context == nullptr || context->device == nullptr || context->device->adapter.runtime == nullptr ||
+       context->device->handle == 0 || context->info.ResetGeneration == 0 || context->info.ContextId == 0)
+      return false;
+
+   VIOGPU_WDDM_ALLOCATION_INFO private_data = {};
+   private_data.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   private_data.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   private_data.Header.Size = static_cast<uint32_t>(sizeof(private_data));
+   private_data.Size = 4096;
+   private_data.Alignment = 4096;
+   private_data.RequestedIova = requested_iova;
+   private_data.ExpectedResetGeneration = context->info.ResetGeneration;
+   private_data.Flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+   private_data.ContextId = context->info.ContextId;
+
+   D3DDDI_ALLOCATIONINFO allocation_info = {};
+   allocation_info.pPrivateDriverData = &private_data;
+   allocation_info.PrivateDriverDataSize = static_cast<UINT>(sizeof(private_data));
+
+   D3DKMT_CREATEALLOCATION create = {};
+   create.hDevice = context->device->handle;
+   create.NumAllocations = 1;
+   create.pAllocationInfo = &allocation_info;
+   create.Flags.NonSecure = 1;
+
+   printf("  Negative IOVA %s: begin iova=0x%llx expected=0x%08x\n", name,
+          static_cast<unsigned long long>(requested_iova), expected_status);
+   const NTSTATUS status = context->device->adapter.runtime->dispatch.CreateAllocation(&create);
+   const uint32_t status_bits = static_cast<uint32_t>(status);
+   const D3DKMT_HANDLE returned_handle = allocation_info.hAllocation;
+   bool cleanup = true;
+   if (returned_handle != 0)
+      cleanup = destroy_raw_allocation(context, returned_handle);
+   const bool passed = status_bits == expected_status && returned_handle == 0 && cleanup;
+   printf("  Negative IOVA %s: status=0x%08x handle=0x%08x cleanup=%u pass=%u\n", name, status_bits, returned_handle,
+          static_cast<unsigned>(cleanup), static_cast<unsigned>(passed));
+   return passed;
+}
+
+bool
+destroy_probe_allocation(tu_wddm_allocation *allocation)
+{
+   if (allocation == nullptr || allocation->handle == 0 || allocation->locked)
+      return false;
+
+   bool destroyed = tu_wddm_allocation_destroy(allocation);
+   if (!destroyed)
+      destroyed = tu_wddm_allocation_destroy(allocation);
+   return destroyed && allocation->handle == 0;
+}
+
+bool
+run_negative_iova_probe(tu_wddm_context *context)
+{
+   if (context == nullptr || context->info.VaStart == 0 || context->info.VaSize < 4096 ||
+       context->info.VaStart == UINT64_MAX)
+      return false;
+
+   const bool malformed_rejected =
+      run_raw_negative_allocation(context, "misaligned", context->info.VaStart + 1, kStatusInvalidParameter);
+
+   uint64_t outside_iova = 0;
+   if (context->info.VaStart > 4096)
+      outside_iova = context->info.VaStart - 4096;
+   else if (context->info.VaStart <= UINT64_MAX - context->info.VaSize)
+      outside_iova = context->info.VaStart + context->info.VaSize;
+   if (outside_iova == 0 || (outside_iova & UINT64_C(4095)) != 0)
+      return false;
+   const bool out_of_range_rejected =
+      run_raw_negative_allocation(context, "out-of-range", outside_iova, kStatusDeviceNotReady);
+
+   tu_wddm_allocation_desc desc = {};
+   desc.size = 4096;
+   desc.alignment = 4096;
+   desc.requested_iova = context->info.VaStart;
+   desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+
+   tu_wddm_allocation owner = {};
+   const bool owner_created = tu_wddm_allocation_create(context, &desc, &owner);
+   printf("  Negative IOVA overlap owner: created=%u handle=0x%08x\n", static_cast<unsigned>(owner_created),
+          owner.handle);
+   bool overlap_rejected = false;
+   if (owner_created)
+      overlap_rejected = run_raw_negative_allocation(context, "overlap", context->info.VaStart, kStatusDeviceBusy);
+   const bool owner_destroyed = owner.handle != 0 && !owner.locked && destroy_probe_allocation(&owner);
+   printf("  Negative IOVA overlap owner: destroyed=%u handle=0x%08x\n", static_cast<unsigned>(owner_destroyed),
+          owner.handle);
+   const bool overlap_passed = owner_created && overlap_rejected && owner_destroyed;
+
+   tu_wddm_allocation post = {};
+   const bool negative_cases_passed = malformed_rejected && out_of_range_rejected && overlap_passed;
+   const bool post_created = negative_cases_passed && tu_wddm_allocation_create(context, &desc, &post);
+   const bool post_destroyed = post.handle != 0 && !post.locked && destroy_probe_allocation(&post);
+   printf("  Negative IOVA post-check: created=%u destroyed=%u handle=0x%08x\n", static_cast<unsigned>(post_created),
+          static_cast<unsigned>(post_destroyed), post.handle);
+   const bool post_passed = post_created && post_destroyed;
+   const bool active = probe_execution_active(context, "Negative IOVA");
+   const bool passed = negative_cases_passed && post_passed && active;
+   printf("  Negative IOVA summary: malformed=%u out_of_range=%u overlap=%u post=%u active=%u\n",
+          static_cast<unsigned>(malformed_rejected), static_cast<unsigned>(out_of_range_rejected),
+          static_cast<unsigned>(overlap_passed), static_cast<unsigned>(post_passed), static_cast<unsigned>(active));
+   return passed;
+}
+
+bool
+adopt_render_replacements(tu_wddm_context *context, const D3DKMT_RENDER *render)
+{
+   if (context == nullptr || render == nullptr)
+      return false;
+
+   const bool valid =
+      render->pNewCommandBuffer != nullptr && render->pNewAllocationList != nullptr &&
+      render->pNewPatchLocationList != nullptr && render->NewCommandBufferSize >= sizeof(VIOGPU_WDDM_RENDER_COMMAND) &&
+      render->NewCommandBufferSize <= TU_WDDM_MAX_RENDER_COMMAND_SIZE && render->NewAllocationListSize != 0 &&
+      render->NewAllocationListSize <= TU_WDDM_MAX_RENDER_ALLOCATIONS && render->NewPatchLocationListSize != 0 &&
+      render->NewPatchLocationListSize <= TU_WDDM_MAX_RENDER_ALLOCATIONS;
+   if (!valid) {
+      context->command_buffer = nullptr;
+      context->command_buffer_size = 0;
+      context->allocation_list = nullptr;
+      context->allocation_list_size = 0;
+      context->patch_location_list = nullptr;
+      context->patch_location_list_size = 0;
+      return false;
+   }
+
+   context->command_buffer = render->pNewCommandBuffer;
+   context->command_buffer_size = render->NewCommandBufferSize;
+   context->allocation_list = render->pNewAllocationList;
+   context->allocation_list_size = render->NewAllocationListSize;
+   context->patch_location_list = render->pNewPatchLocationList;
+   context->patch_location_list_size = render->NewPatchLocationListSize;
+   return true;
+}
+
+bool
+run_negative_submit_probe(tu_wddm_context *context)
+{
+   if (context == nullptr || context->device == nullptr || context->handle == 0 || context->command_buffer == nullptr ||
+       context->command_buffer_size < sizeof(VIOGPU_WDDM_RENDER_COMMAND) || context->allocation_list == nullptr ||
+       context->allocation_list_size == 0 || context->patch_location_list == nullptr ||
+       context->patch_location_list_size == 0)
+      return false;
+
+   tu_wddm_allocation_desc desc = {};
+   desc.size = 4096;
+   desc.alignment = 4096;
+   desc.requested_iova = context->info.VaStart;
+   desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+
+   tu_wddm_allocation allocation = {};
+   const bool created = tu_wddm_allocation_create(context, &desc, &allocation);
+   if (!created) {
+      const bool cleaned = allocation.handle == 0 || (!allocation.locked && destroy_probe_allocation(&allocation));
+      printf("  Negative submit allocation setup: created=0 cleaned=%u handle=0x%08x\n", static_cast<unsigned>(cleaned),
+             allocation.handle);
+      return false;
+   }
+
+   memset(context->command_buffer, 0, sizeof(VIOGPU_WDDM_RENDER_COMMAND));
+   VIOGPU_WDDM_RENDER_COMMAND *command = static_cast<VIOGPU_WDDM_RENDER_COMMAND *>(context->command_buffer);
+   command->Header.Magic = 0;
+   command->Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   command->Header.Size = static_cast<uint32_t>(sizeof(*command));
+   command->Opcode = VIOGPU_WDDM_RENDER_NATIVE_SUBMIT;
+   command->ExpectedResetGeneration = context->info.ResetGeneration;
+
+   context->allocation_list[0] = {};
+   context->allocation_list[0].hAllocation = allocation.handle;
+   context->patch_location_list[0] = {};
+
+   D3DKMT_RENDER render = {};
+   render.hContext = context->handle;
+   render.CommandOffset = 0;
+   render.CommandLength = static_cast<UINT>(sizeof(*command));
+   render.AllocationCount = 1;
+   render.PatchLocationCount = 1;
+   render.NewCommandBufferSize = context->command_buffer_size;
+   render.NewAllocationListSize = context->allocation_list_size;
+   render.NewPatchLocationListSize = context->patch_location_list_size;
+   render.pNewCommandBuffer = context->command_buffer;
+   render.pNewAllocationList = context->allocation_list;
+   render.pNewPatchLocationList = context->patch_location_list;
+
+   printf("  Negative submit malformed header: begin expected=0x%08x\n", kStatusIllegalInstruction);
+   const NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
+   const uint32_t status_bits = static_cast<uint32_t>(status);
+   const bool replacements = adopt_render_replacements(context, &render);
+   const bool cleaned = allocation.handle != 0 && !allocation.locked && destroy_probe_allocation(&allocation);
+   const bool active = replacements && cleaned && probe_execution_active(context, "Negative submit");
+   const bool passed = status_bits == kStatusIllegalInstruction && replacements && cleaned && active;
+   printf("  Negative submit summary: status=0x%08x replacements=%u cleaned=%u active=%u pass=%u\n", status_bits,
+          static_cast<unsigned>(replacements), static_cast<unsigned>(cleaned), static_cast<unsigned>(active),
+          static_cast<unsigned>(passed));
+   return passed;
 }
 
 bool
@@ -480,7 +725,9 @@ probe_adapter(tu_wddm_dispatch *dispatch,
               const D3DKMT_ADAPTERINFO *enumerated,
               probe_stage stage,
               bool submit_nop,
-              bool stress_lifecycle)
+              bool stress_lifecycle,
+              bool negative_iova,
+              bool negative_submit)
 {
    VIOGPU_WDDM_ADAPTER_INFO enumerated_info = {};
    printf("  QueryAdapterInfo(enum): begin\n");
@@ -688,6 +935,12 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       }
       ready = allocation_ready && allocation_clean && allocation.handle == 0;
 
+      if (ready && negative_iova)
+         ready = run_negative_iova_probe(&context);
+
+      if (ready && negative_submit)
+         ready = run_negative_submit_probe(&context);
+
       if (ready && stress_lifecycle) {
          /* Run the same fixed-IOVA allocation cycle on both sides of the
           * context-only stress.  A failure only after context churn points to
@@ -741,28 +994,36 @@ main(int argc, char **argv)
    (void) setvbuf(stderr, nullptr, _IONBF, 0);
    bool submit_nop = false;
    bool stress_lifecycle = false;
+   bool negative_iova = false;
+   bool negative_submit = false;
    probe_stage stage = kProbeStageAllocation;
    for (int argument = 1; argument < argc; argument++) {
       if (strcmp(argv[argument], "--submit-nop") == 0)
          submit_nop = true;
       else if (strcmp(argv[argument], "--stress-lifecycle") == 0)
          stress_lifecycle = true;
+      else if (strcmp(argv[argument], "--negative-iova") == 0)
+         negative_iova = true;
+      else if (strcmp(argv[argument], "--negative-submit") == 0)
+         negative_submit = true;
       else if (parse_probe_stage(argv[argument], &stage))
          continue;
       else {
          fprintf(stderr,
                  "usage: %s [--stage=enumeration|open|device|context|allocation] "
-                 "[--submit-nop] [--stress-lifecycle]\n",
+                 "[--submit-nop] [--stress-lifecycle] [--negative-iova] [--negative-submit]\n",
                  argv[0]);
          return 2;
       }
    }
-   if (stage != kProbeStageAllocation && (submit_nop || stress_lifecycle)) {
-      fprintf(stderr, "submit and stress probes require --stage=allocation\n");
+   if (stage != kProbeStageAllocation && (submit_nop || stress_lifecycle || negative_iova || negative_submit)) {
+      fprintf(stderr, "submit, stress, and negative probes require --stage=allocation\n");
       return 2;
    }
-   printf("tu WDDM KMT probe: begin stage=%s submit_nop=%u stress_lifecycle=%u\n", probe_stage_name(stage),
-          static_cast<unsigned>(submit_nop), static_cast<unsigned>(stress_lifecycle));
+   printf("tu WDDM KMT probe: begin stage=%s submit_nop=%u stress_lifecycle=%u negative_iova=%u "
+          "negative_submit=%u\n",
+          probe_stage_name(stage), static_cast<unsigned>(submit_nop), static_cast<unsigned>(stress_lifecycle),
+          static_cast<unsigned>(negative_iova), static_cast<unsigned>(negative_submit));
 
    tu_wddm_dispatch dispatch = {};
    if (!tu_wddm_dispatch_init(&dispatch)) {
@@ -803,7 +1064,8 @@ main(int argc, char **argv)
                 static_cast<unsigned long>(adapters[index].AdapterLuid.HighPart),
                 static_cast<unsigned long>(adapters[index].AdapterLuid.LowPart), adapters[index].NumOfSources);
          if (stage != kProbeStageEnumeration && adapters[index].hAdapter != 0 &&
-             probe_adapter(&dispatch, &adapters[index], stage, submit_nop, stress_lifecycle))
+             probe_adapter(&dispatch, &adapters[index], stage, submit_nop, stress_lifecycle, negative_iova,
+                           negative_submit))
             ready = true;
       }
    }

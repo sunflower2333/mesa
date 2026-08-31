@@ -378,7 +378,12 @@ jobs:
                                   'kLifecycleIterations = 10000',
                                   '--stress-lifecycle', 'CreateAllocation(native 4KiB)',
                                   'DestroyAllocation(native 4KiB)',
-                                  '--submit-nop', 'tu_wddm_context_render', 'kCpNop')) {
+                                  '--submit-nop', 'tu_wddm_context_render', 'kCpNop',
+                                  '--negative-iova', 'run_negative_iova_probe',
+                                  'kStatusInvalidParameter', 'kStatusDeviceNotReady',
+                                  'kStatusDeviceBusy', '--negative-submit',
+                                  'run_negative_submit_probe', 'kStatusIllegalInstruction',
+                                  'adopt_render_replacements')) {
             if ($kmtProbe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
               throw "KMT probe is missing bounded allocation lifecycle phase: $fragment"
             }
