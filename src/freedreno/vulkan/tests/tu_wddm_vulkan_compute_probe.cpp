@@ -8,8 +8,10 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 #include <vulkan/vulkan_core.h>
@@ -17,8 +19,26 @@
 
 namespace {
 
-constexpr uint32_t kElementCount = 256;
+constexpr uint32_t kDefaultElementCount = 256;
+constexpr uint32_t kMaxElementCount = 64 * 1024 * 1024;
+constexpr uint32_t kDefaultIterationCount = 1;
+constexpr uint32_t kMaxIterationCount = 16;
 constexpr uint64_t kFenceTimeoutNs = UINT64_C(10000000000);
+
+bool
+parse_positive_u32(const char *text, uint32_t maximum, uint32_t *value)
+{
+   if (text == nullptr || value == nullptr || text[0] == '\0')
+      return false;
+
+   char *end = nullptr;
+   errno = 0;
+   const unsigned long long parsed = _strtoui64(text, &end, 10);
+   if (errno != 0 || end == text || *end != '\0' || parsed == 0 || parsed > maximum)
+      return false;
+   *value = static_cast<uint32_t>(parsed);
+   return true;
+}
 
 bool
 load_spirv(const char *path, std::vector<uint32_t> *code)
@@ -58,9 +78,25 @@ report(const char *message, VkResult result)
 int
 main(int argc, char **argv)
 {
-   if (argc != 2) {
-      fprintf(stderr, "usage: %s compute.spv\n", argv[0]);
+   uint32_t element_count = kDefaultElementCount;
+   uint32_t iteration_count = kDefaultIterationCount;
+   bool elements_seen = false;
+   bool iterations_seen = false;
+   if (argc < 2 || (argc % 2) != 0) {
+      fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT]\n", argv[0]);
       return 2;
+   }
+   for (int argument = 2; argument < argc; argument += 2) {
+      if (strcmp(argv[argument], "--elements") == 0 && !elements_seen &&
+          parse_positive_u32(argv[argument + 1], kMaxElementCount, &element_count)) {
+         elements_seen = true;
+      } else if (strcmp(argv[argument], "--iterations") == 0 && !iterations_seen &&
+                 parse_positive_u32(argv[argument + 1], kMaxIterationCount, &iteration_count)) {
+         iterations_seen = true;
+      } else {
+         fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT]\n", argv[0]);
+         return 2;
+      }
    }
 
    std::vector<uint32_t> shader_code;
@@ -195,6 +231,11 @@ main(int argc, char **argv)
       cleanup();
       return report("the selected device is not the expected Turnip Adreno adapter", VK_SUCCESS);
    }
+   const VkDeviceSize buffer_size = static_cast<VkDeviceSize>(element_count) * sizeof(uint32_t);
+   if (buffer_size > properties.limits.maxStorageBufferRange) {
+      cleanup();
+      return report("requested storage buffer exceeds maxStorageBufferRange", VK_SUCCESS);
+   }
 
    uint32_t queue_family_count = 0;
    get_queue_family_properties(physical, &queue_family_count, nullptr);
@@ -277,6 +318,7 @@ main(int argc, char **argv)
    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier = LOAD_DEVICE(CmdPipelineBarrier);
    PFN_vkCreateFence create_fence = LOAD_DEVICE(CreateFence);
    destroy_fence = LOAD_DEVICE(DestroyFence);
+   PFN_vkResetFences reset_fences = LOAD_DEVICE(ResetFences);
    PFN_vkQueueSubmit queue_submit = LOAD_DEVICE(QueueSubmit);
    PFN_vkWaitForFences wait_for_fences = LOAD_DEVICE(WaitForFences);
    destroy_buffer = LOAD_DEVICE(DestroyBuffer);
@@ -294,8 +336,8 @@ main(int argc, char **argv)
        allocate_command_buffers == nullptr || begin_command_buffer == nullptr || end_command_buffer == nullptr ||
        cmd_bind_pipeline == nullptr || cmd_bind_descriptor_sets == nullptr || cmd_dispatch == nullptr ||
        cmd_pipeline_barrier == nullptr || create_fence == nullptr || destroy_fence == nullptr ||
-       queue_submit == nullptr || wait_for_fences == nullptr || destroy_buffer == nullptr || free_memory == nullptr ||
-       destroy_device == nullptr) {
+       reset_fences == nullptr || queue_submit == nullptr || wait_for_fences == nullptr || destroy_buffer == nullptr ||
+       free_memory == nullptr || destroy_device == nullptr) {
       cleanup();
       return report("required device entrypoints are missing", VK_SUCCESS);
    }
@@ -306,10 +348,28 @@ main(int argc, char **argv)
       cleanup();
       return report("compute queue is null", VK_SUCCESS);
    }
+   const uint64_t total_groups = (static_cast<uint64_t>(element_count) + 63) / 64;
+   const uint64_t max_groups_x = properties.limits.maxComputeWorkGroupCount[0];
+   if (max_groups_x == 0 || properties.limits.maxComputeWorkGroupCount[1] == 0) {
+      cleanup();
+      return report("compute workgroup limits are zero", VK_SUCCESS);
+   }
+   const uint64_t group_count_y_u64 = (total_groups + max_groups_x - 1) / max_groups_x;
+   if (group_count_y_u64 == 0 || group_count_y_u64 > properties.limits.maxComputeWorkGroupCount[1]) {
+      cleanup();
+      return report("requested dispatch exceeds maxComputeWorkGroupCount", VK_SUCCESS);
+   }
+   const uint64_t group_count_x_u64 = (total_groups + group_count_y_u64 - 1) / group_count_y_u64;
+   if (group_count_x_u64 == 0 || group_count_x_u64 > max_groups_x) {
+      cleanup();
+      return report("requested dispatch exceeds maxComputeWorkGroupCount", VK_SUCCESS);
+   }
+   const uint32_t group_count_x = static_cast<uint32_t>(group_count_x_u64);
+   const uint32_t group_count_y = static_cast<uint32_t>(group_count_y_u64);
 
    VkBufferCreateInfo buffer_info = {};
    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-   buffer_info.size = kElementCount * sizeof(uint32_t);
+   buffer_info.size = buffer_size;
    buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
    result = create_buffer(device, &buffer_info, nullptr, &buffer);
@@ -326,7 +386,8 @@ main(int argc, char **argv)
    for (uint32_t i = 0; i < memory_properties.memoryTypeCount; i++) {
       const VkMemoryPropertyFlags flags = memory_properties.memoryTypes[i].propertyFlags;
       if ((requirements.memoryTypeBits & (UINT32_C(1) << i)) != 0 &&
-          (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
+          (flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) ==
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) {
          memory_type = i;
          memory_flags = flags;
          if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0)
@@ -335,7 +396,7 @@ main(int argc, char **argv)
    }
    if (memory_type == UINT32_MAX) {
       cleanup();
-      return report("no host-visible storage-buffer memory type", VK_SUCCESS);
+      return report("no host-visible, host-cached storage-buffer memory type", VK_SUCCESS);
    }
    VkMemoryAllocateInfo allocation_info = {};
    allocation_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -352,7 +413,7 @@ main(int argc, char **argv)
    }
    /* Seed the same storage buffer that the shader reads and writes.  The
     * result therefore proves the CPU-to-GPU handoff as well as readback. */
-   for (uint32_t i = 0; i < kElementCount; i++)
+   for (uint32_t i = 0; i < element_count; i++)
       static_cast<uint32_t *>(mapped)[i] = UINT32_C(0x1000) + i * 5;
    if ((memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
       VkMappedMemoryRange range = {};
@@ -462,7 +523,7 @@ main(int argc, char **argv)
    }
    VkCommandBufferBeginInfo begin_info = {};
    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-   begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+   begin_info.flags = iteration_count == 1 ? VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT : 0;
    if ((result = begin_command_buffer(command_buffer, &begin_info)) != VK_SUCCESS) {
       cleanup();
       return report("vkBeginCommandBuffer failed", result);
@@ -470,17 +531,27 @@ main(int argc, char **argv)
    cmd_bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
    cmd_bind_descriptor_sets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1, &descriptor_set, 0,
                             nullptr);
-   cmd_dispatch(command_buffer, kElementCount / 64, 1, 1);
-   VkBufferMemoryBarrier barrier = {};
-   barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-   barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-   barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-   barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   barrier.buffer = buffer;
-   barrier.size = VK_WHOLE_SIZE;
+   VkBufferMemoryBarrier to_compute = {};
+   to_compute.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+   to_compute.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+   to_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+   to_compute.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   to_compute.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   to_compute.buffer = buffer;
+   to_compute.size = VK_WHOLE_SIZE;
+   cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &to_compute, 0, nullptr);
+   cmd_dispatch(command_buffer, group_count_x, group_count_y, 1);
+   VkBufferMemoryBarrier to_host = {};
+   to_host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+   to_host.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+   to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+   to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   to_host.buffer = buffer;
+   to_host.size = VK_WHOLE_SIZE;
    cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr,
-                        1, &barrier, 0, nullptr);
+                        1, &to_host, 0, nullptr);
    if ((result = end_command_buffer(command_buffer)) != VK_SUCCESS) {
       cleanup();
       return report("vkEndCommandBuffer failed", result);
@@ -495,10 +566,16 @@ main(int argc, char **argv)
    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
    submit_info.commandBufferCount = 1;
    submit_info.pCommandBuffers = &command_buffer;
-   if ((result = queue_submit(queue, 1, &submit_info, fence)) != VK_SUCCESS ||
-       (result = wait_for_fences(device, 1, &fence, VK_TRUE, kFenceTimeoutNs)) != VK_SUCCESS) {
-      cleanup();
-      return report("compute submission or fence wait failed", result);
+   for (uint32_t iteration = 0; iteration < iteration_count; iteration++) {
+      if (iteration != 0 && (result = reset_fences(device, 1, &fence)) != VK_SUCCESS) {
+         cleanup();
+         return report("vkResetFences failed", result);
+      }
+      if ((result = queue_submit(queue, 1, &submit_info, fence)) != VK_SUCCESS ||
+          (result = wait_for_fences(device, 1, &fence, VK_TRUE, kFenceTimeoutNs)) != VK_SUCCESS) {
+         cleanup();
+         return report("compute submission or fence wait failed", result);
+      }
    }
    if ((memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
       VkMappedMemoryRange range = {};
@@ -511,9 +588,10 @@ main(int argc, char **argv)
       }
    }
    uint64_t checksum = 0;
-   for (uint32_t i = 0; i < kElementCount; i++) {
-      const uint32_t input = UINT32_C(0x1000) + i * 5;
-      const uint32_t expected = input * 3 + 7;
+   for (uint32_t i = 0; i < element_count; i++) {
+      uint32_t expected = UINT32_C(0x1000) + i * 5;
+      for (uint32_t iteration = 0; iteration < iteration_count; iteration++)
+         expected = expected * 3 + 7;
       const uint32_t actual = static_cast<uint32_t *>(mapped)[i];
       if (actual != expected) {
          cleanup();
@@ -524,7 +602,13 @@ main(int argc, char **argv)
    }
 
    cleanup();
-   printf("tu WDDM Vulkan compute probe passed: %s, elements %u, checksum %llu\n", properties.deviceName, kElementCount,
+   printf("tu WDDM Vulkan compute probe passed: %s, elements %u, checksum %llu\n", properties.deviceName, element_count,
           static_cast<unsigned long long>(checksum));
+   if (element_count != kDefaultElementCount || iteration_count != kDefaultIterationCount) {
+      printf(
+         "tu WDDM Vulkan coherence pressure passed: elements %u, iterations %u, bytes %llu, host-cached 1, host-coherent %u\n",
+         element_count, iteration_count, static_cast<unsigned long long>(buffer_size),
+         (memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0 ? 1U : 0U);
+   }
    return 0;
 }

@@ -341,15 +341,22 @@ jobs:
             throw 'Windows platform does not compile the Turnip WSI source'
           }
           $computeProbe = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp' -Raw
-          foreach ($fragment in @('QueueSubmit', 'WaitForFences', 'CmdDispatch', 'MapMemory',
+          foreach ($fragment in @('QueueSubmit', 'WaitForFences', 'ResetFences', 'CmdDispatch', 'MapMemory',
                                   'UINT32_C(0x1000) + i * 5',
-                                  'VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT')) {
+                                  'VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT',
+                                  '--elements', '--iterations', 'kMaxElementCount',
+                                  'maxStorageBufferRange', 'maxComputeWorkGroupCount',
+                                  'VK_MEMORY_PROPERTY_HOST_CACHED_BIT',
+                                  'iteration_count == 1 ? VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT : 0',
+                                  'Vulkan coherence pressure passed')) {
             if ($computeProbe.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
               throw "compute workload probe is missing required operation: $fragment"
             }
           }
           $computeShader = Get-Content -LiteralPath 'src/freedreno/vulkan/tests/tu_wddm_compute.comp' -Raw
-          foreach ($fragment in @('uint seed = data_buffer.values[index]',
+          foreach ($fragment in @('gl_NumWorkGroups.x * gl_WorkGroupSize.x',
+                                  'data_buffer.values.length()',
+                                  'uint seed = data_buffer.values[index]',
                                   'data_buffer.values[index] = seed * 3u + 7u')) {
             if ($computeShader.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
               throw "compute shader is missing CPU-seeded transform: $fragment"
