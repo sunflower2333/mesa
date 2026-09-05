@@ -1,0 +1,228 @@
+name: Windows D3D10 UMD on Zink (ARM64)
+
+# The gallium D3D10 WDDM UMD frontend is winsys-agnostic: it asks its target for
+# one pipe_screen.  Upstream ships only the swrast target, which is what makes
+# libgallium_d3d10.dll a WARP-like software device.  This job builds the zink
+# target instead, so the same frontend renders Direct3D on a Vulkan driver - on
+# the DroidVM guest that is the physical Adreno behind the virtio-gpu Native
+# Context, reached through the Turnip ICD.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/gallium/targets/d3d10umd/**'
+      - 'src/gallium/frontends/d3d10umd/**'
+      - '.github/workflows/windows-d3d10-zink-arm64.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ARM64 D3D10 UMD link (clang-cl, zink)
+    runs-on: windows-2025-vs2026
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC and WDK
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64_arm64
+
+      - name: Verify required SDK/WDK headers
+        shell: pwsh
+        run: |
+          $headers = @('windows.h', 'd3dkmthk.h', 'd3d10umddi.h', 'd3dumddi.h')
+          foreach ($header in $headers) {
+            $found = Get-ChildItem -Path ($env:INCLUDE -split ';') -Filter $header -File -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($null -eq $found) {
+              throw "required SDK/WDK header not found: $header"
+            }
+            Write-Host "$header -> $($found.FullName)"
+          }
+
+      - name: Verify LLVM toolchain
+        shell: pwsh
+        run: |
+          $clang = Get-Command clang-cl.exe -ErrorAction Stop
+          $archiver = Get-Command llvm-lib.exe -ErrorAction Stop
+          Write-Host "clang-cl -> $($clang.Path)"
+          Write-Host "llvm-lib -> $($archiver.Path)"
+          & $clang.Path --version
+
+      - name: Set up Python build tools
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson generators
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade `
+            "meson==1.9.1" mako packaging pyyaml
+
+      - name: Assert the D3D10 target keeps a selectable backend
+        shell: pwsh
+        run: |
+          $target = Get-Content -LiteralPath 'src/gallium/targets/d3d10umd/meson.build' -Raw
+          foreach ($fragment in @(
+              "gallium_d3d10umd_backend == 'zink'",
+              "libgallium_d3d10_screen_src = ['d3d10_zink.c']",
+              "libgallium_d3d10_screen_src = ['d3d10_gdi.c']",
+              "libgallium_d3d10_screen_dep = [driver_swrast]")) {
+            if ($target.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+              throw "d3d10umd target lost its backend selection: $fragment"
+            }
+          }
+          $zink = Get-Content -LiteralPath 'src/gallium/targets/d3d10umd/d3d10_zink.c' -Raw
+          foreach ($fragment in @('zink_create_screen(winsys, NULL)',
+                                  'gdi_create_sw_winsys',
+                                  'd3d10_create_screen')) {
+            if ($zink.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+              throw "zink D3D10 target is missing required wiring: $fragment"
+            }
+          }
+          Write-Host 'D3D10 UMD target keeps swrast the default and zink selectable.'
+
+      - name: Install Windows flex and bison
+        shell: pwsh
+        run: |
+          $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+          $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
+          if ($null -eq $flex -or $null -eq $bison) {
+            $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+            if ($null -ne $winget) {
+              & $winget.Source install --silent --accept-source-agreements --accept-package-agreements `
+                --source winget --exact --id WinFlexBison.win_flex_bison --version 2.5.24
+              if ($LASTEXITCODE -ne 0) {
+                throw "WinFlexBison installation failed with exit code $LASTEXITCODE"
+              }
+            } else {
+              $choco = Get-Command choco.exe -ErrorAction Stop
+              & $choco.Source install winflexbison3 --yes --no-progress
+              if ($LASTEXITCODE -ne 0) {
+                throw "Chocolatey WinFlexBison installation failed with exit code $LASTEXITCODE"
+              }
+            }
+            $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $env:Path = "$machinePath;$userPath;$env:Path"
+            $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+            $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
+          }
+          if ($null -eq $flex -or $null -eq $bison) {
+            throw "WinFlexBison binaries were not found after installation"
+          }
+          $flexItem = Get-Item -LiteralPath $flex.Path -Force
+          $flexBin = Split-Path -Parent $flex.Path
+          if ($flexItem.Target) {
+            $flexBin = Split-Path -Parent ([string]$flexItem.Target)
+          }
+          $env:Path = "$flexBin;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $flexBin
+          Write-Host "win_flex -> $($flex.Path)"
+          Write-Host "win_bison -> $($bison.Path)"
+
+      - name: Configure D3D10 UMD on zink
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-arm64"
+          $installDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-install-arm64"
+          if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+          if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
+          $mesonOptions = @(
+            '--backend=ninja',
+            '--buildtype=release',
+            '-Dplatforms=windows',
+            '-Dgallium-drivers=zink',
+            '-Dvulkan-drivers=[]',
+            '-Dgallium-d3d10umd=true',
+            '-Dgallium-d3d10umd-backend=zink',
+            '-Dgallium-d3d10-dll-name=viogpud3d_zink',
+            '-Dopengl=false',
+            '-Dgles1=disabled',
+            '-Dgles2=disabled',
+            '-Degl=disabled',
+            '-Dglx=disabled',
+            '-Dgbm=disabled',
+            '-Dllvm=disabled',
+            '-Dshader-cache=disabled',
+            '-Dzlib=enabled',
+            '-Dzstd=disabled',
+            '-Db_vscrt=static_from_buildtype',
+            '-Dtools=[]',
+            '-Dbuild-tests=false',
+            '-Dwerror=false',
+            "-Dprefix=$installDir"
+          )
+          $env:CC = 'clang-cl'
+          $env:CXX = 'clang-cl'
+          $env:AR = 'llvm-lib'
+          # Meson must not execute ARM64 sanity binaries on the x64 runner.
+          $crossFile = Join-Path $env:RUNNER_TEMP 'mesa-d3d10-zink-arm64-cross.ini'
+          $crossFileLines = @(
+            '[binaries]'
+            "c = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
+            "cpp = ['clang-cl', '--target=aarch64-pc-windows-msvc']"
+            "ar = 'llvm-lib'"
+            ''
+            '[host_machine]'
+            "system = 'windows'"
+            "cpu_family = 'aarch64'"
+            "cpu = 'arm64'"
+            "endian = 'little'"
+            ''
+            '[properties]'
+            'needs_exe_wrapper = true'
+          )
+          Set-Content -LiteralPath $crossFile -Value $crossFileLines -Encoding ascii
+          $setupArgs = @('setup', $buildDir, '.', '--cross-file', $crossFile) + $mesonOptions
+          & meson @setupArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compile and link the D3D10 UMD
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-arm64"
+          meson compile -C $buildDir --ninja-args=-k0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "viogpud3d_zink.dll" |
+            Select-Object -First 1
+          if ($null -eq $library) {
+            throw "the zink D3D10 target did not produce viogpud3d_zink.dll"
+          }
+          Write-Host "Linked target: $($library.FullName)"
+          $headers = & dumpbin /headers $library.FullName 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the linked target" }
+          if (-not ($headers -match "AA64 machine")) {
+            throw "linked target machine type does not match ARM64"
+          }
+          $exports = & dumpbin /exports $library.FullName 2>&1
+          foreach ($symbol in @('OpenAdapter10', 'OpenAdapter10_2')) {
+            if (-not ($exports -match $symbol)) {
+              throw "the D3D10 UMD must export $symbol"
+            }
+          }
+          Write-Host 'ARM64 D3D10 UMD links and exports its adapter entry points.'
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-arm64"
+          $stage = Join-Path $env:RUNNER_TEMP "d3d10-zink-stage"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Get-ChildItem -Path $buildDir -Recurse -File -Filter "viogpud3d_zink.dll" |
+            Select-Object -First 1 |
+            ForEach-Object { Copy-Item $_.FullName -Destination $stage }
+          Get-ChildItem $stage | ForEach-Object { Write-Host "$($_.Name) $($_.Length)" }
+
+      - name: Upload the ARM64 D3D10 UMD
+        uses: actions/upload-artifact@v4
+        with:
+          name: viogpud3d-zink-arm64
+          path: ${{ runner.temp }}/d3d10-zink-stage
+          if-no-files-found: error

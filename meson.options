@@ -137,6 +137,15 @@ option(
 )
 
 option(
+  'gallium-d3d10umd-backend',
+  type : 'combo',
+  choices : ['swrast', 'zink'],
+  value : 'swrast',
+  description : 'gallium driver behind the D3D10 WDDM UMD. swrast gives a ' +
+                'WARP-like software device; zink renders on a Vulkan driver.',
+)
+
+option(
   'gallium-rusticl',
   type : 'boolean',
   value : false,

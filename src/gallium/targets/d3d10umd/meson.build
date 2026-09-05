@@ -10,9 +10,21 @@ libgallium_d3d10_def = custom_target(
 )
 
 gallium_d3d10_name = get_option('gallium-d3d10-dll-name')
+
+# The frontend asks the target for one pipe_screen through d3d10_create_screen().
+# swrast answers with llvmpipe/softpipe (a WARP-like software device); zink
+# answers with a Vulkan driver, which is what makes this a hardware UMD.
+if gallium_d3d10umd_backend == 'zink'
+  libgallium_d3d10_screen_src = ['d3d10_zink.c']
+  libgallium_d3d10_screen_dep = [driver_zink]
+else
+  libgallium_d3d10_screen_src = ['d3d10_gdi.c']
+  libgallium_d3d10_screen_dep = [driver_swrast]
+endif
+
 libgallium_d3d10 = shared_library(
   gallium_d3d10_name,
-  ['d3d10_gdi.c'],
+  libgallium_d3d10_screen_src,
   vs_module_defs : libgallium_d3d10_def,
   include_directories : [
     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_d3d10umd, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers, inc_winddk
@@ -22,8 +34,8 @@ libgallium_d3d10 = shared_library(
     libgallium, libwsgdi
   ],
   dependencies : [
-    dep_ws2_32, idep_nir, driver_swrast, idep_mesautil
-  ],
+    dep_ws2_32, idep_nir, idep_mesautil
+  ] + libgallium_d3d10_screen_dep,
   name_prefix: '',
   install : true,
 )

@@ -836,9 +836,16 @@ if d3d_drivers_path == ''
 endif
 
 with_gallium_st_d3d10umd =  get_option('gallium-d3d10umd')
+gallium_d3d10umd_backend = get_option('gallium-d3d10umd-backend')
 if with_gallium_st_d3d10umd
-  if not with_gallium_swrast
-    error('The d3d10umd state tracker requires gallium softpipe/llvmpipe.')
+  if gallium_d3d10umd_backend == 'swrast'
+    if not with_gallium_swrast
+      error('The d3d10umd swrast backend requires gallium softpipe/llvmpipe.')
+    endif
+  elif gallium_d3d10umd_backend == 'zink'
+    if not with_gallium_zink
+      error('The d3d10umd zink backend requires -Dgallium-drivers=zink.')
+    endif
   endif
 endif
 
