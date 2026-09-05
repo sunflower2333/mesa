@@ -32,58 +32,78 @@ jobs:
         with:
           arch: x64_arm64
 
-      - name: Locate or install the WDK UMD DDI headers
+      - name: Put the D3D10 UMD DDI headers on a single kit
         shell: pwsh
         run: |
-          # d3d10umddi.h ships in the WDK, not the SDK, so it is not on INCLUDE
-          # after msvc-dev-cmd.  Find the kit that carries it, installing the WDK
-          # first if the image has none, and put that directory on INCLUDE.
-          function Find-UmdHeader {
+          # d3d10umddi.h and d3dkmddi.h ship in the WDK, not the SDK, so they are
+          # not on INCLUDE after msvc-dev-cmd.  They must also all come from ONE
+          # kit: clang keys #pragma once on the resolved file, so a TU that
+          # reaches one kit's d3dkmddi.h and another's redefines DXGK_FEATURE_ID
+          # and every enumerator in it.
+          function Find-Kits {
             $roots = @(
               'C:\Program Files (x86)\Windows Kits\10\Include',
               'C:\Program Files\Windows Kits\10\Include'
             ) | Where-Object { Test-Path $_ }
+            $kits = @()
             foreach ($root in $roots) {
-              $hit = Get-ChildItem -Path $root -Filter 'd3d10umddi.h' -Recurse -File -ErrorAction SilentlyContinue |
-                Sort-Object FullName -Descending | Select-Object -First 1
-              if ($null -ne $hit) { return $hit }
+              foreach ($dir in Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue) {
+                if ((Test-Path (Join-Path $dir.FullName 'um\d3d10umddi.h')) -and
+                    (Test-Path (Join-Path $dir.FullName 'shared\d3dkmddi.h'))) {
+                  $kits += $dir
+                }
+              }
             }
-            return $null
+            return $kits
           }
 
-          $hit = Find-UmdHeader
-          if ($null -eq $hit) {
-            Write-Host 'WDK UMD DDI headers absent; installing the WDK.'
-            $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
-            if ($null -ne $choco) {
-              & $choco.Source install windowsdriverkit11 --yes --no-progress
-            }
-            $hit = Find-UmdHeader
-          }
-          if ($null -eq $hit) {
+          $kits = Find-Kits
+          if ($kits.Count -eq 0) {
+            Write-Host 'No kit carries the UMD DDI headers; installing the WDK.'
             $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
             if ($null -ne $winget) {
               & $winget.Source install --silent --accept-source-agreements --accept-package-agreements `
                 --source winget --exact --id Microsoft.WindowsWDK
             }
-            $hit = Find-UmdHeader
+            $kits = Find-Kits
           }
-          if ($null -eq $hit) {
-            throw 'd3d10umddi.h was not found and the WDK could not be installed'
+          if ($kits.Count -eq 0) {
+            $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+            if ($null -ne $choco) {
+              & $choco.Source install windowsdriverkit11 --yes --no-progress
+            }
+            $kits = Find-Kits
+          }
+          if ($kits.Count -eq 0) {
+            throw 'no Windows kit provides d3d10umddi.h and d3dkmddi.h'
           }
 
-          # The WDK on the image can be an older kit than the SDK msvc-dev-cmd
-          # selected.  Append only the directory that carries the UMD DDI
-          # headers, so every header both kits define still resolves from the
-          # newer SDK - prepending the older kit's shared directory instead made
-          # d3dkmddi.h redefine DXGK_FEATURE_ID against the SDK copy.
-          $umDir = Split-Path -Parent $hit.FullName
-          Write-Host "d3d10umddi.h -> $($hit.FullName)"
-          $newInclude = "$env:INCLUDE;$umDir"
+          # Prefer the kit msvc-dev-cmd already selected; otherwise take the
+          # newest one that is complete, and move every Windows-kit include onto
+          # it so no header can resolve against a second kit.
+          $sdkVersion = ($env:WindowsSDKVersion -replace '\\$', '')
+          $kit = $kits | Where-Object { $_.Name -eq $sdkVersion } | Select-Object -First 1
+          if ($null -eq $kit) {
+            $kit = $kits | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          }
+          Write-Host "SDK selected by msvc-dev-cmd: $sdkVersion"
+          Write-Host "kit carrying the UMD DDI headers: $($kit.Name) -> $($kit.FullName)"
+
+          $kept = @()
+          foreach ($entry in ($env:INCLUDE -split ';')) {
+            if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+            if ($entry -notmatch 'Windows Kits\\10\\Include') { $kept += $entry }
+          }
+          $kitDirs = @()
+          foreach ($leaf in @('shared', 'um', 'ucrt', 'winrt', 'cppwinrt')) {
+            $candidate = Join-Path $kit.FullName $leaf
+            if (Test-Path $candidate) { $kitDirs += $candidate }
+          }
+          $newInclude = (($kitDirs + $kept) -join ';')
           Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$newInclude"
           $env:INCLUDE = $newInclude
 
-          foreach ($header in @('windows.h', 'd3dkmthk.h', 'd3d10umddi.h', 'd3dumddi.h')) {
+          foreach ($header in @('windows.h', 'd3dkmthk.h', 'd3dkmddi.h', 'd3d10umddi.h', 'd3dumddi.h')) {
             $found = Get-ChildItem -Path ($env:INCLUDE -split ';' | Where-Object { $_ -and (Test-Path $_) }) `
               -Filter $header -File -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($null -eq $found) {
