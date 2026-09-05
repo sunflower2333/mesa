@@ -13,6 +13,8 @@ on:
     paths:
       - 'src/gallium/targets/d3d10umd/**'
       - 'src/gallium/frontends/d3d10umd/**'
+      - 'meson.build'
+      - 'meson.options'
       - '.github/workflows/windows-d3d10-zink-arm64.yml'
 
 permissions:
