@@ -163,17 +163,24 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    st_debug_parse();
 
-#if SUPPORT_D3D11
    /*
-    * The D3D11 runtime selects p11DeviceFuncs out of the union and never looks
-    * at the D3D10 table, so publish that one and stop here.
+    * The device function tables share a union, so exactly one of them may be
+    * written.  Everything after the table - the DXGI base functions and the
+    * return value - is common to all of them and must still run.
     */
-   if (pCreateData->Interface == D3D11_0_DDI_INTERFACE_VERSION ||
-       pCreateData->Interface == D3D11_0_7_DDI_INTERFACE_VERSION) {
-      FillDeviceFuncs11(pCreateData->p11DeviceFuncs);
-      return S_OK;
-   }
+#if SUPPORT_D3D11
+   const bool useD3D11Funcs =
+      pCreateData->Interface == D3D11_0_DDI_INTERFACE_VERSION ||
+      pCreateData->Interface == D3D11_0_7_DDI_INTERFACE_VERSION;
+#else
+   const bool useD3D11Funcs = false;
 #endif
+
+   if (useD3D11Funcs) {
+#if SUPPORT_D3D11
+      FillDeviceFuncs11(pCreateData->p11DeviceFuncs);
+#endif
+   } else {
 
    /*
     * Fill in the D3D10 DDI functions
@@ -291,6 +298,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       p10_1DeviceFuncs->pfnCreateBlendState = CreateBlendState1;
       p10_1DeviceFuncs->pfnResourceConvert = ResourceCopy;
       p10_1DeviceFuncs->pfnResourceConvertRegion = ResourceCopyRegion;
+   }
+
    }
 
    /*
