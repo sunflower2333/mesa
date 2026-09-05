@@ -198,6 +198,9 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size);
 #define TU_CS_FAIL_SINK_SIZE 16384
 extern uint32_t tu_cs_fail_sink[TU_CS_FAIL_SINK_SIZE];
 
+void
+tu_cs_report_alloc_failure(const char *where, VkResult result);
+
 static inline void
 tu_cs_fail(struct tu_cs *cs, VkResult result)
 {
@@ -216,9 +219,17 @@ tu_cs_draw_state(struct tu_cs *sub_cs, struct tu_cs *cs, uint32_t size)
 
    VkResult result = tu_cs_alloc(sub_cs, size, 1, &memory);
    if (result != VK_SUCCESS) {
-      /* Freshly declared, nothing owned yet so safe to zero. */
+      /* Freshly declared, nothing owned yet so safe to zero.  Callers do not
+       * check the returned draw state and go on to emit into this cs, which
+       * tu_cs_fail() makes harmless by pointing it at the fail sink.  Those
+       * emit helpers still read cs->device (e.g. for
+       * device->physical_device->info quirks), so the device pointer has to
+       * survive the zeroing or they fault on a NULL deref.
+       */
       memset(cs, 0, sizeof(*cs));
+      cs->device = sub_cs->device;
       tu_cs_fail(cs, result);
+      tu_cs_report_alloc_failure("tu_cs_draw_state", result);
       return (struct tu_draw_state) {};
    }
    tu_cs_init_external(cs, sub_cs->device, memory.map, memory.map + size,

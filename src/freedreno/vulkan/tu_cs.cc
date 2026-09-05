@@ -9,7 +9,25 @@
 #include "tu_rmv.h"
 #include "tu_suballoc.h"
 
+#include "util/log.h"
+#include "util/u_atomic.h"
+
 uint32_t tu_cs_fail_sink[TU_CS_FAIL_SINK_SIZE];
+
+/* Command-stream allocation failures used to be invisible: the stream was
+ * zeroed and emission carried on into the fail sink, so the only symptom was a
+ * later NULL deref.  Log the first few so the failure is attributable.
+ */
+static uint32_t tu_cs_alloc_failures;
+
+void
+tu_cs_report_alloc_failure(const char *where, VkResult result)
+{
+   uint32_t n = p_atomic_inc_return(&tu_cs_alloc_failures);
+   if (n <= 32)
+      mesa_loge("tu_cs: allocation failed in %s (VkResult %d), occurrence %u",
+                where, (int) result, n);
+}
 
 /* There is a limit to IB size supported by HW,
  * which appears to be 0x0fffff.
@@ -357,9 +375,14 @@ tu_cs_begin_sub_stream_aligned(struct tu_cs *cs, uint32_t count,
       cs->start += (size - tu_cs_get_offset(cs)) % size;
    }
    if (result != VK_SUCCESS) {
-      /* Freshly declared, nothing owned yet so safe to zero. */
+      /* Freshly declared, nothing owned yet so safe to zero.  The device
+       * pointer has to survive: callers emit into the failed sub_cs (harmless,
+       * it points at the fail sink) and some emit helpers read sub_cs->device.
+       */
       memset(sub_cs, 0, sizeof(*sub_cs));
+      sub_cs->device = cs->device;
       tu_cs_fail(sub_cs, result);
+      tu_cs_report_alloc_failure("tu_cs_begin_sub_stream_aligned", result);
       return result;
    }
 
