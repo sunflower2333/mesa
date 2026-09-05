@@ -96,63 +96,62 @@ jobs:
         shell: pwsh
         run: |
           # The D3D11 device function table, its capability payloads and the
-          # argument structures that changed from D3D10 are WDK-only and are not
-          # in the Mesa tree.  Print them so the implementation is written
-          # against the exact headers this job compiles with.
+          # argument structures that changed from D3D10 are WDK-only and absent
+          # from the Mesa tree, so the implementation has to be written against
+          # the exact headers this job compiles with.
           $sdkVersion = ($env:WindowsSDKVersion -replace '\\+$', '')
           $kit = "C:\Program Files (x86)\Windows Kits\10\Include\$sdkVersion"
           $umddi = Join-Path $kit 'um\d3d10umddi.h'
           if (-not (Test-Path $umddi)) { throw "d3d10umddi.h not found at $umddi" }
-          $text = Get-Content -LiteralPath $umddi -Raw
-          $lines = $text -split "`r?`n"
+          $lines = Get-Content -LiteralPath $umddi
 
-          function Show-Block([string]$name) {
-            $start = -1
+          function Show-From([string]$pattern, [int]$count) {
             for ($i = 0; $i -lt $lines.Count; $i++) {
-              if ($lines[$i] -match ("(typedef\s+(struct|enum|union).*" + [regex]::Escape($name) + "|" + [regex]::Escape($name) + "\s*$)")) {
-                $start = $i; break
+              if ($lines[$i] -match $pattern) {
+                $a = [Math]::Max(0, $i - 2)
+                $b = [Math]::Min($lines.Count - 1, $i + $count)
+                for ($j = $a; $j -le $b; $j++) { Write-Host $lines[$j] }
+                return
               }
             }
-            if ($start -lt 0) { Write-Host "### $name : not found"; return }
-            $begin = [Math]::Max(0, $start - 3)
-            $depth = 0; $seen = $false
-            for ($j = $begin; $j -lt [Math]::Min($lines.Count, $begin + 160); $j++) {
-              Write-Host $lines[$j]
-              $depth += ([regex]::Matches($lines[$j], '\{')).Count
-              $depth -= ([regex]::Matches($lines[$j], '\}')).Count
-              if (($lines[$j] -match '\{')) { $seen = $true }
-              if ($seen -and $depth -le 0 -and $lines[$j] -match ';') { break }
-            }
-            Write-Host "### end $name"
-            Write-Host ""
+            Write-Host "### pattern not found: $pattern"
           }
 
-          foreach ($n in @('D3D11DDI_THREADING_CAPS',
-                           'D3D11DDI_3DPIPELINESUPPORT_CAPS',
-                           'D3D11DDI_SHADER_CAPS',
-                           'D3D11_1DDI_D3D11_OPTIONS_DATA',
-                           'D3D11_1DDI_ARCHITECTURE_INFO_DATA',
-                           'D3D11DDIARG_CREATERESOURCE',
+          Write-Host '######## CAP PAYLOADS AND ENCODINGS ########'
+          Show-From 'define\s+D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP' 8
+          Write-Host '--------'
+          Show-From 'typedef\s+enum\s+D3D11DDI_3DPIPELINELEVEL' 20
+          Write-Host '--------'
+          $lines | Select-String -Pattern '^\s*#define\s+D3D11DDICAPS_(THREADING|SHADER|COMMANDLISTS)' |
+            ForEach-Object { Write-Host $_.Line.Trim() }
+          Write-Host '--------'
+          Show-From 'typedef\s+struct\s+D3D11_1DDI_D3D11_OPTIONS_DATA' 30
+          Write-Host '--------'
+          Show-From 'typedef\s+struct\s+D3D11_1DDI_ARCHITECTURE_INFO_DATA' 12
+
+          Write-Host '######## CHANGED ARGUMENT STRUCTURES ########'
+          foreach ($n in @('D3D11DDIARG_CREATERESOURCE',
                            'D3D11DDIARG_CREATESHADERRESOURCEVIEW',
                            'D3D11DDIARG_CREATEDEPTHSTENCILVIEW',
                            'D3D10_1_DDI_BLEND_DESC',
-                           'D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT')) {
+                           'D3D10_DDI_RENDER_TARGET_BLEND_DESC1',
+                           'D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT',
+                           'D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY')) {
             Write-Host "==== $n ===="
-            Show-Block $n
+            Show-From ("typedef\s+struct\s+" + [regex]::Escape($n) + "\b") 45
           }
 
-          Write-Host '==== 3D pipeline level constants ===='
-          $lines | Select-String -Pattern 'D3D11DDI_3DPIPELINELEVEL|3DPIPELINELEVEL_' |
-            Select-Object -First 40 | ForEach-Object { Write-Host $_.Line.Trim() }
-
-          Write-Host '==== D3D11DDI_DEVICEFUNCS member list ===='
-          $i0 = ($lines | Select-String -Pattern 'D3D11DDI_DEVICEFUNCS' | Select-Object -First 1).LineNumber
-          if ($i0) {
-            for ($j = $i0 - 4; $j -lt [Math]::Min($lines.Count, $i0 + 400); $j++) {
-              if ($lines[$j] -match 'PFN|pfn') { Write-Host $lines[$j].Trim() }
-              if ($lines[$j] -match 'D3D11DDI_DEVICEFUNCS;') { break }
-            }
+          Write-Host '######## D3D10 EQUIVALENTS FOR COMPARISON ########'
+          foreach ($n in @('D3D10DDIARG_CREATERESOURCE',
+                           'D3D10DDIARG_CREATESHADERRESOURCEVIEW',
+                           'D3D10DDIARG_CREATEDEPTHSTENCILVIEW',
+                           'D3D10_DDI_BLEND_DESC')) {
+            Write-Host "==== $n ===="
+            Show-From ("typedef\s+struct\s+" + [regex]::Escape($n) + "\b") 40
           }
+
+          Write-Host '######## D3D11DDI_DEVICEFUNCS ########'
+          Show-From 'typedef\s+struct\s+D3D11DDI_DEVICEFUNCS' 260
 
       - name: Verify LLVM toolchain
         shell: pwsh
