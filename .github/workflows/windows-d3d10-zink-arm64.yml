@@ -72,10 +72,14 @@ jobs:
             throw 'd3d10umddi.h was not found and the WDK could not be installed'
           }
 
+          # The WDK on the image can be an older kit than the SDK msvc-dev-cmd
+          # selected.  Append only the directory that carries the UMD DDI
+          # headers, so every header both kits define still resolves from the
+          # newer SDK - prepending the older kit's shared directory instead made
+          # d3dkmddi.h redefine DXGK_FEATURE_ID against the SDK copy.
           $umDir = Split-Path -Parent $hit.FullName
-          $sharedDir = Join-Path (Split-Path -Parent $umDir) 'shared'
           Write-Host "d3d10umddi.h -> $($hit.FullName)"
-          $newInclude = "$umDir;$sharedDir;$env:INCLUDE"
+          $newInclude = "$env:INCLUDE;$umDir"
           Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$newInclude"
           $env:INCLUDE = $newInclude
 
