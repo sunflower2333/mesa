@@ -32,13 +32,56 @@ jobs:
         with:
           arch: x64_arm64
 
-      - name: Verify required SDK/WDK headers
+      - name: Locate or install the WDK UMD DDI headers
         shell: pwsh
         run: |
-          $headers = @('windows.h', 'd3dkmthk.h', 'd3d10umddi.h', 'd3dumddi.h')
-          foreach ($header in $headers) {
-            $found = Get-ChildItem -Path ($env:INCLUDE -split ';') -Filter $header -File -ErrorAction SilentlyContinue |
-              Select-Object -First 1
+          # d3d10umddi.h ships in the WDK, not the SDK, so it is not on INCLUDE
+          # after msvc-dev-cmd.  Find the kit that carries it, installing the WDK
+          # first if the image has none, and put that directory on INCLUDE.
+          function Find-UmdHeader {
+            $roots = @(
+              'C:\Program Files (x86)\Windows Kits\10\Include',
+              'C:\Program Files\Windows Kits\10\Include'
+            ) | Where-Object { Test-Path $_ }
+            foreach ($root in $roots) {
+              $hit = Get-ChildItem -Path $root -Filter 'd3d10umddi.h' -Recurse -File -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending | Select-Object -First 1
+              if ($null -ne $hit) { return $hit }
+            }
+            return $null
+          }
+
+          $hit = Find-UmdHeader
+          if ($null -eq $hit) {
+            Write-Host 'WDK UMD DDI headers absent; installing the WDK.'
+            $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+            if ($null -ne $choco) {
+              & $choco.Source install windowsdriverkit11 --yes --no-progress
+            }
+            $hit = Find-UmdHeader
+          }
+          if ($null -eq $hit) {
+            $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+            if ($null -ne $winget) {
+              & $winget.Source install --silent --accept-source-agreements --accept-package-agreements `
+                --source winget --exact --id Microsoft.WindowsWDK
+            }
+            $hit = Find-UmdHeader
+          }
+          if ($null -eq $hit) {
+            throw 'd3d10umddi.h was not found and the WDK could not be installed'
+          }
+
+          $umDir = Split-Path -Parent $hit.FullName
+          $sharedDir = Join-Path (Split-Path -Parent $umDir) 'shared'
+          Write-Host "d3d10umddi.h -> $($hit.FullName)"
+          $newInclude = "$umDir;$sharedDir;$env:INCLUDE"
+          Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$newInclude"
+          $env:INCLUDE = $newInclude
+
+          foreach ($header in @('windows.h', 'd3dkmthk.h', 'd3d10umddi.h', 'd3dumddi.h')) {
+            $found = Get-ChildItem -Path ($env:INCLUDE -split ';' | Where-Object { $_ -and (Test-Path $_) }) `
+              -Filter $header -File -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($null -eq $found) {
               throw "required SDK/WDK header not found: $header"
             }
