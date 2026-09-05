@@ -1011,6 +1011,9 @@ with_gfx_compute = [
   with_clc,
   with_gallium_va and with_video_encode,
   with_gallium_mediafoundation and with_video_encode,
+  # The D3D10 UMD frontend translates shaders through TGSI, which the gallium
+  # auxiliary library only builds under this flag.
+  with_gallium_st_d3d10umd,
 ].contains(true)
 if with_gfx_compute
   pre_args += '-DHAVE_GFX_COMPUTE'
