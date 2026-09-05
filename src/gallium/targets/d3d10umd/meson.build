@@ -16,7 +16,9 @@ gallium_d3d10_name = get_option('gallium-d3d10-dll-name')
 # answers with a Vulkan driver, which is what makes this a hardware UMD.
 if gallium_d3d10umd_backend == 'zink'
   libgallium_d3d10_screen_src = ['d3d10_zink.c']
-  libgallium_d3d10_screen_dep = [driver_zink]
+  # zink reads driconf options, so it needs xmlconfig the same way the wgl
+  # frontend pairs the two.
+  libgallium_d3d10_screen_dep = [driver_zink, idep_xmlconfig]
 else
   libgallium_d3d10_screen_src = ['d3d10_gdi.c']
   libgallium_d3d10_screen_dep = [driver_swrast]

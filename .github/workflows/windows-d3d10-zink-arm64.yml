@@ -120,6 +120,7 @@ jobs:
               "gallium_d3d10umd_backend == 'zink'",
               "libgallium_d3d10_screen_src = ['d3d10_zink.c']",
               "libgallium_d3d10_screen_src = ['d3d10_gdi.c']",
+              'libgallium_d3d10_screen_dep = [driver_zink, idep_xmlconfig]',
               "libgallium_d3d10_screen_dep = [driver_swrast]")) {
             if ($target.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
               throw "d3d10umd target lost its backend selection: $fragment"
