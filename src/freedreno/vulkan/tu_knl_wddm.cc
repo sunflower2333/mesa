@@ -1802,6 +1802,25 @@ tu_wddm_submitqueue_close(struct tu_device *dev, struct tu_queue *queue)
    queue->msm_queue_id = 0;
 }
 
+/* Buffer-object creation failures were previously silent: the caller only saw
+ * VK_ERROR_OUT_OF_DEVICE_MEMORY, which cannot distinguish "the device is out of
+ * memory" from "this backend refuses to track more than
+ * TU_WDDM_MAX_RENDER_ALLOCATIONS live BOs".  Those need very different fixes, so
+ * name the reason for the first few.
+ */
+static uint32_t tu_wddm_bo_failures;
+
+static void
+tu_wddm_report_bo_failure(const char *why, uint32_t live, uint64_t size)
+{
+   uint32_t n = p_atomic_inc_return(&tu_wddm_bo_failures);
+   if (n <= 32)
+      mesa_loge("tu_wddm: BO creation failed (%s), live=%u cap=%u sizeKB=%u, "
+                "occurrence %u",
+                why, live, (unsigned) TU_WDDM_MAX_RENDER_ALLOCATIONS,
+                (unsigned) (size / 1024u), n);
+}
+
 static VkResult
 tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
                 struct tu_bo **out_bo, uint64_t size, uint64_t client_iova,
@@ -1869,7 +1888,12 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
    struct tu_bo *bo = token ? tu_device_lookup_bo(dev, token) : NULL;
    bool added = bo != NULL && tu_wddm_add_bo_locked(dev, bo);
    if (!added) {
+      const uint32_t live = dev->wddm_bo_count;
       mtx_unlock(&dev->bo_mutex);
+      tu_wddm_report_bo_failure(capacity_available
+                                   ? "token/table insert"
+                                   : "live BO cap reached",
+                                live, size);
       vk_free(&dev->vk.alloc, allocation);
       mtx_lock(&dev->vma_mutex);
       util_vma_heap_free(&dev->vma, iova, vma_size);
@@ -1912,6 +1936,8 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
          return vk_device_set_lost(
             &dev->vk, "failed to roll back partial WDDM allocation creation");
       }
+      tu_wddm_report_bo_failure("D3DKMT CreateAllocation", dev->wddm_bo_count,
+                                size);
       vk_free(&dev->vk.alloc, allocation);
       mtx_lock(&dev->vma_mutex);
       util_vma_heap_free(&dev->vma, iova, vma_size);
