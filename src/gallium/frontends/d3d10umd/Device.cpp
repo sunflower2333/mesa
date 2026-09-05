@@ -49,19 +49,19 @@
 #include "util/u_framebuffer.h"
 
 
-static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
+void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
                                 __in struct D3D10DDI_DEVICEFUNCS *pDeviceFunctions);
 static void APIENTRY RelocateDeviceFuncs1(D3D10DDI_HDEVICE hDevice,
                                 __in struct D3D10_1DDI_DEVICEFUNCS *pDeviceFunctions);
-static void APIENTRY Flush(D3D10DDI_HDEVICE hDevice);
-static void APIENTRY CheckFormatSupport(D3D10DDI_HDEVICE hDevice, DXGI_FORMAT Format,
+void APIENTRY Flush(D3D10DDI_HDEVICE hDevice);
+void APIENTRY CheckFormatSupport(D3D10DDI_HDEVICE hDevice, DXGI_FORMAT Format,
                                __out UINT *pFormatCaps);
-static void APIENTRY CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,
+void APIENTRY CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,
                                           DXGI_FORMAT Format,
                                           UINT SampleCount,
                                           __out UINT *pNumQualityLevels);
-static void APIENTRY SetTextFilterSize(D3D10DDI_HDEVICE hDevice, UINT Width, UINT Height);
+void APIENTRY SetTextFilterSize(D3D10DDI_HDEVICE hDevice, UINT Width, UINT Height);
 
 
 /*

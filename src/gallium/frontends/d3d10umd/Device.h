@@ -41,4 +41,21 @@ SIZE_T APIENTRY CalcPrivateDeviceSize(D3D10DDI_HADAPTER hAdapter,
 HRESULT APIENTRY CreateDevice(D3D10DDI_HADAPTER hAdapter,
                      __in D3D10DDIARG_CREATEDEVICE *pCreateData);
 
+/*
+ * Shared with the D3D11 device function table, which publishes the same
+ * implementations.
+ */
+void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
+
+void APIENTRY Flush(D3D10DDI_HDEVICE hDevice);
+
+void APIENTRY CheckFormatSupport(D3D10DDI_HDEVICE hDevice, DXGI_FORMAT Format,
+                                 __out UINT *pFormatCaps);
+
+void APIENTRY CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,
+                                            DXGI_FORMAT Format, UINT SampleCount,
+                                            __out UINT *pNumQualityLevels);
+
+void APIENTRY SetTextFilterSize(D3D10DDI_HDEVICE hDevice, UINT Width, UINT Height);
+
 #endif   /* DEVICE_H */

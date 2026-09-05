@@ -242,16 +242,26 @@ Translate11StreamOutputDecl(const D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTP
    memset(pOut, 0, sizeof *pOut);
    pOut->pShaderCode = pIn->pShaderCode;
    pOut->pOutputStreamDecl = pEntries;
-   pOut->NumEntries = MIN2(pIn->NumEntries, MaxEntries);
-   pOut->pBufferStrides = pIn->pBufferStrides;
-   pOut->NumStrides = pIn->NumStrides;
-   pOut->RasterizedStream = pIn->RasterizedStream;
 
-   for (UINT i = 0; i < pOut->NumEntries; ++i) {
-      pEntries[i].OutputSlot     = pIn->pOutputStreamDecl[i].OutputSlot;
-      pEntries[i].RegisterIndex  = pIn->pOutputStreamDecl[i].RegisterIndex;
-      pEntries[i].RegisterMask   = pIn->pOutputStreamDecl[i].RegisterMask;
+   /*
+    * D3D10 has a single stream and one stride; D3D11 has several of each.
+    * Below 11_0 only stream zero can be declared, so take its entries and its
+    * stride and drop the rest.
+    */
+   UINT written = 0;
+   for (UINT i = 0; i < pIn->NumEntries && written < MaxEntries; ++i) {
+      if (pIn->pOutputStreamDecl[i].Stream != 0) {
+         LOG_UNSUPPORTED_ENTRYPOINT();
+         continue;
+      }
+      pEntries[written].OutputSlot    = pIn->pOutputStreamDecl[i].OutputSlot;
+      pEntries[written].RegisterIndex = pIn->pOutputStreamDecl[i].RegisterIndex;
+      pEntries[written].RegisterMask  = pIn->pOutputStreamDecl[i].RegisterMask;
+      ++written;
    }
+   pOut->NumEntries = written;
+   pOut->StreamOutputStrideInBytes =
+      pIn->NumStrides > 0 ? pIn->BufferStridesInBytes[0] : 0;
 }
 
 #define D3D11_SO_MAX_ENTRIES 128
