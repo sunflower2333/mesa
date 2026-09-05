@@ -30,6 +30,8 @@
  *    State declarations.
  */
 
+#ifndef STATE_H
+#define STATE_H
 
 #include "DriverIncludes.h"
 #include "util/u_hash_table.h"
@@ -408,3 +410,5 @@ CastPipeQuery(D3D10DDI_HQUERY hQuery)
    Query *pQuery = CastQuery(hQuery);
    return pQuery ? pQuery->handle : NULL;
 }
+
+#endif /* STATE_H */
