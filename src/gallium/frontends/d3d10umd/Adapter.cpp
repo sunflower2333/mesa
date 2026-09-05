@@ -209,7 +209,43 @@ GetCaps(D3D10DDI_HADAPTER hAdapter,
         const D3D10_2DDIARG_GETCAPS *pData)
 {
    LOG_ENTRYPOINT();
+
+   if (pData == NULL || (pData->DataSize != 0 && pData->pData == NULL)) {
+      return E_INVALIDARG;
+   }
+   if (pData->DataSize == 0) {
+      return S_OK;
+   }
+
    memset(pData->pData, 0, pData->DataSize);
+
+#if SUPPORT_D3D11
+   /*
+    * Zero is the right answer for every optional capability here, but not for
+    * the pipeline levels: a zeroed D3D11DDI_3DPIPELINESUPPORT_CAPS says this
+    * driver supports none, and the runtime then cannot settle on a feature
+    * level and fails device creation outright.
+    *
+    * Report what the D3D11 table below this actually implements.  The
+    * tessellation, compute, unordered access and indirect draw entries are
+    * present but unimplemented, and the runtime does not reach them below
+    * 11_0, so 10_1 is the ceiling until they are written.
+    */
+   if (pData->Type == D3D11DDICAPS_3DPIPELINESUPPORT) {
+      if (pData->DataSize != sizeof(D3D11DDI_3DPIPELINESUPPORT_CAPS)) {
+         return E_INVALIDARG;
+      }
+      D3D11DDI_3DPIPELINESUPPORT_CAPS *pCaps =
+         (D3D11DDI_3DPIPELINESUPPORT_CAPS *)pData->pData;
+      pCaps->Caps =
+         D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_0) |
+         D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_1) |
+         D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11_1DDI_3DPIPELINELEVEL_9_1) |
+         D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11_1DDI_3DPIPELINELEVEL_9_2) |
+         D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11_1DDI_3DPIPELINELEVEL_9_3);
+   }
+#endif
+
    return S_OK;
 }
 

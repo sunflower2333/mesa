@@ -11,6 +11,7 @@ libd3d10umd = static_library(
     'Adapter.cpp',
     'Debug.cpp',
     'Device.cpp',
+    'DeviceD3D11.cpp',
     'Draw.cpp',
     'DxgiFns.cpp',
     'Format.cpp',

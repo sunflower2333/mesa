@@ -136,7 +136,10 @@ jobs:
                            'D3D10_1_DDI_BLEND_DESC',
                            'D3D10_DDI_RENDER_TARGET_BLEND_DESC1',
                            'D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT',
-                           'D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY')) {
+                           'D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY',
+                           'D3D10DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT',
+                           'D3D10DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY',
+                           'D3D10_1DDIARG_CREATESHADERRESOURCEVIEW')) {
             Write-Host "==== $n ===="
             Show-From ("typedef\s+struct\s+" + [regex]::Escape($n) + "\b") 45
           }

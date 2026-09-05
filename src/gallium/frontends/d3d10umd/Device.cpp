@@ -31,6 +31,7 @@
  */
 
 
+#include "DeviceD3D11.h"
 #include "Draw.h"
 #include "DxgiFns.h"
 #include "InputAssembly.h"
@@ -118,6 +119,10 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    case D3D10_1_x_DDI_INTERFACE_VERSION:
    case D3D10_1_7_DDI_INTERFACE_VERSION:
 #endif
+#if SUPPORT_D3D11
+   case D3D11_0_DDI_INTERFACE_VERSION:
+   case D3D11_0_7_DDI_INTERFACE_VERSION:
+#endif
       break;
    default:
       DebugPrintf("%s: unsupported interface version 0x%08x\n",
@@ -157,6 +162,18 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    }
 
    st_debug_parse();
+
+#if SUPPORT_D3D11
+   /*
+    * The D3D11 runtime selects p11DeviceFuncs out of the union and never looks
+    * at the D3D10 table, so publish that one and stop here.
+    */
+   if (pCreateData->Interface == D3D11_0_DDI_INTERFACE_VERSION ||
+       pCreateData->Interface == D3D11_0_7_DDI_INTERFACE_VERSION) {
+      FillDeviceFuncs11(pCreateData->p11DeviceFuncs);
+      return S_OK;
+   }
+#endif
 
    /*
     * Fill in the D3D10 DDI functions
