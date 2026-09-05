@@ -57,9 +57,13 @@ jobs:
             return $kits
           }
 
+          $sdkVersion = ($env:WindowsSDKVersion -replace '\\+$', '')
           $kits = Find-Kits
-          if ($kits.Count -eq 0) {
-            Write-Host 'No kit carries the UMD DDI headers; installing the WDK.'
+          # A kit matching the SDK msvc-dev-cmd selected is worth installing for:
+          # DXGK_FEATURE_ID moved between headers across kits, so an older WDK
+          # beside a newer SDK cannot be reconciled by include order.
+          if (-not ($kits | Where-Object { $_.Name -eq $sdkVersion })) {
+            Write-Host "No WDK for $sdkVersion; trying to install one."
             $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
             if ($null -ne $winget) {
               & $winget.Source install --silent --accept-source-agreements --accept-package-agreements `
@@ -81,7 +85,6 @@ jobs:
           # Prefer the kit msvc-dev-cmd already selected; otherwise take the
           # newest one that is complete, and move every Windows-kit include onto
           # it so no header can resolve against a second kit.
-          $sdkVersion = ($env:WindowsSDKVersion -replace '\\$', '')
           $kit = $kits | Where-Object { $_.Name -eq $sdkVersion } | Select-Object -First 1
           if ($null -eq $kit) {
             $kit = $kits | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
@@ -92,7 +95,10 @@ jobs:
           $kept = @()
           foreach ($entry in ($env:INCLUDE -split ';')) {
             if ([string]::IsNullOrWhiteSpace($entry)) { continue }
-            if ($entry -notmatch 'Windows Kits\\10\\Include') { $kept += $entry }
+            # msvc-dev-cmd emits some entries with doubled separators
+            # ("Windows Kits\10\\include\..."), so a separator-exact pattern
+            # silently keeps them and the build ends up spanning two kits.
+            if ($entry -notlike '*Windows Kits*') { $kept += $entry }
           }
           $kitDirs = @()
           foreach ($leaf in @('shared', 'um', 'ucrt', 'winrt', 'cppwinrt')) {
