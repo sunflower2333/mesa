@@ -244,6 +244,8 @@ bool util_barrier_wait(util_barrier *barrier)
       do {
          cnd_wait(&barrier->condvar, &barrier->mutex);
       } while (sequence == barrier->sequence);
+      mtx_unlock(&barrier->mutex);
+      return false;
    } else {
       barrier->waiters = 0;
       barrier->sequence++;
@@ -252,6 +254,10 @@ bool util_barrier_wait(util_barrier *barrier)
 
    mtx_unlock(&barrier->mutex);
 
+   /* Report the serial thread the way pthread_barrier_wait() does: exactly one
+    * thread gets true.  Returning true from every thread made callers that use
+    * the return value to elect a single thread - util_queue_finish_execute()
+    * did - run their "one thread only" work on all of them. */
    return true;
 }
 

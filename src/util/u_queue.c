@@ -522,8 +522,18 @@ static void
 util_queue_finish_execute(void *data, void *gdata, int num_thread)
 {
    util_barrier *barrier = data;
-   if (util_barrier_wait(barrier))
-      util_barrier_destroy(barrier);
+   /* Do not destroy the barrier here.  This used to be
+    * "if (util_barrier_wait(barrier)) util_barrier_destroy(barrier);", which
+    * relies on pthread_barrier_wait() returning PTHREAD_BARRIER_SERIAL_THREAD
+    * for exactly one thread.  The portable fallback in u_thread.c has no such
+    * distinguished thread, so on platforms without pthread barriers - Windows -
+    * every thread destroyed the same barrier, and the ones that lost the race
+    * then used an already-destroyed mutex and condition variable.
+    *
+    * util_queue_finish() waits for every job's fence before it returns, so by
+    * then all threads have left the barrier and the caller can destroy it
+    * safely.  That is where the destroy now lives. */
+   util_barrier_wait(barrier);
 }
 
 void
@@ -728,6 +738,9 @@ util_queue_finish(struct util_queue *queue)
       util_queue_fence_wait(&fences[i]);
       util_queue_fence_destroy(&fences[i]);
    }
+
+   /* Every job has completed, so every thread has left the barrier. */
+   util_barrier_destroy(&barrier);
 
    free(fences);
 }
