@@ -27,6 +27,12 @@ static constexpr uint32_t TU_WDDM_CREATE_BUSY_RETRIES = 1000;
 static constexpr NTSTATUS TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY =
    static_cast<NTSTATUS>(0xc01e0102L);
 static constexpr uint32_t TU_WDDM_DESTROY_BUSY_RETRIES = 1000;
+/* Retiring this context's submissions before a destroy is an optimisation, not a
+ * correctness requirement - AssumeNotInUse is never claimed, so VidMm decides.
+ * It must therefore be bounded: a fence that never retires, which is exactly
+ * what happens after a fault or an adapter reset, must not hang the caller
+ * forever.  The busy-retry loop below absorbs the rest. */
+static constexpr uint64_t TU_WDDM_DESTROY_WAIT_TIMEOUT_NS = UINT64_C(250000000);
 
 void
 tu_wddm_diag(const char *format, ...)
@@ -1001,18 +1007,18 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
                 static_cast<unsigned>(allocation->locked));
 
    D3DKMT_HANDLE handle = allocation->handle;
-   /* Retiring this context's submissions first is still worth doing - it keeps
-    * the common case off the retry path - but it is not a proof of idleness, so
-    * no AssumeNotInUse claim is made from it.  A zero fence only means this
-    * context recorded no submission, and the escape-visible fence leads VidMm's
-    * own accounting in any case; see tu_wddm_destroy_allocation_handle(). */
-   if (!tu_wddm_context_wait_submissions(allocation->context, UINT64_MAX)) {
-      allocation->last_destroy_status =
-         static_cast<uint32_t>(TU_WDDM_STATUS_DEVICE_BUSY);
-      tu_wddm_diag("allocation_destroy waiting submissions failed allocation=%u fence=%u",
+   /* Retiring this context's submissions first keeps the common case off the
+    * retry path, but it is neither a proof of idleness nor a precondition: no
+    * AssumeNotInUse claim is made from it, so VidMm decides.  The wait is
+    * therefore bounded and its result is advisory - a fence that never retires
+    * must not hang the caller, and the destroy is attempted either way.  An
+    * unbounded wait here is what hung the fake-dispatch fixture. */
+   if (!tu_wddm_context_wait_submissions(allocation->context,
+                                         TU_WDDM_DESTROY_WAIT_TIMEOUT_NS)) {
+      tu_wddm_diag("allocation_destroy submissions did not retire in time allocation=%u fence=%u"
+                   " - destroying anyway, VidMm arbitrates",
                    static_cast<unsigned>(allocation->handle),
                    allocation->context->last_submitted_fence);
-      return false;
    }
 
    /* VidMm may still hold a reference from a completion it has not processed

@@ -163,7 +163,7 @@ def main() -> int:
     require_order(
         bo_destroy,
         (
-            "tu_wddm_context_wait_submissions(allocation->context,UINT64_MAX)",
+            "tu_wddm_context_wait_submissions(allocation->context,TU_WDDM_DESTROY_WAIT_TIMEOUT_NS)",
             "for(uint32_tattempt=0;attempt<=TU_WDDM_DESTROY_BUSY_RETRIES;attempt++)",
             "tu_wddm_destroy_allocation_handle(allocation->context,handle)",
             "status!=TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY",
