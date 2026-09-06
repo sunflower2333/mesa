@@ -43,6 +43,9 @@
 #include "State.h"
 #include "Format.h"
 
+/* OS_TIMEOUT_INFINITE for the fenced flush in DestroyDevice(). */
+#include "util/os_time.h"
+
 #include "Debug.h"
 
 #include "util/u_sampler.h"
@@ -351,7 +354,29 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
-   pipe->flush(pipe, NULL, 0);
+   /* Flush with a fence and wait for it.  An unfenced flush only submits: it
+    * does not wait, and this driver hands work to a util_queue worker thread,
+    * so returning here leaves that thread running while everything below tears
+    * the context down and frees the structures the queue lives in.  The worker
+    * then wakes on freed memory.
+    *
+    * That is a live defect, not a theoretical one.  A full-heap dump of the
+    * D3D11 probe crashing on this guest resolves to
+    *
+    *   _endthreadex -> util_queue_finish -> util_barrier_wait -> cnd_wait
+    *                -> util_queue_finish -> _free_base
+    *
+    * faulting on a read of a synchronisation object at offset 0x24 from a NULL
+    * base - util_queue_finish() parked on a condition variable whose memory was
+    * being freed underneath it.  Waiting for the fence retires every queued
+    * submission before any of it is destroyed. */
+   struct pipe_fence_handle *fence = NULL;
+   pipe->flush(pipe, &fence, 0);
+   if (fence) {
+      struct pipe_screen *screen = pipe->screen;
+      screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
+      screen->fence_reference(screen, &fence, NULL);
+   }
 
    for (i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
       pipe_so_target_reference(&pDevice->so_targets[i], NULL);
