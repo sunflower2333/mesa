@@ -249,6 +249,14 @@ jobs:
           $mesonOptions = @(
             '--backend=ninja',
             '--buildtype=release',
+            # meson does NOT imply NDEBUG from buildtype, so without this the
+            # shipped UMD keeps every assert() and unreachable() live.  A failed
+            # assert calls abort(), and abort() inside a D3D user-mode driver
+            # takes down whatever loaded it - on this guest that is dwm.exe,
+            # which then crash-loops (70 faults in the first 50 seconds of
+            # uptime, __fastfail(FAST_FAIL_FATAL_APP_EXIT) from the CRT abort).
+            # A user-mode driver must never abort its host process.
+            '-Db_ndebug=true',
             '-Dplatforms=windows',
             '-Dgallium-drivers=zink',
             '-Dvulkan-drivers=[]',
