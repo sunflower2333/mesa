@@ -21,6 +21,7 @@
  */
 
 #include <windows.h>
+#include <winternl.h>   /* UNICODE_STRING, NTSTATUS */
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <stdio.h>
@@ -231,8 +232,14 @@ main(void)
 
    for (UINT i = 0;; i++) {
       IDXGIAdapter1 *adapter = NULL;
-      if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND)
+      /* Break on any failure, not just DXGI_ERROR_NOT_FOUND: on any other error
+       * adapter is left null and would be dereferenced below. */
+      HRESULT ehr = factory->EnumAdapters1(i, &adapter);
+      if (FAILED(ehr) || adapter == NULL) {
+         if (ehr != DXGI_ERROR_NOT_FOUND)
+            printf("EnumAdapters1(%u) hr=0x%08lX\n", i, (unsigned long)ehr);
          break;
+      }
 
       DXGI_ADAPTER_DESC1 desc = {};
       adapter->GetDesc1(&desc);
