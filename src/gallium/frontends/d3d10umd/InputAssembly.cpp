@@ -121,8 +121,6 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
                    __in_ecount (NumBuffers) const UINT *pStrides,                // IN
                    __in_ecount (NumBuffers) const UINT *pOffsets)                // IN
 {
-   static const float dummy[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
@@ -153,25 +151,41 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
          pipe_resource_reference(&vb->buffer.resource, resource);
       }
       else {
+         /* An unbound slot must be represented as a null resource, not as a
+          * user buffer pointing at `dummy`.  pipe_vertex_buffer::buffer is a
+          * union, so buffer.user and buffer.resource are the same storage: a
+          * driver that tests buffer.resource sees the address of `dummy`, which
+          * is a function-local `static const float[4]` living in .rdata, and
+          * treats read-only constant data as a pipe_resource.  Zink does exactly
+          * that in zink_set_vertex_buffers_internal() and writes
+          * res->vbo_bind_mask through it, which faults 0xC0000005 writing to a
+          * read-only section and takes down whatever loaded this UMD.
+          *
+          * Nothing may legally read an unbound slot, so the dummy pointer bought
+          * nothing.  A null resource is the representation drivers expect and it
+          * makes them disable the slot. */
          pDevice->vertex_strides[StartBuffer + i] = 0;
          vb->buffer_offset = 0;
-         if (!vb->is_user_buffer) {
+         if (!vb->is_user_buffer)
             pipe_resource_reference(&vb->buffer.resource, NULL);
-            vb->is_user_buffer = true;
-         }
-         vb->buffer.user = dummy;
+         vb->is_user_buffer = false;
+         vb->buffer.resource = NULL;
       }
    }
 
    for (i = 0; i < PIPE_MAX_ATTRIBS; ++i) {
       struct pipe_vertex_buffer *vb = &pDevice->vertex_buffers[i];
 
-      /* XXX this is odd... */
-      if (!vb->is_user_buffer && !vb->buffer.resource) {
+      /* Normalise any slot still described as a user buffer into a plain
+       * unbound slot, for the reason above.  This frontend creates its cso
+       * context with CSO_NO_VBUF, so there is no u_vbuf to translate a user
+       * buffer into a real one - whatever is put here reaches the driver
+       * verbatim. */
+      if (vb->is_user_buffer) {
          pDevice->vertex_strides[i] = 0;
          vb->buffer_offset = 0;
-         vb->is_user_buffer = true;
-         vb->buffer.user = dummy;
+         vb->is_user_buffer = false;
+         vb->buffer.resource = NULL;
       }
    }
 
