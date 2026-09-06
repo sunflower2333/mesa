@@ -301,6 +301,17 @@ jobs:
             ''
             '[properties]'
             'needs_exe_wrapper = true'
+            ''
+            '[built-in options]'
+            # clang-cl needs /Zi to emit debug info and lld-link needs /DEBUG to
+            # write the PDB; meson's debug=true supplies the former but not the
+            # latter for this cross setup, so the link step produced no symbols
+            # at all.  Setting them here keeps the command line free for the
+            # normal options.
+            "c_args = ['/Zi']"
+            "cpp_args = ['/Zi']"
+            "c_link_args = ['/DEBUG']"
+            "cpp_link_args = ['/DEBUG']"
           )
           Set-Content -LiteralPath $crossFile -Value $crossFileLines -Encoding ascii
           $setupArgs = @('setup', $buildDir, '.', '--cross-file', $crossFile) + $mesonOptions
@@ -345,13 +356,18 @@ jobs:
           # can only be reported as viogpud3d.dll+0xRVA, and every frame has to be
           # recovered by hand from .pdata and string attribution.  The guest cannot
           # run a symbol server, so the symbols have to travel with the build.
-          $pdb = Get-ChildItem -Path $buildDir -Recurse -File -Filter "viogpud3d_zink.pdb" |
+          $pdb = Get-ChildItem -Path $buildDir -Recurse -File -Include '*.pdb' |
+            Where-Object { $_.Name -like 'viogpud3d_zink*' } |
             Select-Object -First 1
           if ($null -ne $pdb) {
-            Copy-Item $pdb.FullName -Destination $stage
-            Write-Host "Staged symbols: $($pdb.FullName)"
+            Copy-Item $pdb.FullName -Destination (Join-Path $stage 'viogpud3d_zink.pdb')
+            Write-Host "Staged symbols: $($pdb.FullName) ($($pdb.Length) bytes)"
           } else {
-            Write-Host 'WARNING: no viogpud3d_zink.pdb produced; crashes will not symbolicate'
+            Write-Host 'WARNING: no viogpud3d_zink pdb produced; crashes will not symbolicate'
+            Write-Host 'pdb files anywhere in the build tree:'
+            Get-ChildItem -Path $buildDir -Recurse -File -Include '*.pdb' |
+              Select-Object -First 20 |
+              ForEach-Object { Write-Host "  $($_.FullName) $($_.Length)" }
           }
           Get-ChildItem $stage | ForEach-Object { Write-Host "$($_.Name) $($_.Length)" }
 
