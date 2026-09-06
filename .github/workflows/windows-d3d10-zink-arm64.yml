@@ -257,6 +257,9 @@ jobs:
             # uptime, __fastfail(FAST_FAIL_FATAL_APP_EXIT) from the CRT abort).
             # A user-mode driver must never abort its host process.
             '-Db_ndebug=true',
+            # emit debug symbols even for the release build, so a crash in the
+            # shipped UMD can be symbolicated instead of hand-attributed
+            '-Ddebug=true',
             '-Dplatforms=windows',
             '-Dgallium-drivers=zink',
             '-Dvulkan-drivers=[]',
@@ -338,6 +341,18 @@ jobs:
           Get-ChildItem -Path $buildDir -Recurse -File -Filter "viogpud3d_zink.dll" |
             Select-Object -First 1 |
             ForEach-Object { Copy-Item $_.FullName -Destination $stage }
+          # Ship the PDB alongside the DLL.  Without it a crash in the shipped UMD
+          # can only be reported as viogpud3d.dll+0xRVA, and every frame has to be
+          # recovered by hand from .pdata and string attribution.  The guest cannot
+          # run a symbol server, so the symbols have to travel with the build.
+          $pdb = Get-ChildItem -Path $buildDir -Recurse -File -Filter "viogpud3d_zink.pdb" |
+            Select-Object -First 1
+          if ($null -ne $pdb) {
+            Copy-Item $pdb.FullName -Destination $stage
+            Write-Host "Staged symbols: $($pdb.FullName)"
+          } else {
+            Write-Host 'WARNING: no viogpud3d_zink.pdb produced; crashes will not symbolicate'
+          }
           Get-ChildItem $stage | ForEach-Object { Write-Host "$($_.Name) $($_.Length)" }
 
       - name: Upload the ARM64 D3D10 UMD
