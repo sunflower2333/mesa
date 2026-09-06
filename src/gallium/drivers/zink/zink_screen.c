@@ -1576,17 +1576,19 @@ zink_destroy_screen(struct pipe_screen *pscreen)
       }
    }
 
-   /* Drain and join the flush queue before anything its jobs touch is torn
-    * down.  This has to happen here, not further below: the batch states,
-    * semaphores and fences destroyed in the rest of this function are exactly
-    * what queued submits reference, and util_queue_destroy() kills its threads
-    * rather than draining them, so a worker could wake on freed memory.  Note
-    * the two cache queues below already follow the finish-then-destroy pattern;
-    * the flush queue did not, and was additionally destroyed last. */
-   if (util_queue_is_initialized(&screen->flush_queue)) {
+   /* Drain the flush queue before anything its in-flight jobs reference is torn
+    * down.  util_queue_destroy() kills its threads rather than draining them,
+    * and the queue was previously only destroyed at the very end of this
+    * function - after the batch states, semaphores and fences that queued
+    * submits reference had already been freed - so a worker could wake on freed
+    * memory.  The two cache queues below already finish before they destroy;
+    * the flush queue did not.
+    *
+    * Only finish here, do not destroy: teardown below this point still submits
+    * through the queue (the copy context and the batch states both can), so it
+    * has to stay alive.  The destroy stays at the end of the function. */
+   if (util_queue_is_initialized(&screen->flush_queue))
       util_queue_finish(&screen->flush_queue);
-      util_queue_destroy(&screen->flush_queue);
-   }
 
 #if HAVE_RENDERDOC_INTEGRATION
    if (screen->renderdoc_capture_all && p_atomic_dec_zero(&num_screens))
@@ -1650,6 +1652,9 @@ zink_destroy_screen(struct pipe_screen *pscreen)
 
    if (screen->fence)
       VKSCR(DestroyFence)(screen->dev, screen->fence, NULL);
+
+   if (util_queue_is_initialized(&screen->flush_queue))
+      util_queue_destroy(&screen->flush_queue);
 
    while (util_dynarray_contains(&screen->semaphores, VkSemaphore))
       VKSCR(DestroySemaphore)(screen->dev, util_dynarray_pop(&screen->semaphores, VkSemaphore), NULL);
