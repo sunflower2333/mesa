@@ -31,8 +31,12 @@ static constexpr uint32_t TU_WDDM_DESTROY_BUSY_RETRIES = 1000;
 void
 tu_wddm_diag(const char *format, ...)
 {
-   const char *enabled = getenv("TU_WDDM_DIAGNOSTICS");
-   if (format == NULL || enabled == NULL || enabled[0] != '1' || enabled[1] != '\0')
+   /* GetEnvironmentVariableA, not getenv(): this transport is compiled with
+    * /W4 /WX and MSVC deprecates getenv as C4996, which fails the build. */
+   char enabled[4] = {};
+   const DWORD enabled_len =
+      GetEnvironmentVariableA("TU_WDDM_DIAGNOSTICS", enabled, sizeof(enabled));
+   if (format == NULL || enabled_len != 1 || enabled[0] != '1')
       return;
 
    va_list args;
