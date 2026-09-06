@@ -343,6 +343,32 @@ jobs:
           }
           Write-Host 'ARM64 D3D10 UMD links and exports its adapter entry points.'
 
+      - name: Build the native ARM64 D3D11 feature-level probe
+        shell: pwsh
+        run: |
+          # Every D3D measurement against this driver has to be taken in a native
+          # ARM64 process.  A .NET harness built with Framework64\csc.exe runs as
+          # emulated x64, and since this driver publishes no UserModeDriverNameWow
+          # such a process can only ever get DXGI_ERROR_UNSUPPORTED with no UMD
+          # loaded - which reads exactly like an adapter-level refusal and is not
+          # one.  Building the probe here keeps a native binary alongside the UMD
+          # it is meant to exercise.
+          $probeDir = Join-Path $env:RUNNER_TEMP "d3d11-fl-probe"
+          New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+          $src = 'src/gallium/targets/d3d10umd/tests/d3d11_fl_probe.cpp'
+          if (-not (Test-Path $src)) { throw "probe source is missing: $src" }
+          $exe = Join-Path $probeDir 'd3d11_fl_probe.exe'
+          & clang-cl --target=aarch64-pc-windows-msvc /std:c++17 /EHsc /W3 /Zi `
+            $src /Fe:$exe /Fo:$probeDir\ /link /DEBUG d3d11.lib dxgi.lib
+          if ($LASTEXITCODE -ne 0) { throw "the D3D11 probe did not compile" }
+          if (-not (Test-Path $exe)) { throw "the D3D11 probe did not link" }
+          $headers = & dumpbin /headers $exe 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the probe" }
+          if (-not ($headers -match "AA64 machine")) {
+            throw "the probe must be ARM64; an emulated x64 probe cannot measure this driver"
+          }
+          Write-Host "Native ARM64 probe: $exe"
+
       - name: Stage artifact
         shell: pwsh
         run: |
@@ -368,6 +394,14 @@ jobs:
             Get-ChildItem -Path $buildDir -Recurse -File -Include '*.pdb' |
               Select-Object -First 20 |
               ForEach-Object { Write-Host "  $($_.FullName) $($_.Length)" }
+          }
+          $probe = Join-Path $env:RUNNER_TEMP "d3d11-fl-probe\d3d11_fl_probe.exe"
+          if (Test-Path $probe) {
+            Copy-Item $probe -Destination $stage
+            $probePdb = Join-Path $env:RUNNER_TEMP "d3d11-fl-probe\d3d11_fl_probe.pdb"
+            if (Test-Path $probePdb) { Copy-Item $probePdb -Destination $stage }
+          } else {
+            throw "the native ARM64 D3D11 probe was not built"
           }
           Get-ChildItem $stage | ForEach-Object { Write-Host "$($_.Name) $($_.Length)" }
 
