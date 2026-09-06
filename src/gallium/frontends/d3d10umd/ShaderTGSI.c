@@ -1855,6 +1855,27 @@ Shader_tgsi_translate(const unsigned *code,
          assert(res_index < SHADER_MAX_RESOURCES);
 
          target = translate_resource_dimension(opcode.specific.dcl_resource_dimension);
+         if (target == TGSI_TEXTURE_UNKNOWN) {
+            /* tgsi_to_nir() has no case for TGSI_TEXTURE_UNKNOWN: its texture
+             * target switch ends in fprintf + abort(), so emitting this target
+             * terminates whatever loaded the UMD - in the Windows guest that is
+             * dwm.exe, which then crash-loops.  A user-mode driver must never
+             * abort its host process.
+             *
+             * Returning NULL here is not an option: every Shader_tgsi_translate
+             * caller in Shader.cpp hands state.tokens straight to
+             * pipe->create_*_state without a NULL check, so that would only
+             * trade an abort for a null dereference.  Substitute a target the
+             * translator accepts and name the D3D dimension that is missing a
+             * mapping, so the shader is merely wrong instead of fatal and the
+             * gap is visible. */
+            DebugPrintf("%s: unmapped D3D resource dimension %u on resource %u; "
+                        "substituting TGSI_TEXTURE_2D\n",
+                        __func__,
+                        (unsigned)opcode.specific.dcl_resource_dimension,
+                        res_index);
+            target = TGSI_TEXTURE_2D;
+         }
          sx.resources[res_index].target = target;
          if (!(st_debug & ST_DEBUG_OLD_TEX_OPS)) {
             sx.sv[res_index] =
