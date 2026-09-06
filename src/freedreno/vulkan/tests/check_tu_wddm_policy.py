@@ -151,31 +151,35 @@ def main() -> int:
         destroy_kmt,
         (
             "D3DKMT_DESTROYALLOCATION2destroy={};",
-            "destroy.Flags.AssumeNotInUse=proven_not_in_use?1:0;",
+            "destroy.Flags.AssumeNotInUse=0;",
             "dispatch.DestroyAllocation2(&destroy)",
         ),
-        "WDDM allocation teardown must go only through DestroyAllocation2 and must carry the caller's proof, "
-        "never an unconditional AssumeNotInUse",
+        "WDDM allocation teardown must go only through DestroyAllocation2 and must never assert "
+        "AssumeNotInUse: the escape-visible completed fence leads VidMm's own accounting, so the claim "
+        "cannot be proven and a false claim bugchecks 0x10E instead of returning an error",
     )
+    if "proven_not_in_use" in destroy_kmt or "AssumeNotInUse=1" in destroy_kmt:
+        fail("WDDM allocation teardown must not reintroduce an AssumeNotInUse claim")
     require_order(
         bo_destroy,
         (
-            "constboolobserved_submission=allocation->context->last_submitted_fence!=0;",
             "tu_wddm_context_wait_submissions(allocation->context,UINT64_MAX)",
-            "tu_wddm_destroy_allocation_handle(allocation->context,handle,observed_submission)",
+            "for(uint32_tattempt=0;attempt<=TU_WDDM_DESTROY_BUSY_RETRIES;attempt++)",
+            "tu_wddm_destroy_allocation_handle(allocation->context,handle)",
+            "status!=TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY",
             "if(status!=TU_WDDM_STATUS_SUCCESS)",
             "free(allocation->metadata);",
             "memset(allocation,0,sizeof(*allocation));",
         ),
-        "WDDM allocation teardown must retire submissions before AssumeNotInUse, claim that proof only when a "
-        "submission was actually observed, and release ownership only on success",
+        "WDDM allocation teardown must retire submissions, then retry DestroyAllocation2 on the busy "
+        "statuses rather than claiming idleness, and release ownership only on success",
     )
     if ".dispatch.DestroyAllocation(" in wddm_source:
         fail("production WDDM teardown must not call the asynchronous legacy DestroyAllocation thunk")
 
     render_destroy = canonical(function_body("fake_destroy_allocation2", render_fixture_source))
     if (
-        "destroy->Flags.AssumeNotInUse==1" not in render_destroy
+        "destroy->Flags.AssumeNotInUse==0" not in render_destroy
         or "(destroy->Flags.Value&~UINT32_C(1))==0" not in render_destroy
     ):
         fail("the render fixture must pin the exact AssumeNotInUse flag contract")

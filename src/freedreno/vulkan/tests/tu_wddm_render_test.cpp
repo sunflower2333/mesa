@@ -583,10 +583,10 @@ fake_destroy_allocation2(const D3DKMT_DESTROYALLOCATION2 *destroy)
    CHECK(destroy->hDevice == kDeviceHandle);
    CHECK(destroy->AllocationCount == 1);
    CHECK(destroy->phAllocationList != NULL);
-   /* AssumeNotInUse is now asserted only when the caller proved the allocation
-    * was never submitted or has retired; both 0 and 1 are legal, and nothing
-    * else may ever be set. */
-   CHECK(destroy->Flags.AssumeNotInUse == 0 || destroy->Flags.AssumeNotInUse == 1);
+   /* AssumeNotInUse must never be asserted: the escape-visible completed fence
+    * leads VidMm's own accounting, so the claim cannot be proven, and a false
+    * claim bugchecks 0x10E instead of returning an error. */
+   CHECK(destroy->Flags.AssumeNotInUse == 0);
    CHECK((destroy->Flags.Value & ~UINT32_C(1)) == 0);
    fixture->destroy_assume_not_in_use = destroy->Flags.AssumeNotInUse;
    if (destroy->AllocationCount == 1 && destroy->phAllocationList != NULL)
@@ -1351,9 +1351,10 @@ test_failed_allocation_creation_compensates()
    CHECK(!tu_wddm_allocation_create(&fixture.context, &desc, &allocation));
    CHECK(fixture.create_calls == 1);
    CHECK(fixture.destroy_allocation_calls == 1);
-   /* The compensating destroy for a failed create is the one case where the
-    * allocation provably was never submitted, so the proof genuinely holds. */
-   CHECK(fixture.destroy_assume_not_in_use == 1);
+   /* Even the compensating destroy for a failed create - the one case where the
+    * allocation provably was never submitted - does not claim it.  VidMm's own
+    * check finds it idle and succeeds, so the claim buys nothing. */
+   CHECK(fixture.destroy_assume_not_in_use == 0);
    CHECK(allocation.handle == 0);
    CHECK(allocation.context == NULL);
 }

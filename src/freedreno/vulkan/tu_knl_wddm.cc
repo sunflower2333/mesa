@@ -867,23 +867,39 @@ tu_wddm_allocation_desc_valid(const struct tu_wddm_context *context,
    return true;
 }
 
-/* AssumeNotInUse tells VidMm to skip its own in-use check, so it is only legal
- * when the caller can *prove* the allocation was never submitted or that every
- * submission referencing it has retired.  Asserting it wrongly is not a soft
- * failure: VidMm has no recourse and bugchecks 0x0000010E
+/* AssumeNotInUse is never asserted here, because this driver cannot honestly
+ * prove it.
+ *
+ * The flag tells VidMm to skip its own in-use check.  When the promise is false
+ * VidMm has no recourse and bugchecks 0x0000010E
  * VIDEO_MEMORY_MANAGEMENT_INTERNAL with STATUS_GRAPHICS_ALLOCATION_BUSY
- * (0xC01E0102), which is what this guest has been doing.  Take the proof as an
- * explicit argument rather than assuming it at every call site. */
+ * (0xC01E0102) rather than returning an error.
+ *
+ * The only completion evidence available to the user-mode driver is the
+ * driver-private fence read through VIOGPU_WDDM_ESCAPE_GET_COMPLETED_FENCE, and
+ * the miniport publishes that fence *before* it reports the completion to
+ * dxgkrnl: in viogpuwddm/wddmddi.cpp the submission-complete path calls
+ * RetireContextUmdFence() - the sole writer of context->CompletedUmdFence, which
+ * is what the escape returns - and only afterwards calls
+ * NotifyNativeSubmissionCompletion(), which is what raises
+ * DXGK_INTERRUPT_DMA_COMPLETED and lets VidMm retire the allocation's reference.
+ * So a wait satisfied through the escape can, and does, precede VidMm dropping
+ * that reference; asserting AssumeNotInUse on the strength of it is a false
+ * promise, and the six 0x10E dumps on this guest are that promise being broken.
+ *
+ * Waiting longer in user mode cannot close the window, because nothing visible
+ * to user mode reports VidMm's state.  Without the flag VidMm performs its own
+ * check and *returns* STATUS_GRAPHICS_ALLOCATION_BUSY, which the caller can
+ * retry - an error instead of a bugchecked machine. */
 static NTSTATUS
 tu_wddm_destroy_allocation_handle(struct tu_wddm_context *context,
-                                  D3DKMT_HANDLE handle,
-                                  bool proven_not_in_use)
+                                  D3DKMT_HANDLE handle)
 {
    D3DKMT_DESTROYALLOCATION2 destroy = {};
    destroy.hDevice = context->device->handle;
    destroy.phAllocationList = &handle;
    destroy.AllocationCount = 1;
-   destroy.Flags.AssumeNotInUse = proven_not_in_use ? 1 : 0;
+   destroy.Flags.AssumeNotInUse = 0;
    return context->device->adapter.runtime->dispatch.DestroyAllocation2(&destroy);
 }
 
@@ -947,9 +963,12 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
          allocation->private_info = private_data;
          allocation->vma_size = (desc->size + UINT64_C(4095)) & ~UINT64_C(4095);
          /* This allocation failed to be created, so it was never submitted and
-          * the AssumeNotInUse proof genuinely holds here. */
+          * an AssumeNotInUse claim would in fact hold here.  It is still not
+          * made: with the flag clear VidMm runs its own check, finds the
+          * allocation idle and succeeds anyway, so the claim buys nothing and
+          * leaving it out keeps a single, uniformly safe teardown path. */
          const NTSTATUS destroy_status =
-            tu_wddm_destroy_allocation_handle(context, allocation_info.hAllocation, true);
+            tu_wddm_destroy_allocation_handle(context, allocation_info.hAllocation);
          allocation->last_destroy_status = static_cast<uint32_t>(destroy_status);
          if (destroy_status == TU_WDDM_STATUS_SUCCESS)
             memset(allocation, 0, sizeof(*allocation));
@@ -978,14 +997,11 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
                 static_cast<unsigned>(allocation->locked));
 
    D3DKMT_HANDLE handle = allocation->handle;
-   /* tu_wddm_context_wait_submissions() returns true when last_submitted_fence
-    * is 0, which only means "this context recorded no submission" - not that the
-    * allocation is idle.  The fence is published after D3DKMTRender returns and
-    * only on success, while dxgkrnl can hold references from a submission that
-    * was never recorded, and residency covers every live BO per submit.  So a
-    * zero fence is not a proof, and claiming AssumeNotInUse on it is what
-    * bugchecks the machine. */
-   const bool observed_submission = allocation->context->last_submitted_fence != 0;
+   /* Retiring this context's submissions first is still worth doing - it keeps
+    * the common case off the retry path - but it is not a proof of idleness, so
+    * no AssumeNotInUse claim is made from it.  A zero fence only means this
+    * context recorded no submission, and the escape-visible fence leads VidMm's
+    * own accounting in any case; see tu_wddm_destroy_allocation_handle(). */
    if (!tu_wddm_context_wait_submissions(allocation->context, UINT64_MAX)) {
       allocation->last_destroy_status =
          static_cast<uint32_t>(TU_WDDM_STATUS_DEVICE_BUSY);
@@ -995,13 +1011,26 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
       return false;
    }
 
-   NTSTATUS status =
-      tu_wddm_destroy_allocation_handle(allocation->context, handle, observed_submission);
+   /* VidMm may still hold a reference from a completion it has not processed
+    * yet, and now says so instead of bugchecking.  Retry on the busy statuses
+    * the same way context teardown does. */
+   NTSTATUS status = TU_WDDM_STATUS_SUCCESS;
+   for (uint32_t attempt = 0; attempt <= TU_WDDM_DESTROY_BUSY_RETRIES; attempt++) {
+      status = tu_wddm_destroy_allocation_handle(allocation->context, handle);
+      allocation->destroy_attempt_count = attempt + 1;
+      if (status == TU_WDDM_STATUS_SUCCESS ||
+          (status != TU_WDDM_STATUS_DEVICE_BUSY &&
+           status != TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY) ||
+          attempt == TU_WDDM_DESTROY_BUSY_RETRIES)
+         break;
+      Sleep(1);
+   }
    allocation->last_destroy_status = static_cast<uint32_t>(status);
    if (status != TU_WDDM_STATUS_SUCCESS) {
-      tu_wddm_diag("allocation_destroy failed allocation=%u status=0x%08x",
+      tu_wddm_diag("allocation_destroy failed allocation=%u status=0x%08x attempts=%u",
                    static_cast<unsigned>(allocation->handle),
-                   static_cast<unsigned>(status));
+                   static_cast<unsigned>(status),
+                   allocation->destroy_attempt_count);
       return false;
    }
 

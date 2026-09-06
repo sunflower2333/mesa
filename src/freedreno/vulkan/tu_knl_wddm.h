@@ -112,6 +112,11 @@ struct tu_wddm_allocation {
     * WDDM private allocation ABI sent to the KMD. */
    uint32_t last_create_status;
    uint32_t last_destroy_status;
+   /* How many DestroyAllocation2 attempts the teardown needed.  Destroy no
+    * longer claims AssumeNotInUse, so VidMm can legitimately answer
+    * STATUS_GRAPHICS_ALLOCATION_BUSY and the call is retried; a count above one
+    * is the visible trace of that window. */
+   uint32_t destroy_attempt_count;
 };
 
 struct tu_wddm_render_reference {
