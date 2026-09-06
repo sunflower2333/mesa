@@ -10,7 +10,7 @@ unsigned st_debug = 0;
 
 static const
 struct debug_named_value st_debug_flags[] = {
-   {"oldtexops", ST_DEBUG_OLD_TEX_OPS, "oldtexops"},
+   {"newtexops", ST_DEBUG_NEW_TEX_OPS, "newtexops"},
    {"tgsi", ST_DEBUG_TGSI, "tgsi"},
    DEBUG_NAMED_VALUE_END
 };

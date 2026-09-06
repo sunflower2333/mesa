@@ -1396,7 +1396,7 @@ Shader_tgsi_translate(const unsigned *code,
           * this opcode regardless, so we just ignore sample index operand
           * for now */
       case D3D10_SB_OPCODE_LD:
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             unsigned resource = opcode.src[1].base.index[0].imm;
             assert(opcode.src[1].base.index_dim == 1);
             assert(opcode.src[1].base.index[0].imm < SHADER_MAX_RESOURCES);
@@ -1438,7 +1438,7 @@ Shader_tgsi_translate(const unsigned *code,
          break;
 
       case D3D10_SB_OPCODE_RESINFO:
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             unsigned resource = opcode.src[1].base.index[0].imm;
             assert(opcode.src[1].base.index_dim == 1);
             assert(opcode.src[1].base.index[0].imm < SHADER_MAX_RESOURCES);
@@ -1523,7 +1523,7 @@ Shader_tgsi_translate(const unsigned *code,
          unsigned resource = opcode.src[1].base.index[0].imm;
          assert(opcode.src[1].base.index_dim == 1);
          assert(resource < SHADER_MAX_RESOURCES);
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             assert(opcode.src[1].base.index_dim == 1);
             assert(opcode.src[1].base.index[0].imm < SHADER_MAX_RESOURCES);
 
@@ -1551,7 +1551,7 @@ Shader_tgsi_translate(const unsigned *code,
       }
 
       case D3D10_SB_OPCODE_SAMPLE_C:
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             struct ureg_dst r0 = ureg_DECL_temporary(ureg);
 
             /* XXX: Support only 2D texture targets for now.
@@ -1602,7 +1602,7 @@ Shader_tgsi_translate(const unsigned *code,
          break;
 
       case D3D10_SB_OPCODE_SAMPLE_C_LZ:
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             struct ureg_dst r0 = ureg_DECL_temporary(ureg);
 
             assert(opcode.src[1].base.index_dim == 1);
@@ -1658,7 +1658,7 @@ Shader_tgsi_translate(const unsigned *code,
          unsigned resource = opcode.src[1].base.index[0].imm;
          assert(opcode.src[1].base.index_dim == 1);
          assert(resource < SHADER_MAX_RESOURCES);
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             struct ureg_dst r0 = ureg_DECL_temporary(ureg);
 
             assert(opcode.src[1].base.index_dim == 1);
@@ -1702,7 +1702,7 @@ Shader_tgsi_translate(const unsigned *code,
          unsigned resource = opcode.src[1].base.index[0].imm;
          assert(opcode.src[1].base.index_dim == 1);
          assert(resource < SHADER_MAX_RESOURCES);
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             assert(opcode.src[1].base.index_dim == 1);
             assert(opcode.src[1].base.index[0].imm < SHADER_MAX_RESOURCES);
 
@@ -1736,7 +1736,7 @@ Shader_tgsi_translate(const unsigned *code,
          unsigned resource = opcode.src[1].base.index[0].imm;
          assert(opcode.src[1].base.index_dim == 1);
          assert(resource < SHADER_MAX_RESOURCES);
-         if (st_debug & ST_DEBUG_OLD_TEX_OPS) {
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             struct ureg_dst r0 = ureg_DECL_temporary(ureg);
 
             assert(opcode.src[1].base.index_dim == 1);
@@ -1877,7 +1877,7 @@ Shader_tgsi_translate(const unsigned *code,
             target = TGSI_TEXTURE_2D;
          }
          sx.resources[res_index].target = target;
-         if (!(st_debug & ST_DEBUG_OLD_TEX_OPS)) {
+         if (st_debug & ST_DEBUG_NEW_TEX_OPS) {
             sx.sv[res_index] =
                ureg_DECL_sampler_view(ureg, res_index, target,
                                       trans_dcl_ret_type(opcode.dcl_resource_ret_type[0]),

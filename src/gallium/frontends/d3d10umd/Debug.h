@@ -15,7 +15,14 @@ extern "C" {
 #endif
 
 
-#define ST_DEBUG_OLD_TEX_OPS   (1 <<  0)
+/* tgsi_to_nir() - the only consumer of this frontend's TGSI in the Zink/NIR
+ * configuration - implements just the legacy TEX opcode family (TEX, TXP, TXB,
+ * TXL, TXF, TXD, TG4).  It has no case at all for the SAMPLE family, and its
+ * instruction switch ends in fprintf + abort(), so emitting SAMPLE terminates
+ * the process that loaded the UMD.  The legacy path is therefore the default,
+ * and this flag opts *in* to the SAMPLE path for debugging.  It only has an
+ * effect in a MESA_DEBUG build, where st_debug is a real variable. */
+#define ST_DEBUG_NEW_TEX_OPS   (1 <<  0)
 #define ST_DEBUG_TGSI          (1 <<  1)
 
 
