@@ -25,6 +25,9 @@ struct tu_wddm_runtime {
    struct tu_wddm_dispatch dispatch;
 };
 
+/* Emits bounded UMD lifecycle markers only when TU_WDDM_DIAGNOSTICS=1. */
+void tu_wddm_diag(const char *format, ...);
+
 struct tu_wddm_adapter_info {
    LUID luid;
    VIOGPU_WDDM_ADAPTER_INFO private_info;

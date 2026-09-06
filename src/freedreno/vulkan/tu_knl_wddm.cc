@@ -10,7 +10,9 @@
 
 #include "tu_knl_wddm.h"
 
+#include <stdarg.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* The SDK headers do not consistently export STATUS_SUCCESS to user-mode
@@ -25,6 +27,22 @@ static constexpr uint32_t TU_WDDM_CREATE_BUSY_RETRIES = 1000;
 static constexpr NTSTATUS TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY =
    static_cast<NTSTATUS>(0xc01e0102L);
 static constexpr uint32_t TU_WDDM_DESTROY_BUSY_RETRIES = 1000;
+
+void
+tu_wddm_diag(const char *format, ...)
+{
+   const char *enabled = getenv("TU_WDDM_DIAGNOSTICS");
+   if (format == NULL || enabled == NULL || enabled[0] != '1' || enabled[1] != '\0')
+      return;
+
+   va_list args;
+   va_start(args, format);
+   fputs("TU_WDDM_DIAG: ", stderr);
+   vfprintf(stderr, format, args);
+   va_end(args);
+   fputc('\n', stderr);
+   fflush(stderr);
+}
 
 #ifdef TU_HAS_WDDM
 #include <errno.h>
@@ -476,6 +494,10 @@ tu_wddm_device_close(struct tu_wddm_device *device)
    if (device == NULL)
       return false;
 
+   tu_wddm_diag("device_close begin device=%u adapter=%u",
+                static_cast<unsigned>(device->handle),
+                static_cast<unsigned>(device->adapter.handle));
+
    /* DestroyDevice and CloseAdapter are separate owners.  If the latter
     * fails, keep the adapter handle so a caller can retry without losing the
     * remaining owner; treating a zero device handle as already closed also
@@ -487,8 +509,12 @@ tu_wddm_device_close(struct tu_wddm_device *device)
       D3DKMT_DESTROYDEVICE destroy = {};
       destroy.hDevice = device->handle;
       NTSTATUS status = device->adapter.runtime->dispatch.DestroyDevice(&destroy);
-      if (!NT_SUCCESS(status))
+      if (!NT_SUCCESS(status)) {
+         tu_wddm_diag("device_close DestroyDevice failed status=0x%08x handle=%u",
+                      static_cast<unsigned>(status),
+                      static_cast<unsigned>(device->handle));
          return false;
+      }
 
       device->handle = 0;
       device->command_buffer = NULL;
@@ -499,9 +525,14 @@ tu_wddm_device_close(struct tu_wddm_device *device)
       device->patch_location_list_size = 0;
    }
 
-   if (device->adapter.handle != 0)
-      return tu_wddm_adapter_close(&device->adapter);
+   if (device->adapter.handle != 0) {
+      const bool closed = tu_wddm_adapter_close(&device->adapter);
+      tu_wddm_diag("device_close adapter_close success=%u",
+                   static_cast<unsigned>(closed));
+      return closed;
+   }
 
+   tu_wddm_diag("device_close complete");
    return device->adapter.runtime != NULL;
 }
 
@@ -696,6 +727,10 @@ tu_wddm_context_close(struct tu_wddm_context *context)
        context->device->adapter.runtime == NULL)
       return false;
 
+   tu_wddm_diag("context_close begin context=%u last_fence=%u",
+                static_cast<unsigned>(context->handle),
+                context->last_submitted_fence);
+
    D3DKMT_DESTROYCONTEXT destroy = {};
    destroy.hContext = context->handle;
    NTSTATUS status = TU_WDDM_STATUS_SUCCESS;
@@ -703,6 +738,10 @@ tu_wddm_context_close(struct tu_wddm_context *context)
       status = context->device->adapter.runtime->dispatch.DestroyContext(&destroy);
       context->last_destroy_status = static_cast<uint32_t>(status);
       context->destroy_attempt_count = attempt + 1;
+      if (!NT_SUCCESS(status) || attempt != 0)
+         tu_wddm_diag("context_close DestroyContext attempt=%u status=0x%08x handle=%u",
+                      attempt + 1, static_cast<unsigned>(status),
+                      static_cast<unsigned>(context->handle));
       if (NT_SUCCESS(status) ||
           (status != TU_WDDM_STATUS_DEVICE_BUSY &&
            status != TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY) ||
@@ -713,9 +752,14 @@ tu_wddm_context_close(struct tu_wddm_context *context)
        * callback that drops the Native Context allocation reference. */
       Sleep(1);
    }
-   if (!NT_SUCCESS(status))
+   if (!NT_SUCCESS(status)) {
+      tu_wddm_diag("context_close failed status=0x%08x attempts=%u handle=%u",
+                   static_cast<unsigned>(status), context->destroy_attempt_count,
+                   static_cast<unsigned>(context->handle));
       return false;
+   }
 
+   tu_wddm_diag("context_close complete attempts=%u", context->destroy_attempt_count);
    memset(context, 0, sizeof(*context));
    return true;
 }
@@ -769,7 +813,7 @@ tu_wddm_instance_prepare_destroy(struct tu_instance *instance)
 
 static bool
 tu_wddm_allocation_desc_valid(const struct tu_wddm_context *context,
-                              const struct tu_wddm_allocation_desc *desc)
+                               const struct tu_wddm_allocation_desc *desc)
 {
    const uint32_t valid_flags = VIOGPU_WDDM_ALLOCATION_PRIMARY |
                                 VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE |
@@ -821,6 +865,26 @@ tu_wddm_allocation_desc_valid(const struct tu_wddm_context *context,
    }
 
    return true;
+}
+
+/* AssumeNotInUse tells VidMm to skip its own in-use check, so it is only legal
+ * when the caller can *prove* the allocation was never submitted or that every
+ * submission referencing it has retired.  Asserting it wrongly is not a soft
+ * failure: VidMm has no recourse and bugchecks 0x0000010E
+ * VIDEO_MEMORY_MANAGEMENT_INTERNAL with STATUS_GRAPHICS_ALLOCATION_BUSY
+ * (0xC01E0102), which is what this guest has been doing.  Take the proof as an
+ * explicit argument rather than assuming it at every call site. */
+static NTSTATUS
+tu_wddm_destroy_allocation_handle(struct tu_wddm_context *context,
+                                  D3DKMT_HANDLE handle,
+                                  bool proven_not_in_use)
+{
+   D3DKMT_DESTROYALLOCATION2 destroy = {};
+   destroy.hDevice = context->device->handle;
+   destroy.phAllocationList = &handle;
+   destroy.AllocationCount = 1;
+   destroy.Flags.AssumeNotInUse = proven_not_in_use ? 1 : 0;
+   return context->device->adapter.runtime->dispatch.DestroyAllocation2(&destroy);
 }
 
 bool
@@ -882,12 +946,11 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
          allocation->handle = allocation_info.hAllocation;
          allocation->private_info = private_data;
          allocation->vma_size = (desc->size + UINT64_C(4095)) & ~UINT64_C(4095);
-         D3DKMT_HANDLE handle = allocation_info.hAllocation;
-         D3DKMT_DESTROYALLOCATION destroy = {};
-         destroy.hDevice = context->device->handle;
-         destroy.phAllocationList = &handle;
-         destroy.AllocationCount = 1;
-         const NTSTATUS destroy_status = context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
+         /* This allocation failed to be created, so it was never submitted and
+          * the AssumeNotInUse proof genuinely holds here. */
+         const NTSTATUS destroy_status =
+            tu_wddm_destroy_allocation_handle(context, allocation_info.hAllocation, true);
+         allocation->last_destroy_status = static_cast<uint32_t>(destroy_status);
          if (destroy_status == TU_WDDM_STATUS_SUCCESS)
             memset(allocation, 0, sizeof(*allocation));
       }
@@ -910,18 +973,41 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
        allocation->context->device->handle == 0)
       return false;
 
-   D3DKMT_HANDLE handle = allocation->handle;
-   D3DKMT_DESTROYALLOCATION destroy = {};
-   destroy.hDevice = allocation->context->device->handle;
-   destroy.phAllocationList = &handle;
-   destroy.AllocationCount = 1;
+   tu_wddm_diag("allocation_destroy begin allocation=%u locked=%u",
+                static_cast<unsigned>(allocation->handle),
+                static_cast<unsigned>(allocation->locked));
 
-   NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
-   allocation->last_destroy_status = static_cast<uint32_t>(status);
-   if (status != TU_WDDM_STATUS_SUCCESS)
+   D3DKMT_HANDLE handle = allocation->handle;
+   /* tu_wddm_context_wait_submissions() returns true when last_submitted_fence
+    * is 0, which only means "this context recorded no submission" - not that the
+    * allocation is idle.  The fence is published after D3DKMTRender returns and
+    * only on success, while dxgkrnl can hold references from a submission that
+    * was never recorded, and residency covers every live BO per submit.  So a
+    * zero fence is not a proof, and claiming AssumeNotInUse on it is what
+    * bugchecks the machine. */
+   const bool observed_submission = allocation->context->last_submitted_fence != 0;
+   if (!tu_wddm_context_wait_submissions(allocation->context, UINT64_MAX)) {
+      allocation->last_destroy_status =
+         static_cast<uint32_t>(TU_WDDM_STATUS_DEVICE_BUSY);
+      tu_wddm_diag("allocation_destroy waiting submissions failed allocation=%u fence=%u",
+                   static_cast<unsigned>(allocation->handle),
+                   allocation->context->last_submitted_fence);
       return false;
+   }
+
+   NTSTATUS status =
+      tu_wddm_destroy_allocation_handle(allocation->context, handle, observed_submission);
+   allocation->last_destroy_status = static_cast<uint32_t>(status);
+   if (status != TU_WDDM_STATUS_SUCCESS) {
+      tu_wddm_diag("allocation_destroy failed allocation=%u status=0x%08x",
+                   static_cast<unsigned>(allocation->handle),
+                   static_cast<unsigned>(status));
+      return false;
+   }
 
    free(allocation->metadata);
+   tu_wddm_diag("allocation_destroy complete allocation=%u",
+                static_cast<unsigned>(allocation->handle));
    memset(allocation, 0, sizeof(*allocation));
    return true;
 }
@@ -985,11 +1071,17 @@ tu_wddm_allocation_unlock(struct tu_wddm_allocation *allocation)
    unlock.phAllocations = &handle;
 
    NTSTATUS status = allocation->context->device->adapter.runtime->dispatch.Unlock(&unlock);
-   if (!NT_SUCCESS(status))
+   if (!NT_SUCCESS(status)) {
+      tu_wddm_diag("allocation_unlock failed allocation=%u status=0x%08x",
+                   static_cast<unsigned>(allocation->handle),
+                   static_cast<unsigned>(status));
       return false;
+   }
 
    allocation->map = NULL;
    allocation->locked = false;
+   tu_wddm_diag("allocation_unlock complete allocation=%u",
+                static_cast<unsigned>(allocation->handle));
    return true;
 }
 
@@ -1654,6 +1746,12 @@ tu_wddm_device_finish(struct tu_device *dev)
        dev->wddm_device.handle == 0 && dev->wddm_device.adapter.handle == 0)
       return;
 
+   tu_wddm_diag("device_finish begin initialized=%u bos=%u context=%u device=%u adapter=%u",
+                static_cast<unsigned>(dev->wddm_initialized), dev->wddm_bo_count,
+                static_cast<unsigned>(dev->wddm_context.handle),
+                static_cast<unsigned>(dev->wddm_device.handle),
+                static_cast<unsigned>(dev->wddm_device.adapter.handle));
+
    /* This is the final Vulkan-device hook.  A failed KMT operation cannot be
     * retried after tu_DestroyDevice releases the outer device, so preserve the
     * complete owner graph on every failure path.  The retained KMT objects are
@@ -1663,6 +1761,8 @@ tu_wddm_device_finish(struct tu_device *dev)
    const bool submissions_retired =
       tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX);
    if (!submissions_retired) {
+      tu_wddm_diag("device_finish failed waiting submissions fence=%u",
+                   dev->wddm_context.last_submitted_fence);
       dev->wddm_teardown_failed = true;
       vk_device_set_lost(&dev->vk, "failed to retire WDDM queue work");
       return;
@@ -1685,6 +1785,8 @@ tu_wddm_device_finish(struct tu_device *dev)
                                                ~UINT64_C(4095);
 
       if (allocation->locked && !tu_wddm_allocation_unlock(allocation)) {
+         tu_wddm_diag("device_finish failed unlocking allocation=%u",
+                      static_cast<unsigned>(allocation->handle));
          dev->wddm_teardown_failed = true;
          vk_device_set_lost(&dev->vk,
                             "failed to unlock WDDM allocation during teardown");
@@ -1693,6 +1795,9 @@ tu_wddm_device_finish(struct tu_device *dev)
       bo->map = NULL;
       if (allocation->handle != 0 &&
           !tu_wddm_allocation_destroy(allocation)) {
+         tu_wddm_diag("device_finish failed destroying allocation=%u status=0x%08x",
+                      static_cast<unsigned>(allocation->handle),
+                      allocation->last_destroy_status);
          dev->wddm_teardown_failed = true;
          vk_device_set_lost(&dev->vk,
                             "failed to destroy WDDM allocation during teardown");
@@ -1719,6 +1824,10 @@ tu_wddm_device_finish(struct tu_device *dev)
       context_closed = tu_wddm_context_close(&dev->wddm_context);
       if (!context_closed) {
          dev->wddm_teardown_failed = true;
+         tu_wddm_diag("device_finish failed closing context status=0x%08x attempts=%u handle=%u",
+                      dev->wddm_context.last_destroy_status,
+                      dev->wddm_context.destroy_attempt_count,
+                      static_cast<unsigned>(dev->wddm_context.handle));
          mesa_loge("failed to close WDDM context: status=0x%08x attempts=%u handle=%u",
                    dev->wddm_context.last_destroy_status,
                    dev->wddm_context.destroy_attempt_count,
@@ -1732,6 +1841,9 @@ tu_wddm_device_finish(struct tu_device *dev)
         dev->wddm_device.adapter.handle != 0)) {
       if (!tu_wddm_device_close(&dev->wddm_device)) {
          dev->wddm_teardown_failed = true;
+         tu_wddm_diag("device_finish failed closing device=%u adapter=%u",
+                      static_cast<unsigned>(dev->wddm_device.handle),
+                      static_cast<unsigned>(dev->wddm_device.adapter.handle));
          vk_device_set_lost(&dev->vk, "failed to close WDDM device");
          return;
       }
@@ -1741,6 +1853,7 @@ tu_wddm_device_finish(struct tu_device *dev)
    memset(&dev->wddm_device, 0, sizeof(dev->wddm_device));
    dev->wddm_initialized = false;
    dev->wddm_teardown_failed = false;
+   tu_wddm_diag("device_finish complete");
 }
 
 static int

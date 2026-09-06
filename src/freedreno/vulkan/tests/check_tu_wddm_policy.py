@@ -54,6 +54,8 @@ def main() -> int:
     dispatch_source = (VULKAN_DIR / "tu_wddm_dispatch.cc").read_text(encoding="utf-8")
     dispatch_header = (VULKAN_DIR / "tu_wddm_dispatch.h").read_text(encoding="utf-8")
     transport_fixture = (TEST_DIR / "tu_wddm_transport_compile.cpp").read_text(encoding="utf-8")
+    render_fixture_source = (TEST_DIR / "tu_wddm_render_test.cpp").read_text(encoding="utf-8")
+    kmt_probe_source = (TEST_DIR / "tu_wddm_kmt_probe.cpp").read_text(encoding="utf-8")
     util_meson = (VULKAN_DIR.parents[2] / "src" / "util" / "meson.build").read_text(
         encoding="utf-8"
     )
@@ -91,6 +93,12 @@ def main() -> int:
         fail("the WDDM dispatch table must expose D3DKMTEnumAdapters2")
     if "TU_WDDM_LOAD(EnumAdapters2);" not in dispatch:
         fail("D3DKMTEnumAdapters2 must be loaded from the system thunk table")
+    if "PFND3DKMT_DESTROYALLOCATION2DestroyAllocation2;" not in dispatch_api:
+        fail("the WDDM dispatch table must expose synchronous-capable DestroyAllocation2")
+    if "PFND3DKMT_DESTROYALLOCATIONDestroyAllocation;" in dispatch_api:
+        fail("the asynchronous legacy DestroyAllocation thunk must not remain in the WDDM dispatch")
+    if "TU_WDDM_LOAD(DestroyAllocation2);" not in dispatch:
+        fail("D3DKMTDestroyAllocation2 must be loaded from the system thunk table")
     foreach_adapter = canonical(function_body("tu_wddm_runtime_foreach_adapter", wddm_source))
     require_order(
         foreach_adapter,
@@ -138,8 +146,49 @@ def main() -> int:
     )
 
     bo_destroy = canonical(function_body("tu_wddm_allocation_destroy", wddm_source))
-    if "free(allocation->metadata);" not in bo_destroy:
-        fail("WDDM allocation teardown must release retained app-local metadata")
+    destroy_kmt = canonical(function_body("tu_wddm_destroy_allocation_handle", wddm_source))
+    require_order(
+        destroy_kmt,
+        (
+            "D3DKMT_DESTROYALLOCATION2destroy={};",
+            "destroy.Flags.AssumeNotInUse=proven_not_in_use?1:0;",
+            "dispatch.DestroyAllocation2(&destroy)",
+        ),
+        "WDDM allocation teardown must go only through DestroyAllocation2 and must carry the caller's proof, "
+        "never an unconditional AssumeNotInUse",
+    )
+    require_order(
+        bo_destroy,
+        (
+            "constboolobserved_submission=allocation->context->last_submitted_fence!=0;",
+            "tu_wddm_context_wait_submissions(allocation->context,UINT64_MAX)",
+            "tu_wddm_destroy_allocation_handle(allocation->context,handle,observed_submission)",
+            "if(status!=TU_WDDM_STATUS_SUCCESS)",
+            "free(allocation->metadata);",
+            "memset(allocation,0,sizeof(*allocation));",
+        ),
+        "WDDM allocation teardown must retire submissions before AssumeNotInUse, claim that proof only when a "
+        "submission was actually observed, and release ownership only on success",
+    )
+    if ".dispatch.DestroyAllocation(" in wddm_source:
+        fail("production WDDM teardown must not call the asynchronous legacy DestroyAllocation thunk")
+
+    render_destroy = canonical(function_body("fake_destroy_allocation2", render_fixture_source))
+    if (
+        "destroy->Flags.AssumeNotInUse==1" not in render_destroy
+        or "(destroy->Flags.Value&~UINT32_C(1))==0" not in render_destroy
+    ):
+        fail("the render fixture must pin the exact AssumeNotInUse flag contract")
+    raw_destroy = canonical(function_body("destroy_raw_allocation", kmt_probe_source))
+    require_order(
+        raw_destroy,
+        (
+            "D3DKMT_DESTROYALLOCATION2destroy={};",
+            "destroy.Flags.AssumeNotInUse=1;",
+            "dispatch.DestroyAllocation2(&destroy)",
+        ),
+        "negative KMT cleanup must use DestroyAllocation2 for a never-submitted handle",
+    )
     set_metadata = canonical(function_body("tu_wddm_bo_set_metadata", wddm_source))
     if "!tu_wddm_bo_valid_for_device(dev,bo)" not in set_metadata:
         fail("WDDM metadata writes must reject stale or foreign-device BO handles")

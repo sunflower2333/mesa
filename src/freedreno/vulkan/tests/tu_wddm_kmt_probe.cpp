@@ -249,11 +249,13 @@ destroy_raw_allocation(tu_wddm_context *context, D3DKMT_HANDLE handle)
        context->device->handle == 0 || handle == 0)
       return false;
 
-   D3DKMT_DESTROYALLOCATION destroy = {};
+   D3DKMT_DESTROYALLOCATION2 destroy = {};
    destroy.hDevice = context->device->handle;
    destroy.phAllocationList = &handle;
    destroy.AllocationCount = 1;
-   const NTSTATUS status = context->device->adapter.runtime->dispatch.DestroyAllocation(&destroy);
+   destroy.Flags.AssumeNotInUse = 1;
+   const NTSTATUS status =
+      context->device->adapter.runtime->dispatch.DestroyAllocation2(&destroy);
    printf("  Negative IOVA cleanup: status=0x%08lx handle=0x%08x\n", static_cast<unsigned long>(status), handle);
    return NT_SUCCESS(status);
 }

@@ -412,6 +412,7 @@ struct test_fixture {
    unsigned busy_destroy_context_attempts;
    unsigned create_calls;
    unsigned destroy_allocation_calls;
+   unsigned destroy_assume_not_in_use;
    unsigned create_context_calls;
    unsigned destroy_context_calls;
    unsigned destroy_device_calls;
@@ -570,7 +571,7 @@ fake_close_adapter(const D3DKMT_CLOSEADAPTER *close)
 }
 
 NTSTATUS APIENTRY
-fake_destroy_allocation(const D3DKMT_DESTROYALLOCATION *destroy)
+fake_destroy_allocation2(const D3DKMT_DESTROYALLOCATION2 *destroy)
 {
    test_fixture *fixture = current_fixture;
    CHECK(fixture != NULL);
@@ -582,6 +583,12 @@ fake_destroy_allocation(const D3DKMT_DESTROYALLOCATION *destroy)
    CHECK(destroy->hDevice == kDeviceHandle);
    CHECK(destroy->AllocationCount == 1);
    CHECK(destroy->phAllocationList != NULL);
+   /* AssumeNotInUse is now asserted only when the caller proved the allocation
+    * was never submitted or has retired; both 0 and 1 are legal, and nothing
+    * else may ever be set. */
+   CHECK(destroy->Flags.AssumeNotInUse == 0 || destroy->Flags.AssumeNotInUse == 1);
+   CHECK((destroy->Flags.Value & ~UINT32_C(1)) == 0);
+   fixture->destroy_assume_not_in_use = destroy->Flags.AssumeNotInUse;
    if (destroy->AllocationCount == 1 && destroy->phAllocationList != NULL)
       CHECK(destroy->phAllocationList[0] == kAllocationHandle);
    return fixture->destroy_allocation_status;
@@ -893,7 +900,7 @@ init_fixture(test_fixture *fixture)
    fixture->runtime.dispatch.DestroyDevice = fake_destroy_device;
    fixture->runtime.dispatch.CloseAdapter = fake_close_adapter;
    fixture->runtime.dispatch.CreateAllocation = fake_create_allocation;
-   fixture->runtime.dispatch.DestroyAllocation = fake_destroy_allocation;
+   fixture->runtime.dispatch.DestroyAllocation2 = fake_destroy_allocation2;
    fixture->runtime.dispatch.Lock = fake_lock;
    fixture->runtime.dispatch.Unlock = fake_unlock;
    fixture->runtime.dispatch.Render = fake_render;
@@ -1254,6 +1261,10 @@ test_busy_allocation_creation_retries_without_publishing_a_handle()
    CHECK(allocation.handle == kAllocationHandle);
    CHECK(tu_wddm_allocation_destroy(&allocation));
    CHECK(fixture.destroy_allocation_calls == 1);
+   /* Nothing was ever submitted on this context, so the driver has no proof the
+    * allocation is idle and must not assert AssumeNotInUse.  Claiming it here is
+    * what bugchecks VidMm 0x10E with STATUS_GRAPHICS_ALLOCATION_BUSY. */
+   CHECK(fixture.destroy_assume_not_in_use == 0);
 }
 
 void
@@ -1340,6 +1351,9 @@ test_failed_allocation_creation_compensates()
    CHECK(!tu_wddm_allocation_create(&fixture.context, &desc, &allocation));
    CHECK(fixture.create_calls == 1);
    CHECK(fixture.destroy_allocation_calls == 1);
+   /* The compensating destroy for a failed create is the one case where the
+    * allocation provably was never submitted, so the proof genuinely holds. */
+   CHECK(fixture.destroy_assume_not_in_use == 1);
    CHECK(allocation.handle == 0);
    CHECK(allocation.context == NULL);
 }
@@ -1410,6 +1424,36 @@ test_positive_allocation_destroy_status_retains_owner()
 
    fixture.destroy_allocation_status = kStatusSuccess;
    CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(allocation.handle == 0);
+   CHECK(allocation.context == NULL);
+}
+
+void
+test_allocation_destroy_requires_retired_submissions()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+
+   fixture.context.last_submitted_fence = 7;
+   fixture.escape_status = kStatusInvalidParameter;
+   CHECK(!tu_wddm_allocation_destroy(&allocation));
+   CHECK(fixture.escape_calls == 1);
+   CHECK(fixture.destroy_allocation_calls == 0);
+   CHECK(allocation.last_destroy_status ==
+         static_cast<uint32_t>(kStatusDeviceBusy));
+   CHECK(allocation.handle == kAllocationHandle);
+   CHECK(allocation.context == &fixture.context);
+   CHECK(allocation.private_info.RequestedIova == kVaStart);
+   CHECK(allocation.vma_size == 4096);
+
+   fixture.context.last_submitted_fence = 0;
+   fixture.escape_status = kStatusSuccess;
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(fixture.destroy_allocation_calls == 1);
    CHECK(allocation.handle == 0);
    CHECK(allocation.context == NULL);
 }
@@ -1949,6 +1993,7 @@ main()
    test_failed_allocation_rollback_retains_owner();
    test_failed_allocation_teardown_retains_owner();
    test_positive_allocation_destroy_status_retains_owner();
+   test_allocation_destroy_requires_retired_submissions();
    test_failed_unlock_retains_owner();
    test_null_lock_data_is_rolled_back();
    test_null_lock_data_rollback_retains_owner();

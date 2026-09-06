@@ -42,7 +42,7 @@ tu_wddm_dispatch_init(struct tu_wddm_dispatch *dispatch)
    TU_WDDM_LOAD(CreateContext);
    TU_WDDM_LOAD(DestroyContext);
    TU_WDDM_LOAD(CreateAllocation);
-   TU_WDDM_LOAD(DestroyAllocation);
+   TU_WDDM_LOAD(DestroyAllocation2);
    TU_WDDM_LOAD(Lock);
    TU_WDDM_LOAD(Unlock);
    TU_WDDM_LOAD(Escape);

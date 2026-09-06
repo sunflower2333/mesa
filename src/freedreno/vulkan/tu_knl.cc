@@ -257,7 +257,29 @@ tu_drm_device_init(struct tu_device *dev)
 void
 tu_drm_device_finish(struct tu_device *dev)
 {
+#ifdef TU_HAS_WDDM
+   if (dev != NULL &&
+       (dev->wddm_initialized || dev->wddm_context.handle != 0 ||
+        dev->wddm_device.handle != 0 || dev->wddm_device.adapter.handle != 0))
+      tu_wddm_diag("tu_drm_device_finish begin initialized=%u context=%u device=%u adapter=%u",
+                   static_cast<unsigned>(dev->wddm_initialized),
+                   static_cast<unsigned>(dev->wddm_context.handle),
+                   static_cast<unsigned>(dev->wddm_device.handle),
+                   static_cast<unsigned>(dev->wddm_device.adapter.handle));
+#endif
    dev->instance->knl->device_finish(dev);
+#ifdef TU_HAS_WDDM
+   if (dev != NULL &&
+       (dev->wddm_initialized || dev->wddm_teardown_failed ||
+        dev->wddm_context.handle != 0 || dev->wddm_device.handle != 0 ||
+        dev->wddm_device.adapter.handle != 0))
+      tu_wddm_diag("tu_drm_device_finish complete initialized=%u failed=%u context=%u device=%u adapter=%u",
+                   static_cast<unsigned>(dev->wddm_initialized),
+                   static_cast<unsigned>(dev->wddm_teardown_failed),
+                   static_cast<unsigned>(dev->wddm_context.handle),
+                   static_cast<unsigned>(dev->wddm_device.handle),
+                   static_cast<unsigned>(dev->wddm_device.adapter.handle));
+#endif
 }
 
 int

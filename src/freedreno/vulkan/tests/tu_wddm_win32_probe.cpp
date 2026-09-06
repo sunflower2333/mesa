@@ -38,9 +38,11 @@ window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 }
 
 int
-report(const char *message, VkResult result)
+report(const char *message, VkResult result, const char *stage = nullptr)
 {
-   if (result == VK_SUCCESS)
+   if (stage != nullptr)
+      fprintf(stderr, "tu WDDM Win32 probe: %s at %s (VkResult=%d)\n", message, stage, result);
+   else if (result == VK_SUCCESS)
       fprintf(stderr, "tu WDDM Win32 probe: %s\n", message);
    else
       fprintf(stderr, "tu WDDM Win32 probe: %s (VkResult=%d)\n", message, result);
@@ -420,6 +422,7 @@ main()
       formats[0].format == VK_FORMAT_UNDEFINED ? VK_FORMAT_B8G8R8A8_UNORM : formats[0].format,
       formats[0].colorSpace,
    };
+   const char *failure_stage = "none";
 
    auto create_surface_swapchain = [&](VkSwapchainKHR old_swapchain, VkSwapchainKHR *out_swapchain,
                                        VkExtent2D *out_extent, VkImage *out_images,
@@ -429,14 +432,19 @@ main()
       *out_image_count = 0;
 
       VkSurfaceCapabilitiesKHR current_capabilities = {};
+      failure_stage = "vkGetPhysicalDeviceSurfaceCapabilitiesKHR";
       VkResult create_result = get_surface_capabilities(physical, surface, &current_capabilities);
-      if (create_result != VK_SUCCESS || current_capabilities.minImageCount == 0 ||
+      if (create_result != VK_SUCCESS)
+         return create_result;
+      failure_stage = "surface capability validation";
+      if (current_capabilities.minImageCount == 0 ||
           (current_capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0)
-         return create_result == VK_SUCCESS ? VK_ERROR_FORMAT_NOT_SUPPORTED : create_result;
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
       VkExtent2D current_extent = current_capabilities.currentExtent;
       if (current_extent.width == UINT32_MAX || current_extent.height == UINT32_MAX) {
          RECT client_rect = {};
+         failure_stage = "GetClientRect";
          if (!GetClientRect(window, &client_rect))
             return VK_ERROR_INITIALIZATION_FAILED;
          current_extent.width = static_cast<uint32_t>(client_rect.right - client_rect.left);
@@ -454,14 +462,18 @@ main()
                                     ? current_capabilities.maxImageExtent.height
                                     : current_extent.height;
       }
-      if (current_extent.width == 0 || current_extent.height == 0)
+      if (current_extent.width == 0 || current_extent.height == 0) {
+         failure_stage = "surface extent validation";
          return VK_ERROR_OUT_OF_DATE_KHR;
+      }
 
       uint32_t current_image_count = current_capabilities.minImageCount + 1;
       if (current_capabilities.maxImageCount != 0 && current_image_count > current_capabilities.maxImageCount)
          current_image_count = current_capabilities.maxImageCount;
-      if (current_image_count > kMaxSwapchainImages)
+      if (current_image_count > kMaxSwapchainImages) {
+         failure_stage = "swapchain image-count validation";
          return VK_ERROR_TOO_MANY_OBJECTS;
+      }
 
       VkCompositeAlphaFlagBitsKHR composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
       if ((current_capabilities.supportedCompositeAlpha & composite_alpha) == 0) {
@@ -477,8 +489,10 @@ main()
                break;
             }
          }
-         if (composite_alpha == 0)
+         if (composite_alpha == 0) {
+            failure_stage = "composite-alpha validation";
             return VK_ERROR_INITIALIZATION_FAILED;
+         }
       }
 
       VkSwapchainCreateInfoKHR swapchain_info = {};
@@ -498,11 +512,13 @@ main()
       swapchain_info.oldSwapchain = old_swapchain;
 
       VkSwapchainKHR created_swapchain = VK_NULL_HANDLE;
+      failure_stage = "vkCreateSwapchainKHR";
       create_result = create_swapchain(device, &swapchain_info, nullptr, &created_swapchain);
       if (create_result != VK_SUCCESS)
          return create_result;
 
       uint32_t created_image_count = kMaxSwapchainImages;
+      failure_stage = "vkGetSwapchainImagesKHR";
       create_result = get_swapchain_images(device, created_swapchain, &created_image_count, out_images);
       if (create_result != VK_SUCCESS || created_image_count == 0 || created_image_count > kMaxSwapchainImages) {
          destroy_swapchain(device, created_swapchain, nullptr);
@@ -518,10 +534,12 @@ main()
    auto present_frame = [&](uint32_t frame, VkSwapchainKHR frame_swapchain, const VkImage *images,
                             uint32_t image_count) -> VkResult {
       uint32_t image_index = 0;
+      failure_stage = "vkAcquireNextImageKHR";
       VkResult frame_result = acquire_next_image(device, frame_swapchain, UINT64_C(1000000000), VK_NULL_HANDLE,
                                                  acquire_fences[frame], &image_index);
       if ((frame_result != VK_SUCCESS && frame_result != VK_SUBOPTIMAL_KHR) || image_index >= image_count)
          return frame_result == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : frame_result;
+      failure_stage = "vkWaitForFences(acquire)";
       frame_result = wait_for_fences(device, 1, &acquire_fences[frame], VK_TRUE, kFenceTimeoutNs);
       if (frame_result != VK_SUCCESS)
          return frame_result;
@@ -529,6 +547,7 @@ main()
       VkCommandBufferBeginInfo begin_info = {};
       begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
       begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      failure_stage = "vkBeginCommandBuffer";
       frame_result = begin_command_buffer(command_buffers[frame], &begin_info);
       if (frame_result != VK_SUCCESS)
          return frame_result;
@@ -564,6 +583,7 @@ main()
       to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
       cmd_pipeline_barrier(command_buffers[frame], VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                            0, 0, nullptr, 0, nullptr, 1, &to_present);
+      failure_stage = "vkEndCommandBuffer";
       frame_result = end_command_buffer(command_buffers[frame]);
       if (frame_result != VK_SUCCESS)
          return frame_result;
@@ -574,6 +594,7 @@ main()
       submit_info.pCommandBuffers = &command_buffers[frame];
       submit_info.signalSemaphoreCount = 1;
       submit_info.pSignalSemaphores = &present_ready[frame];
+      failure_stage = "vkQueueSubmit";
       frame_result = queue_submit(queue, 1, &submit_info, submit_fences[frame]);
       if (frame_result != VK_SUCCESS)
          return frame_result;
@@ -585,12 +606,15 @@ main()
       present_info.swapchainCount = 1;
       present_info.pSwapchains = &frame_swapchain;
       present_info.pImageIndices = &image_index;
+      failure_stage = "vkQueuePresentKHR";
       frame_result = queue_present(queue, &present_info);
       if (frame_result != VK_SUCCESS && frame_result != VK_SUBOPTIMAL_KHR)
          return frame_result;
+      failure_stage = "vkWaitForFences(submit)";
       frame_result = wait_for_fences(device, 1, &submit_fences[frame], VK_TRUE, kFenceTimeoutNs);
       if (frame_result != VK_SUCCESS)
          return frame_result;
+      failure_stage = "vkDeviceWaitIdle";
       return device_wait_idle(device);
    };
 
@@ -604,7 +628,7 @@ main()
                                           &initial_image_count)) != VK_SUCCESS ||
        (result = present_frame(0, swapchain, initial_images, initial_image_count)) != VK_SUCCESS) {
       cleanup();
-      return report("initial clear/submit/present failed", result);
+      return report("initial clear/submit/present failed", result, failure_stage);
    }
 
    SetWindowPos(window, nullptr, 0, 0, 800, 600, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -621,13 +645,13 @@ main()
    if ((result = create_surface_swapchain(swapchain, &resized_swapchain, &resized_extent, resized_images,
                                           &resized_image_count)) != VK_SUCCESS) {
       cleanup();
-      return report("resized swapchain recreation failed", result);
+      return report("resized swapchain recreation failed", result, failure_stage);
    }
    destroy_swapchain(device, swapchain, nullptr);
    swapchain = resized_swapchain;
    if ((result = present_frame(1, swapchain, resized_images, resized_image_count)) != VK_SUCCESS) {
       cleanup();
-      return report("resized clear/submit/present failed", result);
+      return report("resized clear/submit/present failed", result, failure_stage);
    }
 
    cleanup();

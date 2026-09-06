@@ -3437,6 +3437,17 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (!device)
       return;
 
+#ifdef TU_HAS_WDDM
+   if (is_wddm(device->physical_device->instance))
+      tu_wddm_diag("tu_DestroyDevice begin device=%p initialized=%u bos=%u context=%u device_handle=%u adapter=%u",
+                   static_cast<void *>(device),
+                   static_cast<unsigned>(device->wddm_initialized),
+                   device->wddm_bo_count,
+                   static_cast<unsigned>(device->wddm_context.handle),
+                   static_cast<unsigned>(device->wddm_device.handle),
+                   static_cast<unsigned>(device->wddm_device.adapter.handle));
+#endif
+
    tu_memory_trace_finish(device);
 
    if (FD_RD_DUMP(ENABLE))
@@ -3529,6 +3540,15 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    }
 
    tu_drm_device_finish(device);
+
+#ifdef TU_HAS_WDDM
+   if (is_wddm(device->physical_device->instance))
+      tu_wddm_diag("tu_DestroyDevice after_drm_finish failed=%u context=%u device_handle=%u adapter=%u",
+                   static_cast<unsigned>(device->wddm_teardown_failed),
+                   static_cast<unsigned>(device->wddm_context.handle),
+                   static_cast<unsigned>(device->wddm_device.handle),
+                   static_cast<unsigned>(device->wddm_device.adapter.handle));
+#endif
 
 #ifdef TU_HAS_WDDM
    if (is_wddm(device->physical_device->instance) &&
