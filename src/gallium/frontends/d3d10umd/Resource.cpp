@@ -563,7 +563,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    pResource->buffer = false;
    pResource->transfers = (struct pipe_transfer **)calloc(1, sizeof *pResource->transfers);
    pResource->hAllocation = openInfo->hAllocation;
-   pResource->hKMResource = pOpenResource->hKMResource;
+   pResource->hKMResource = 0;
    /* The allocation belongs to whoever created it; this device only holds a
     * view, so destruction here must not deallocate it. */
    pResource->hRTResourceHandle = NULL;
