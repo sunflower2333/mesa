@@ -56,7 +56,6 @@ int main(int argc, char **argv)
    wc.cbSize = sizeof wc;
    wc.lpfnWndProc = WndProc;
    wc.hInstance = GetModuleHandleW(NULL);
-   wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
    wc.lpszClassName = L"VioGpuPresentTest";
    if (!RegisterClassExW(&wc)) { printf("RESULT: FAIL - RegisterClassEx %lu\n", GetLastError()); return 2; }
 
