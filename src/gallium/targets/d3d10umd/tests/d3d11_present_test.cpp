@@ -116,6 +116,42 @@ int main(int argc, char **argv)
             }
             tex->Release();
          }
+         /* DirectComposition builds its surfaces as shared textures, and
+          * LogonUI/dwm fault inside DCompSurface::InitializeSurface on this
+          * driver. Exercise the same shapes so the failing one is named. */
+         struct { UINT misc; const char *name; } kShared[] = {
+            { D3D11_RESOURCE_MISC_SHARED,                 "SHARED" },
+            { D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,      "SHARED_KEYEDMUTEX" },
+            { D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+              D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,      "SHARED_NTHANDLE|KEYEDMUTEX" },
+         };
+         for (int k = 0; k < (int)(sizeof kShared / sizeof kShared[0]); ++k) {
+            D3D11_TEXTURE2D_DESC shd = {};
+            shd.Width = 256; shd.Height = 256; shd.MipLevels = 1; shd.ArraySize = 1;
+            shd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; shd.SampleDesc.Count = 1;
+            shd.Usage = D3D11_USAGE_DEFAULT;
+            shd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+            shd.MiscFlags = kShared[k].misc;
+            ID3D11Texture2D *shtex = NULL;
+            HRESULT shr = probeDev->CreateTexture2D(&shd, NULL, &shtex);
+            printf("[step] shared(%s): CreateTexture2D hr=0x%08lX\n",
+                   kShared[k].name, (unsigned long)shr);
+            fflush(stdout);
+            if (SUCCEEDED(shr)) {
+               IDXGIResource *shres = NULL;
+               shr = shtex->QueryInterface(__uuidof(IDXGIResource), (void **)&shres);
+               if (SUCCEEDED(shr)) {
+                  HANDLE shared = NULL;
+                  shr = shres->GetSharedHandle(&shared);
+                  printf("[step] shared(%s): GetSharedHandle hr=0x%08lX handle=%p\n",
+                         kShared[k].name, (unsigned long)shr, shared);
+                  shres->Release();
+               }
+               shtex->Release();
+            }
+            fflush(stdout);
+         }
+
          if (probeCtx) probeCtx->Release();
          if (probeDev) probeDev->Release();
       }
