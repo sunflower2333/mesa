@@ -369,6 +369,29 @@ jobs:
           }
           Write-Host "Native ARM64 probe: $exe"
 
+      - name: Build the native ARM64 D3D11 render-and-present test
+        shell: pwsh
+        run: |
+          # Device creation at a feature level says nothing about whether the
+          # GPU draws or whether a frame reaches the display.  This one opens a
+          # real window, renders through a real DXGI swapchain, presents, and
+          # reads each frame back, so a black screen can be attributed to the
+          # present path rather than to rendering.
+          $probeDir = Join-Path $env:RUNNER_TEMP "d3d11-fl-probe"
+          New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+          $src = 'src/gallium/targets/d3d10umd/tests/d3d11_present_test.cpp'
+          if (-not (Test-Path $src)) { throw "present test source is missing: $src" }
+          $exe = Join-Path $probeDir 'd3d11_present_test.exe'
+          & clang-cl --target=aarch64-pc-windows-msvc /std:c++17 /EHsc /W3 /Zi `
+            $src /Fe:$exe /Fo:$probeDir\ /link /DEBUG d3d11.lib dxgi.lib user32.lib
+          if ($LASTEXITCODE -ne 0) { throw "the D3D11 present test did not compile" }
+          if (-not (Test-Path $exe)) { throw "the D3D11 present test did not link" }
+          $headers = & dumpbin /headers $exe 2>&1
+          if (-not ($headers -match "AA64 machine")) {
+            throw "the present test must be ARM64"
+          }
+          Write-Host "Native ARM64 present test: $exe"
+
       - name: Stage artifact
         shell: pwsh
         run: |
@@ -402,6 +425,14 @@ jobs:
             if (Test-Path $probePdb) { Copy-Item $probePdb -Destination $stage }
           } else {
             throw "the native ARM64 D3D11 probe was not built"
+          }
+          $present = Join-Path $env:RUNNER_TEMP "d3d11-fl-probe\d3d11_present_test.exe"
+          if (Test-Path $present) {
+            Copy-Item $present -Destination $stage
+            $presentPdb = Join-Path $env:RUNNER_TEMP "d3d11-fl-probe\d3d11_present_test.pdb"
+            if (Test-Path $presentPdb) { Copy-Item $presentPdb -Destination $stage }
+          } else {
+            throw "the native ARM64 D3D11 present test was not built"
           }
           Get-ChildItem $stage | ForEach-Object { Write-Host "$($_.Name) $($_.Length)" }
 
