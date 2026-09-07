@@ -197,6 +197,20 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 {
    LOG_ENTRYPOINT();
 
+   /* This driver cannot share a resource across processes: it creates no
+    * kernel allocation behind one, so the runtime hands callers a NULL shared
+    * handle while still reporting success. DirectComposition believes that
+    * S_OK and faults in DCompSurface::InitializeSurface, which crash-loops
+    * LogonUI and dwm and stops Windows from completing logon at all. Refusing
+    * the resource lets the caller fall back instead of trusting a handle that
+    * was never real. */
+   if (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) {
+      DebugPrintf("%s: refusing shared resource (MiscFlags = 0x%x)\n",
+                  __func__, pCreateResource->MiscFlags);
+      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+      return;
+   }
+
    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) ||
        (pCreateResource->pPrimaryDesc &&
         pCreateResource->pPrimaryDesc->DriverFlags & DXGI_DDI_PRIMARY_OPTIONAL)) {
