@@ -34,6 +34,11 @@
 
 #include "DxgiFns.h"
 #include "util/u_memory.h"
+#ifndef UMDF_USING_NTSTATUS
+#define UMDF_USING_NTSTATUS
+#endif
+#include <winternl.h>
+#include <d3dkmthk.h>
 #include "tu_wddm_abi.h"
 #include "Format.h"
 #include "State.h"
@@ -53,6 +58,60 @@
  *
  * ----------------------------------------------------------------------
  */
+
+/*
+ * KmtEscape / PresentAdapter --
+ *
+ *    Reach the miniport the way turnip does, through the runtime thunks in
+ *    gdi32 with a real adapter handle, rather than through the device callback
+ *    table whose layout this build cannot verify.
+ */
+
+static PFND3DKMT_ESCAPE
+KmtEscape(void)
+{
+   static PFND3DKMT_ESCAPE escape = NULL;
+   static bool resolved = false;
+   if (!resolved) {
+      resolved = true;
+      HMODULE gdi = LoadLibraryExW(L"gdi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+      if (gdi != NULL)
+         escape = (PFND3DKMT_ESCAPE)GetProcAddress(gdi, "D3DKMTEscape");
+   }
+   return escape;
+}
+
+static D3DKMT_HANDLE
+PresentAdapter(void)
+{
+   static D3DKMT_HANDLE adapter = 0;
+   static bool resolved = false;
+   if (resolved)
+      return adapter;
+   resolved = true;
+
+   HMODULE gdi = LoadLibraryExW(L"gdi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+   if (gdi == NULL)
+      return 0;
+   PFND3DKMT_OPENADAPTERFROMHDC open_from_hdc =
+      (PFND3DKMT_OPENADAPTERFROMHDC)GetProcAddress(gdi, "D3DKMTOpenAdapterFromHdc");
+   if (open_from_hdc == NULL)
+      return 0;
+
+   /* The adapter driving the primary display is the one scanning out. */
+   HDC hdc = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
+   if (hdc == NULL)
+      return 0;
+
+   D3DKMT_OPENADAPTERFROMHDC open;
+   memset(&open, 0, sizeof open);
+   open.hDc = hdc;
+   if (NT_SUCCESS(open_from_hdc(&open)))
+      adapter = open.hAdapter;
+   DeleteDC(hdc);
+   return adapter;
+}
+
 
 /*
  * PublishPresentFrame --
@@ -83,8 +142,7 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
                 buf[0] == '1';
    }
 
-   if (!enabled || device->present_publish_failed || src == NULL ||
-       device->KTCallbacks.pfnEscapeCb == NULL) {
+   if (!enabled || device->present_publish_failed || src == NULL) {
       return;
    }
 
@@ -172,13 +230,21 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
                 rowBytes);
       }
 
-      D3DDDICB_ESCAPE escape;
+      /* Send this through the runtime's D3DKMTEscape rather than
+       * KTCallbacks.pfnEscapeCb: calling that table entry faults inside
+       * NDXGI::CDevice::SetPriorityCB -- a neighbouring callback -- and kills
+       * the caller before the request ever reaches the miniport. */
+      D3DKMT_ESCAPE escape;
       memset(&escape, 0, sizeof escape);
+      escape.hAdapter = PresentAdapter();
+      escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
       escape.pPrivateDriverData = request;
       escape.PrivateDriverDataSize = requestSize;
 
-      HRESULT hr = device->KTCallbacks.pfnEscapeCb(device->hDevice, &escape);
-      if (FAILED(hr)) {
+      NTSTATUS status = escape.hAdapter != 0 && KmtEscape() != NULL
+                           ? KmtEscape()(&escape)
+                           : STATUS_UNSUCCESSFUL;
+      if (!NT_SUCCESS(status)) {
          /* One refusal is enough: the miniport either speaks this endpoint or
           * it does not, and retrying every frame would only add a readback. */
          device->present_publish_failed = true;
