@@ -172,8 +172,9 @@ struct Resource
    /* A shared resource needs a real kernel allocation behind it: without one
     * the runtime hands callers a NULL shared handle while still reporting
     * success, and DirectComposition faults on it. */
-   HANDLE hKMResource;
+   D3DKMT_HANDLE hKMResource;
    D3DKMT_HANDLE hAllocation;
+   HANDLE hRTResourceHandle;
 
    DXGI_FORMAT Format;
    UINT MipLevels;

@@ -367,6 +367,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       }
       pResource->hKMResource = allocate.hKMResource;
       pResource->hAllocation = allocationInfo.hAllocation;
+      pResource->hRTResourceHandle = allocate.hResource;
    }
 
    if (pCreateResource->pInitialDataUP) {
@@ -499,15 +500,17 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
 
    if (pResource->hAllocation != 0) {
       Device *pDevice = CastDevice(hDevice);
-      D3DKMT_HANDLE allocation = pResource->hAllocation;
       D3DDDICB_DEALLOCATE deallocate;
       memset(&deallocate, 0, sizeof deallocate);
-      deallocate.hResource = pResource->hKMResource;
-      deallocate.NumAllocations = 1;
-      deallocate.HandleList = &allocation;
+      /* With a resource handle set, the runtime frees the resource and every
+       * allocation under it, so no handle list is passed. */
+      deallocate.hResource = pResource->hRTResourceHandle;
+      deallocate.NumAllocations = 0;
+      deallocate.HandleList = NULL;
       pDevice->KTCallbacks.pfnDeallocateCb(pDevice->hDevice, &deallocate);
       pResource->hAllocation = 0;
-      pResource->hKMResource = NULL;
+      pResource->hKMResource = 0;
+      pResource->hRTResourceHandle = NULL;
    }
 
    if (pResource->so_target) {
