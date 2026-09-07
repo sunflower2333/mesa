@@ -34,6 +34,12 @@
 #define STATE_H
 
 #include "DriverIncludes.h"
+
+#ifndef UMDF_USING_NTSTATUS
+#define UMDF_USING_NTSTATUS
+#endif
+#include <winternl.h>
+#include <d3dkmthk.h>
 #include "util/u_hash_table.h"
 #include "cso_cache/cso_context.h"
 
@@ -163,6 +169,12 @@ SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
 
 struct Resource
 {
+   /* A shared resource needs a real kernel allocation behind it: without one
+    * the runtime hands callers a NULL shared handle while still reporting
+    * success, and DirectComposition faults on it. */
+   D3DKMT_HANDLE hKMResource;
+   D3DKMT_HANDLE hAllocation;
+
    DXGI_FORMAT Format;
    UINT MipLevels;
    UINT NumSubResources;

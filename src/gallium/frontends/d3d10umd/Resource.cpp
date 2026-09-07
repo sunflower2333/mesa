@@ -32,6 +32,7 @@
 
 
 #include "Resource.h"
+#include "tu_wddm_abi.h"
 #include "Format.h"
 #include "State.h"
 #include "Query.h"
@@ -196,20 +197,6 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                D3D10DDI_HRTRESOURCE hRTResource)                        // IN
 {
    LOG_ENTRYPOINT();
-
-   /* This driver cannot share a resource across processes: it creates no
-    * kernel allocation behind one, so the runtime hands callers a NULL shared
-    * handle while still reporting success. DirectComposition believes that
-    * S_OK and faults in DCompSurface::InitializeSurface, which crash-loops
-    * LogonUI and dwm and stops Windows from completing logon at all. Refusing
-    * the resource lets the caller fall back instead of trusting a handle that
-    * was never real. */
-   if (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) {
-      DebugPrintf("%s: refusing shared resource (MiscFlags = 0x%x)\n",
-                  __func__, pCreateResource->MiscFlags);
-      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
-      return;
-   }
 
    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) ||
        (pCreateResource->pPrimaryDesc &&
@@ -459,6 +446,19 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Resource *pResource = CastResource(hResource);
+
+   if (pResource->hAllocation != 0) {
+      Device *pDevice = CastDevice(hDevice);
+      D3DKMT_HANDLE allocation = pResource->hAllocation;
+      D3DDDICB_DEALLOCATE deallocate;
+      memset(&deallocate, 0, sizeof deallocate);
+      deallocate.hResource = pResource->hKMResource;
+      deallocate.NumAllocations = 1;
+      deallocate.HandleList = &allocation;
+      pDevice->KTCallbacks.pfnDeallocateCb(pDevice->hDevice, &deallocate);
+      pResource->hAllocation = 0;
+      pResource->hKMResource = 0;
+   }
 
    if (pResource->so_target) {
       pipe_so_target_reference(&pResource->so_target, NULL);
