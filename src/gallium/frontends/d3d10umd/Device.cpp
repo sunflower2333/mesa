@@ -402,6 +402,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    }
 
    pipe_resource_reference(&pDevice->index_buffer, NULL);
+   pipe_resource_reference(&pDevice->present_staging, NULL);
 
    static struct pipe_sampler_view * sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    memset(sampler_views, 0, sizeof sampler_views);

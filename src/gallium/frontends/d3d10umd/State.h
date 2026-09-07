@@ -99,6 +99,13 @@ struct Device
    HANDLE hContext;
 
    D3DDDI_DEVICECALLBACKS KTCallbacks;
+
+   /* Frame publication. The display miniport cannot see this device's frames:
+    * they are rendered on the host, so the guest pages behind the back buffer
+    * stay zero. Keep one staging surface to read a finished frame back and
+    * hand the pixels to the miniport. */
+   struct pipe_resource *present_staging;
+   bool present_publish_failed;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;
    DXGI_DDI_BASE_CALLBACKS *pDXGIBaseCallbacks;
 

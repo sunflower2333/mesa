@@ -48,6 +48,7 @@ typedef enum VIOGPU_WDDM_RENDER_OPCODE {
 typedef enum VIOGPU_WDDM_ESCAPE_OPCODE {
    VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO = 1,
    VIOGPU_WDDM_ESCAPE_GET_COMPLETED_FENCE = 2,
+   VIOGPU_WDDM_ESCAPE_PRESENT_BLIT = 3,
 } VIOGPU_WDDM_ESCAPE_OPCODE;
 
 #pragma pack(push, 4)
@@ -140,6 +141,24 @@ typedef struct VIOGPU_WDDM_RENDER_COMMAND {
    VIOGPU_WDDM_UINT32 CommandStreamSize;
    VIOGPU_WDDM_UINT32 Reserved[4];
 } VIOGPU_WDDM_RENDER_COMMAND;
+
+/* Frame publication. The user-mode driver renders on the host, so the guest
+ * pages behind its back buffer stay zero and nothing the display path copies
+ * from them can be visible. This carries the finished frame itself: the
+ * geometry here, the pixels immediately after this structure. It names no
+ * resource -- the receiver publishes to the surface it already scans out. */
+typedef struct VIOGPU_WDDM_PRESENT_BLIT
+{
+   VIOGPU_WDDM_ABI_HEADER Header;
+   VIOGPU_WDDM_UINT32 Opcode;
+   VIOGPU_WDDM_UINT32 Flags;
+   VIOGPU_WDDM_UINT32 Width;
+   VIOGPU_WDDM_UINT32 Height;
+   VIOGPU_WDDM_UINT32 SourcePitch;
+   VIOGPU_WDDM_UINT32 Format;
+   VIOGPU_WDDM_UINT32 PayloadSize;
+   VIOGPU_WDDM_UINT32 Reserved;
+} VIOGPU_WDDM_PRESENT_BLIT;
 
 typedef struct VIOGPU_WDDM_ALLOCATION_REFERENCE {
    VIOGPU_WDDM_UINT32 AllocationIndex;

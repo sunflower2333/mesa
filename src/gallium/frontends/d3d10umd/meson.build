@@ -30,6 +30,7 @@ libd3d10umd = static_library(
   cpp_args : _c_args_d3d10umd,
   include_directories : [
     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_winddk,
+    include_directories('../../../freedreno/vulkan'),
   ],
   dependencies: idep_mesautilformat,
 )

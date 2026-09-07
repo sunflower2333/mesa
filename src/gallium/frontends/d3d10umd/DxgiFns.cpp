@@ -33,6 +33,9 @@
 #include <stdio.h>
 
 #include "DxgiFns.h"
+#include "util/u_box.h"
+#include "util/u_memory.h"
+#include "tu_wddm_abi.h"
 #include "Format.h"
 #include "State.h"
 
@@ -52,6 +55,127 @@
  * ----------------------------------------------------------------------
  */
 
+/*
+ * PublishPresentFrame --
+ *
+ *    Hand a finished frame to the display miniport.
+ *
+ *    This driver renders on the host, so the guest pages behind the back
+ *    buffer are never written and the miniport's display path copies zeros
+ *    no matter how it publishes them.  Read the frame back into a staging
+ *    surface and send the pixels through the miniport's frame publication
+ *    escape, which blits them into the surface it scans out.
+ */
+static void
+PublishPresentFrame(struct Device *device, Resource *pSrcResource)
+{
+   struct pipe_resource *src = pSrcResource ? pSrcResource->resource : NULL;
+
+   if (device->present_publish_failed || src == NULL ||
+       device->KTCallbacks.pfnEscapeCb == NULL) {
+      return;
+   }
+
+   /* The miniport's scanout is B8G8R8A8; anything else would need a
+    * conversion this path deliberately does not attempt. */
+   if (src->format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+       src->format != PIPE_FORMAT_B8G8R8X8_UNORM) {
+      return;
+   }
+
+   struct pipe_context *pipe = device->pipe;
+   struct pipe_screen *screen = pipe->screen;
+   const unsigned width = src->width0;
+   const unsigned height = src->height0;
+
+   if (width == 0 || height == 0) {
+      return;
+   }
+
+   if (device->present_staging != NULL &&
+       (device->present_staging->width0 != width ||
+        device->present_staging->height0 != height ||
+        device->present_staging->format != src->format)) {
+      pipe_resource_reference(&device->present_staging, NULL);
+   }
+
+   if (device->present_staging == NULL) {
+      struct pipe_resource templat;
+      memset(&templat, 0, sizeof templat);
+      templat.target = PIPE_TEXTURE_2D;
+      templat.format = src->format;
+      templat.width0 = width;
+      templat.height0 = height;
+      templat.depth0 = 1;
+      templat.array_size = 1;
+      templat.last_level = 0;
+      templat.nr_samples = 1;
+      templat.usage = PIPE_USAGE_STAGING;
+      templat.bind = PIPE_BIND_RENDER_TARGET;
+      device->present_staging = screen->resource_create(screen, &templat);
+      if (device->present_staging == NULL) {
+         device->present_publish_failed = true;
+         return;
+      }
+   }
+
+   struct pipe_box box;
+   u_box_2d(0, 0, width, height, &box);
+   pipe->resource_copy_region(pipe, device->present_staging, 0, 0, 0, 0, src, 0, &box);
+
+   struct pipe_transfer *transfer = NULL;
+   void *map = pipe->texture_map(pipe, device->present_staging, 0, PIPE_MAP_READ,
+                                 &box, &transfer);
+   if (map == NULL) {
+      device->present_publish_failed = true;
+      return;
+   }
+
+   const unsigned rowBytes = width * 4;
+   const unsigned payloadSize = rowBytes * height;
+   const unsigned requestSize = sizeof(VIOGPU_WDDM_PRESENT_BLIT) + payloadSize;
+   uint8_t *request = (uint8_t *)MALLOC(requestSize);
+
+   if (request != NULL) {
+      VIOGPU_WDDM_PRESENT_BLIT *blit = (VIOGPU_WDDM_PRESENT_BLIT *)request;
+      memset(blit, 0, sizeof *blit);
+      blit->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+      blit->Header.Version = VIOGPU_WDDM_ABI_VERSION;
+      blit->Header.Size = sizeof *blit;
+      blit->Opcode = VIOGPU_WDDM_ESCAPE_PRESENT_BLIT;
+      blit->Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+      blit->Width = width;
+      blit->Height = height;
+      blit->SourcePitch = rowBytes;
+      blit->Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
+      blit->PayloadSize = payloadSize;
+
+      uint8_t *payload = request + sizeof(VIOGPU_WDDM_PRESENT_BLIT);
+      for (unsigned row = 0; row < height; ++row) {
+         memcpy(payload + (size_t)row * rowBytes,
+                (const uint8_t *)map + (size_t)row * transfer->stride,
+                rowBytes);
+      }
+
+      D3DDDICB_ESCAPE escape;
+      memset(&escape, 0, sizeof escape);
+      escape.pPrivateDriverData = request;
+      escape.PrivateDriverDataSize = requestSize;
+
+      HRESULT hr = device->KTCallbacks.pfnEscapeCb(device->hDevice, &escape);
+      if (FAILED(hr)) {
+         /* One refusal is enough: the miniport either speaks this endpoint or
+          * it does not, and retrying every frame would only add a readback. */
+         device->present_publish_failed = true;
+      }
+
+      FREE(request);
+   }
+
+   pipe_texture_unmap(pipe, transfer);
+}
+
+
 HRESULT APIENTRY
 _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
 {
@@ -62,6 +186,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
 
    device->pipe->flush(device->pipe, NULL, 0);
+   PublishPresentFrame(device, pSrcResource);
    device->pipe->screen->flush_frontbuffer(device->pipe->screen, device->pipe, 
       pSrcResource->resource, 0, 0, pPresentData->pDXGIContext, 0, NULL);
 

@@ -106,3 +106,14 @@ ABI_OFFSET(offset.allocation_reference.allocation_offset, VIOGPU_WDDM_ALLOCATION
 ABI_OFFSET(offset.allocation_reference.length, VIOGPU_WDDM_ALLOCATION_REFERENCE, Length, 16);
 ABI_OFFSET(offset.allocation_reference.patch_offset, VIOGPU_WDDM_ALLOCATION_REFERENCE, PatchOffset, 24);
 ABI_OFFSET(offset.allocation_reference.reserved, VIOGPU_WDDM_ALLOCATION_REFERENCE, Reserved, 28);
+ABI_VALUE(escape.opcode.present_blit, VIOGPU_WDDM_ESCAPE_PRESENT_BLIT, 3);
+ABI_SIZE(size.present_blit, VIOGPU_WDDM_PRESENT_BLIT, 48);
+ABI_OFFSET(offset.present_blit.header, VIOGPU_WDDM_PRESENT_BLIT, Header, 0);
+ABI_OFFSET(offset.present_blit.opcode, VIOGPU_WDDM_PRESENT_BLIT, Opcode, 16);
+ABI_OFFSET(offset.present_blit.flags, VIOGPU_WDDM_PRESENT_BLIT, Flags, 20);
+ABI_OFFSET(offset.present_blit.width, VIOGPU_WDDM_PRESENT_BLIT, Width, 24);
+ABI_OFFSET(offset.present_blit.height, VIOGPU_WDDM_PRESENT_BLIT, Height, 28);
+ABI_OFFSET(offset.present_blit.source_pitch, VIOGPU_WDDM_PRESENT_BLIT, SourcePitch, 32);
+ABI_OFFSET(offset.present_blit.format, VIOGPU_WDDM_PRESENT_BLIT, Format, 36);
+ABI_OFFSET(offset.present_blit.payload_size, VIOGPU_WDDM_PRESENT_BLIT, PayloadSize, 40);
+ABI_OFFSET(offset.present_blit.reserved, VIOGPU_WDDM_PRESENT_BLIT, Reserved, 44);
