@@ -80,6 +80,47 @@ int main(int argc, char **argv)
    PumpMessages();
 
    Step("describe swapchain");
+   /* Residency probe: the runtime tracks each resource by the kernel allocation
+    * the user-mode driver is supposed to have created for it.  If none was ever
+    * created, SetEvictionPriority drives the runtime into
+    * NDXGI::CDevice::SetPriorityCB against an uninitialised handle.  Do this on
+    * a device with no swapchain so the two failures cannot be confused. */
+   if (!fullscreenSize) {
+      ID3D11Device *probeDev = NULL;
+      ID3D11DeviceContext *probeCtx = NULL;
+      D3D_FEATURE_LEVEL probeFl = (D3D_FEATURE_LEVEL)0;
+      const D3D_FEATURE_LEVEL probeWanted[] = { D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+      Step("residency: create device");
+      HRESULT phr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
+                                      probeWanted, (UINT)(sizeof probeWanted / sizeof probeWanted[0]),
+                                      D3D11_SDK_VERSION, &probeDev, &probeFl, &probeCtx);
+      printf("[step] residency: device hr=0x%08lX\n", (unsigned long)phr);
+      if (SUCCEEDED(phr)) {
+         D3D11_TEXTURE2D_DESC td = {};
+         td.Width = 256; td.Height = 256; td.MipLevels = 1; td.ArraySize = 1;
+         td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+         td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+         ID3D11Texture2D *tex = NULL;
+         Step("residency: create texture");
+         phr = probeDev->CreateTexture2D(&td, NULL, &tex);
+         printf("[step] residency: texture hr=0x%08lX\n", (unsigned long)phr);
+         if (SUCCEEDED(phr)) {
+            IDXGIResource *dxgiRes = NULL;
+            phr = tex->QueryInterface(__uuidof(IDXGIResource), (void **)&dxgiRes);
+            printf("[step] residency: QueryInterface hr=0x%08lX\n", (unsigned long)phr);
+            if (SUCCEEDED(phr)) {
+               Step("residency: SetEvictionPriority  <-- expected fault point");
+               phr = dxgiRes->SetEvictionPriority(DXGI_RESOURCE_PRIORITY_MAXIMUM);
+               printf("[step] residency: SetEvictionPriority hr=0x%08lX (survived)\n", (unsigned long)phr);
+               dxgiRes->Release();
+            }
+            tex->Release();
+         }
+         if (probeCtx) probeCtx->Release();
+         if (probeDev) probeDev->Release();
+      }
+   }
+
    DXGI_SWAP_CHAIN_DESC scd = {};
    scd.BufferCount = 2;
    scd.BufferDesc.Width = width;
