@@ -70,7 +70,20 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
 {
    struct pipe_resource *src = pSrcResource ? pSrcResource->resource : NULL;
 
-   if (device->present_publish_failed || src == NULL ||
+   /* Publishing is opt-in until the callback contract is verified.  DWM faults
+    * inside NDXGI::CDevice::SetPriorityCB -- another entry of this same
+    * callback table -- on every present, while the miniport records no
+    * publication arriving at all, which is what calling the wrong slot of
+    * D3DDDI_DEVICECALLBACKS would look like.  Default to the behaviour that
+    * kept the compositor alive. */
+   static int enabled = -1;
+   if (enabled < 0) {
+      char buf[8];
+      enabled = GetEnvironmentVariableA("VIOGPU_PRESENT_BRIDGE", buf, sizeof buf) > 0 &&
+                buf[0] == '1';
+   }
+
+   if (!enabled || device->present_publish_failed || src == NULL ||
        device->KTCallbacks.pfnEscapeCb == NULL) {
       return;
    }
