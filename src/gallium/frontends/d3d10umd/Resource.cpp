@@ -351,7 +351,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
       D3DDDICB_ALLOCATE allocate;
       memset(&allocate, 0, sizeof allocate);
-      allocate.hResource = (D3DKMT_HANDLE)(UINT_PTR)hRTResource.handle;
+      allocate.hResource = (HANDLE)(UINT_PTR)hRTResource.handle;
       allocate.NumAllocations = 1;
       allocate.pAllocationInfo = &allocationInfo;
 
@@ -507,7 +507,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       deallocate.HandleList = &allocation;
       pDevice->KTCallbacks.pfnDeallocateCb(pDevice->hDevice, &deallocate);
       pResource->hAllocation = 0;
-      pResource->hKMResource = 0;
+      pResource->hKMResource = NULL;
    }
 
    if (pResource->so_target) {
