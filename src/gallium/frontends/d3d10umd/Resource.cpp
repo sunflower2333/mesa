@@ -357,17 +357,20 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
       HRESULT ahr = pDevice->KTCallbacks.pfnAllocateCb(pDevice->hDevice, &allocate);
       if (FAILED(ahr) || allocationInfo.hAllocation == 0) {
-         DebugPrintf("%s: shared allocation failed hr=0x%08lx\n",
+         /* Refusing here makes dwm.exe fail fast (MilFailFastForHR), which is
+          * fatal to the desktop. Keep the resource usable for rendering and
+          * let the caller discover that it cannot be shared, rather than
+          * failing creation outright. */
+         DebugPrintf("%s: shared allocation failed hr=0x%08lx, continuing unshared\n",
                      __func__, (unsigned long)ahr);
-         pipe_resource_reference(&pResource->resource, NULL);
-         free(pResource->transfers);
-         pResource->transfers = NULL;
-         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
-         return;
+         pResource->hKMResource = 0;
+         pResource->hAllocation = 0;
+         pResource->hRTResourceHandle = NULL;
+      } else {
+         pResource->hKMResource = allocate.hKMResource;
+         pResource->hAllocation = allocationInfo.hAllocation;
+         pResource->hRTResourceHandle = allocate.hResource;
       }
-      pResource->hKMResource = allocate.hKMResource;
-      pResource->hAllocation = allocationInfo.hAllocation;
-      pResource->hRTResourceHandle = allocate.hResource;
    }
 
    if (pCreateResource->pInitialDataUP) {
