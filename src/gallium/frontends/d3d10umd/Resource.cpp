@@ -356,6 +356,34 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       allocate.pAllocationInfo = &allocationInfo;
 
       HRESULT ahr = pDevice->KTCallbacks.pfnAllocateCb(pDevice->hDevice, &allocate);
+
+      /* The miniport reports refusing none of these, so a failure happens
+       * inside the runtime and leaves no trace this driver can read back.
+       * Record it where it can be collected. */
+      {
+         static unsigned attempts = 0, failures = 0;
+         ++attempts;
+         if (FAILED(ahr) || allocationInfo.hAllocation == 0)
+            ++failures;
+         HANDLE log = CreateFileA("C:\\Users\\Public\\umd_alloc.log",
+                                  FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+         if (log != INVALID_HANDLE_VALUE) {
+            char line[256];
+            int n = _snprintf_s(line, sizeof line, _TRUNCATE,
+                                "alloc hr=0x%08lx hAlloc=0x%x dim=%u %ux%u fmt=%u attempts=%u failures=%u\r\n",
+                                (unsigned long)ahr, allocationInfo.hAllocation,
+                                pCreateResource->ResourceDimension,
+                                shared_width, shared_height,
+                                (unsigned)pCreateResource->Format,
+                                attempts, failures);
+            DWORD written = 0;
+            if (n > 0)
+               WriteFile(log, line, (DWORD)n, &written, NULL);
+            CloseHandle(log);
+         }
+      }
+
       if (FAILED(ahr) || allocationInfo.hAllocation == 0) {
          DebugPrintf("%s: shared allocation failed hr=0x%08lx\n",
                      __func__, (unsigned long)ahr);
