@@ -323,12 +323,18 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
       _Blt;
 
-   if (0) {
-      return S_OK;
-   } else {
-      // Tell DXGI to not use the shared resource presentation path when
-      // communicating with DWM:
-      // http://msdn.microsoft.com/en-us/library/windows/hardware/ff569887(v=vs.85).aspx
+   /* DXGI_STATUS_NO_REDIRECTION opts this driver out of the shared-resource
+    * presentation path DWM uses, leaving DWM to present against a driver that
+    * has never composited here: it crash-loops in NDXGI::CDevice::SetPriorityCB
+    * at the same rate on every user-mode driver version tried, including the
+    * one from before any of this work. Let the environment select the path so
+    * the two can be compared on hardware rather than argued about. */
+   {
+      char buf[8];
+      if (GetEnvironmentVariableA("VIOGPU_DXGI_REDIRECTION", buf, sizeof buf) > 0 &&
+          buf[0] == '1') {
+         return S_OK;
+      }
       return DXGI_STATUS_NO_REDIRECTION;
    }
 }
