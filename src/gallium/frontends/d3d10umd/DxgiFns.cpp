@@ -33,7 +33,6 @@
 #include <stdio.h>
 
 #include "DxgiFns.h"
-#include "util/u_box.h"
 #include "util/u_memory.h"
 #include "tu_wddm_abi.h"
 #include "Format.h"
@@ -120,7 +119,10 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    }
 
    struct pipe_box box;
-   u_box_2d(0, 0, width, height, &box);
+   memset(&box, 0, sizeof box);
+   box.width = width;
+   box.height = height;
+   box.depth = 1;
    pipe->resource_copy_region(pipe, device->present_staging, 0, 0, 0, 0, src, 0, &box);
 
    struct pipe_transfer *transfer = NULL;
