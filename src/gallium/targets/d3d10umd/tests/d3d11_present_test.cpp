@@ -36,8 +36,18 @@ static void PumpMessages(void)
    }
 }
 
+static void Step(const char *what)
+{
+   printf("[step] %s\n", what);
+   fflush(stdout);
+}
+
 int main(int argc, char **argv)
 {
+   /* A crash here loses buffered output entirely, which is how this test
+    * previously exited with an empty file.  Report every step as it happens. */
+   setvbuf(stdout, NULL, _IONBF, 0);
+
    int width = 640, height = 480, frames = (int)(sizeof kFrames / sizeof kFrames[0]);
    bool fullscreenSize = false;
    for (int i = 1; i < argc; ++i) {
@@ -52,6 +62,7 @@ int main(int argc, char **argv)
 
    printf("session: window %dx%d\n", width, height);
 
+   Step("register window class");
    WNDCLASSEXW wc = {};
    wc.cbSize = sizeof wc;
    wc.lpfnWndProc = WndProc;
@@ -59,6 +70,7 @@ int main(int argc, char **argv)
    wc.lpszClassName = L"VioGpuPresentTest";
    if (!RegisterClassExW(&wc)) { printf("RESULT: FAIL - RegisterClassEx %lu\n", GetLastError()); return 2; }
 
+   Step("create window");
    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"VioGPU present test",
                                WS_POPUP | WS_VISIBLE, 0, 0, width, height,
                                NULL, NULL, wc.hInstance, NULL);
@@ -67,6 +79,7 @@ int main(int argc, char **argv)
    UpdateWindow(hwnd);
    PumpMessages();
 
+   Step("describe swapchain");
    DXGI_SWAP_CHAIN_DESC scd = {};
    scd.BufferCount = 2;
    scd.BufferDesc.Width = width;
@@ -86,20 +99,24 @@ int main(int argc, char **argv)
    ID3D11DeviceContext *ctx = NULL;
    D3D_FEATURE_LEVEL got = (D3D_FEATURE_LEVEL)0;
 
+   Step("D3D11CreateDeviceAndSwapChain");
    HRESULT hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
                                               wanted, (UINT)(sizeof wanted / sizeof wanted[0]),
                                               D3D11_SDK_VERSION, &scd, &swap, &dev, &got, &ctx);
    if (FAILED(hr)) { printf("RESULT: FAIL - D3D11CreateDeviceAndSwapChain hr=0x%08lX\n", (unsigned long)hr); return 3; }
    printf("device: feature level 0x%04X\n", (unsigned)got);
 
+   Step("GetBuffer");
    ID3D11Texture2D *back = NULL;
    hr = swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void **)&back);
    if (FAILED(hr)) { printf("RESULT: FAIL - GetBuffer hr=0x%08lX\n", (unsigned long)hr); return 4; }
 
+   Step("CreateRenderTargetView");
    ID3D11RenderTargetView *rtv = NULL;
    hr = dev->CreateRenderTargetView(back, NULL, &rtv);
    if (FAILED(hr)) { printf("RESULT: FAIL - CreateRenderTargetView hr=0x%08lX\n", (unsigned long)hr); return 5; }
 
+   Step("create staging texture");
    D3D11_TEXTURE2D_DESC sd = {};
    back->GetDesc(&sd);
    sd.Usage = D3D11_USAGE_STAGING;
@@ -112,6 +129,7 @@ int main(int argc, char **argv)
 
    int rendered = 0, presented = 0;
    for (int f = 0; f < frames; ++f) {
+      printf("[step] frame %d: clear\n", f);
       const float colour[4] = { kFrames[f].r, kFrames[f].g, kFrames[f].b, 1.0f };
       ctx->ClearRenderTargetView(rtv, colour);
       ctx->Flush();
@@ -132,6 +150,7 @@ int main(int argc, char **argv)
          printf("frame %d (%-7s): readback Map failed hr=0x%08lX\n", f, kFrames[f].name, (unsigned long)hr);
       }
 
+      printf("[step] frame %d: Present\n", f);
       hr = swap->Present(0, 0);
       if (SUCCEEDED(hr)) ++presented;
       else printf("frame %d: Present hr=0x%08lX\n", f, (unsigned long)hr);
