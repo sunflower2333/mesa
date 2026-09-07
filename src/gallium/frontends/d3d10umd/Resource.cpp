@@ -498,8 +498,78 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
              D3D10DDI_HRESOURCE hResource,                        // IN
              D3D10DDI_HRTRESOURCE hRTResource)                    // IN
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
-   SetError(hDevice, E_OUTOFMEMORY);
+   LOG_ENTRYPOINT();
+
+   /* Compositing is the act of opening surfaces other processes created, so a
+    * driver that fails every open cannot show a desktop: dwm.exe takes the
+    * failing HRESULT straight to MilFailFastForHR and dies. The allocation's
+    * private data is this driver's own VIOGPU_WDDM_ALLOCATION_INFO and already
+    * describes the surface, so rebuild a matching resource and keep the
+    * existing allocation handle. */
+   struct pipe_context *pipe = CastPipeContext(hDevice);
+   struct pipe_screen *screen = pipe->screen;
+   Resource *pResource = CastResource(hResource);
+
+   memset(pResource, 0, sizeof *pResource);
+
+   if (pOpenResource == NULL || pOpenResource->NumAllocations != 1 ||
+       pOpenResource->pOpenAllocationInfo == NULL) {
+      DebugPrintf("%s: unexpected open shape\n", __func__);
+      SetError(hDevice, E_INVALIDARG);
+      return;
+   }
+
+   const D3DDDI_OPENALLOCATIONINFO *openInfo = &pOpenResource->pOpenAllocationInfo[0];
+   if (openInfo->pPrivateDriverData == NULL ||
+       openInfo->PrivateDriverDataSize != sizeof(VIOGPU_WDDM_ALLOCATION_INFO)) {
+      DebugPrintf("%s: allocation private data is %u bytes, expected %u\n", __func__,
+                  (unsigned)openInfo->PrivateDriverDataSize,
+                  (unsigned)sizeof(VIOGPU_WDDM_ALLOCATION_INFO));
+      SetError(hDevice, E_INVALIDARG);
+      return;
+   }
+
+   VIOGPU_WDDM_ALLOCATION_INFO info;
+   memcpy(&info, openInfo->pPrivateDriverData, sizeof info);
+   if (info.Header.Magic != VIOGPU_WDDM_ABI_MAGIC || info.Width == 0 || info.Height == 0) {
+      DebugPrintf("%s: allocation private data is not this driver's\n", __func__);
+      SetError(hDevice, E_INVALIDARG);
+      return;
+   }
+
+   struct pipe_resource templat;
+   memset(&templat, 0, sizeof templat);
+   templat.target = PIPE_TEXTURE_2D;
+   templat.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   templat.width0 = info.Width;
+   templat.height0 = info.Height;
+   templat.depth0 = 1;
+   templat.array_size = 1;
+   templat.last_level = 0;
+   templat.nr_samples = 1;
+   templat.usage = PIPE_USAGE_DEFAULT;
+   templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
+
+   pResource->resource = screen->resource_create(screen, &templat);
+   if (pResource->resource == NULL) {
+      DebugPrintf("%s: could not create the backing resource\n", __func__);
+      SetError(hDevice, E_OUTOFMEMORY);
+      return;
+   }
+
+   pResource->Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+   pResource->MipLevels = 1;
+   pResource->NumSubResources = 1;
+   pResource->buffer = false;
+   pResource->transfers = (struct pipe_transfer **)calloc(1, sizeof *pResource->transfers);
+   pResource->hAllocation = openInfo->hAllocation;
+   pResource->hKMResource = pOpenResource->hKMResource;
+   /* The allocation belongs to whoever created it; this device only holds a
+    * view, so destruction here must not deallocate it. */
+   pResource->hRTResourceHandle = NULL;
+
+   DebugPrintf("%s: opened %ux%u hAllocation=0x%x\n", __func__,
+               info.Width, info.Height, openInfo->hAllocation);
 }
 
 
@@ -526,7 +596,9 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Resource *pResource = CastResource(hResource);
 
-   if (pResource->hAllocation != 0) {
+   /* Only free an allocation this device created. An opened resource holds a
+    * view of another process's allocation and must not deallocate it. */
+   if (pResource->hAllocation != 0 && pResource->hRTResourceHandle != NULL) {
       Device *pDevice = CastDevice(hDevice);
       D3DDDICB_DEALLOCATE deallocate;
       memset(&deallocate, 0, sizeof deallocate);
