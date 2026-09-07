@@ -319,6 +319,56 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
 
+   /* A shared resource must have a real kernel allocation behind it. Without
+    * one the runtime still reports success from GetSharedHandle and hands back
+    * a NULL handle, which DirectComposition trusts and then faults on -- that
+    * is what crash-loops LogonUI.exe and dwm.exe on this driver. If the
+    * allocation cannot be made, refuse the resource rather than return a
+    * handle that was never real. */
+   if (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) {
+      Device *pDevice = CastDevice(hDevice);
+      const unsigned shared_width = pCreateResource->pMipInfoList[0].TexelWidth;
+      const unsigned shared_height = pCreateResource->pMipInfoList[0].TexelHeight;
+      const unsigned shared_pitch = shared_width * 4;
+
+      VIOGPU_WDDM_ALLOCATION_INFO privateData;
+      memset(&privateData, 0, sizeof privateData);
+      privateData.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+      privateData.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+      privateData.Header.Size = sizeof privateData;
+      privateData.Size = (VIOGPU_WDDM_UINT64)shared_pitch * shared_height;
+      privateData.Alignment = 4096;
+      privateData.Flags = VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+      privateData.Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
+      privateData.Width = shared_width;
+      privateData.Height = shared_height;
+      privateData.Pitch = shared_pitch;
+
+      D3DDDI_ALLOCATIONINFO allocationInfo;
+      memset(&allocationInfo, 0, sizeof allocationInfo);
+      allocationInfo.pPrivateDriverData = &privateData;
+      allocationInfo.PrivateDriverDataSize = sizeof privateData;
+
+      D3DDDICB_ALLOCATE allocate;
+      memset(&allocate, 0, sizeof allocate);
+      allocate.hResource = (D3DKMT_HANDLE)(UINT_PTR)hRTResource.handle;
+      allocate.NumAllocations = 1;
+      allocate.pAllocationInfo = &allocationInfo;
+
+      HRESULT ahr = pDevice->KTCallbacks.pfnAllocateCb(pDevice->hDevice, &allocate);
+      if (FAILED(ahr) || allocationInfo.hAllocation == 0) {
+         DebugPrintf("%s: shared allocation failed hr=0x%08lx\n",
+                     __func__, (unsigned long)ahr);
+         pipe_resource_reference(&pResource->resource, NULL);
+         free(pResource->transfers);
+         pResource->transfers = NULL;
+         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+         return;
+      }
+      pResource->hKMResource = allocate.hKMResource;
+      pResource->hAllocation = allocationInfo.hAllocation;
+   }
+
    if (pCreateResource->pInitialDataUP) {
       if (pResource->buffer) {
          assert(pResource->NumSubResources == 1);
