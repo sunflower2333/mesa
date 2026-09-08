@@ -52,10 +52,18 @@
 static HRESULT
 TransferSharedResource(Device *device, Resource *resource, bool publish)
 {
+   static volatile LONG sequence;
+   const LONG transfer_sequence = InterlockedIncrement(&sequence);
+   void *pixels = NULL;
+   struct pipe_transfer *transfer = NULL;
+   HRESULT lock_hr = E_UNEXPECTED;
+   HRESULT unlock_hr = E_UNEXPECTED;
+   void *lock_data = NULL;
+   unsigned transfer_stride = 0;
+   enum pipe_reset_status reset_status = PIPE_NO_RESET;
+
    if (resource->hAllocation == 0)
       return S_OK;
-   if (!device->KTCallbacks.pfnLockCb || !device->KTCallbacks.pfnUnlockCb)
-      return E_NOTIMPL;
 
    struct pipe_context *pipe = device->pipe;
    struct pipe_resource *texture = resource->resource;
@@ -63,46 +71,80 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    box.width = texture->width0;
    box.height = texture->height0;
    box.depth = 1;
-   struct pipe_transfer *transfer = NULL;
-   // A synchronized map waits for the GPU before publishing its pixels.
-   void *pixels = pipe->texture_map(pipe, texture, 0,
-                                   publish ? PIPE_MAP_READ : PIPE_MAP_WRITE,
-                                   &box, &transfer);
-   if (!pixels)
-      return E_OUTOFMEMORY;
-
-   D3DDDICB_LOCK lock = {};
-   lock.hAllocation = resource->hAllocation;
-   lock.Flags.LockEntire = 1;
-   lock.Flags.ReadOnly = !publish;
-   lock.Flags.WriteOnly = publish;
-   HRESULT hr = device->KTCallbacks.pfnLockCb(device->hDevice, &lock);
-   if (SUCCEEDED(hr)) {
-      if (!lock.pData) {
-         hr = E_FAIL;
+   if (!device->KTCallbacks.pfnLockCb || !device->KTCallbacks.pfnUnlockCb) {
+      lock_hr = E_NOTIMPL;
+   } else {
+      // A synchronized map waits for the GPU before publishing its pixels.
+      pixels = pipe->texture_map(pipe, texture, 0,
+                                publish ? PIPE_MAP_READ : PIPE_MAP_WRITE,
+                                &box, &transfer);
+      if (!pixels) {
+         reset_status = pipe->get_device_reset_status
+                           ? pipe->get_device_reset_status(pipe)
+                           : PIPE_NO_RESET;
+         lock_hr = reset_status == PIPE_NO_RESET ? E_OUTOFMEMORY : D3DDDIERR_DEVICEREMOVED;
       } else {
-         const size_t row_bytes = (size_t)texture->width0 * 4;
-         for (unsigned y = 0; y < texture->height0; ++y) {
-            void *gpu = (char *)pixels + (size_t)y * transfer->stride;
-            void *shared = (char *)lock.pData + (size_t)y * resource->shared_pitch;
-            if (publish)
-               memcpy(shared, gpu, row_bytes);
-            else
-               memcpy(gpu, shared, row_bytes);
+         transfer_stride = transfer->stride;
+         D3DDDICB_LOCK lock = {};
+         lock.hAllocation = resource->hAllocation;
+         lock.Flags.LockEntire = 1;
+         lock.Flags.ReadOnly = !publish;
+         lock.Flags.WriteOnly = publish;
+         lock_hr = device->KTCallbacks.pfnLockCb(device->hDevice, &lock);
+         lock_data = lock.pData;
+         if (SUCCEEDED(lock_hr)) {
+            if (!lock.pData) {
+               lock_hr = E_FAIL;
+            } else {
+               const size_t row_bytes = (size_t)texture->width0 * 4;
+               for (unsigned y = 0; y < texture->height0; ++y) {
+                  void *gpu = (char *)pixels + (size_t)y * transfer_stride;
+                  void *shared = (char *)lock.pData + (size_t)y * resource->shared_pitch;
+                  if (publish)
+                     memcpy(shared, gpu, row_bytes);
+                  else
+                     memcpy(gpu, shared, row_bytes);
+               }
+            }
+            D3DDDICB_UNLOCK unlock = {};
+            unlock.NumAllocations = 1;
+            unlock.phAllocations = &lock.hAllocation;
+            unlock_hr = device->KTCallbacks.pfnUnlockCb(device->hDevice, &unlock);
          }
+         pipe_texture_unmap(pipe, transfer);
+         reset_status = pipe->get_device_reset_status
+                           ? pipe->get_device_reset_status(pipe)
+                           : PIPE_NO_RESET;
       }
-      D3DDDICB_UNLOCK unlock = {};
-      unlock.NumAllocations = 1;
-      unlock.phAllocations = &lock.hAllocation;
-      HRESULT unlock_hr = device->KTCallbacks.pfnUnlockCb(device->hDevice, &unlock);
-      if (FAILED(unlock_hr))
-         hr = unlock_hr;
    }
-   pipe_texture_unmap(pipe, transfer);
+
+   HRESULT hr = FAILED(lock_hr) ? lock_hr : unlock_hr;
+   if (SUCCEEDED(lock_hr) && unlock_hr == E_UNEXPECTED)
+      hr = E_FAIL;
+   if (transfer_sequence <= 512 || FAILED(hr)) {
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_shared.log",
+                               FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[320];
+         int n = _snprintf_s(line, sizeof line, _TRUNCATE,
+                             "seq=%ld op=%s resource=%p hAllocation=0x%x map=%p transfer=%p stride=%u lock=0x%08lx data=%p unlock=0x%08lx reset=%u result=0x%08lx\r\n",
+                             transfer_sequence, publish ? "publish" : "refresh",
+                             resource, resource->hAllocation, pixels, transfer,
+                             transfer_stride, (unsigned long)lock_hr,
+                             lock_data, (unsigned long)unlock_hr, (unsigned)reset_status,
+                             (unsigned long)hr);
+         DWORD written = 0;
+         if (n > 0)
+            WriteFile(log, line, (DWORD)n, &written, NULL);
+         CloseHandle(log);
+      }
+   }
    if (FAILED(hr))
-      DebugPrintf("shared %s hAllocation=0x%x hr=0x%08lx\n",
+      DebugPrintf("shared %s hAllocation=0x%x map=%p lock=0x%08lx unlock=0x%08lx reset=%u hr=0x%08lx\n",
                   publish ? "publish" : "refresh", resource->hAllocation,
-                  (unsigned long)hr);
+                  pixels, (unsigned long)lock_hr, (unsigned long)unlock_hr,
+                  (unsigned)reset_status, (unsigned long)hr);
    return hr;
 }
 
@@ -115,15 +157,23 @@ RefreshSharedResource(Device *device, Resource *resource)
 }
 
 HRESULT
+PublishSharedResource(Device *device, Resource *resource)
+{
+   if (!resource || !resource->shared_dirty)
+      return S_OK;
+   HRESULT hr = TransferSharedResource(device, resource, true);
+   if (SUCCEEDED(hr))
+      resource->shared_dirty = false;
+   return hr;
+}
+
+HRESULT
 PublishSharedResources(Device *device)
 {
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
-      if (!resource->shared_dirty)
-         continue;
-      HRESULT hr = TransferSharedResource(device, resource, true);
+      HRESULT hr = PublishSharedResource(device, resource);
       if (FAILED(hr))
          return hr;
-      resource->shared_dirty = false;
    }
    return S_OK;
 }
@@ -775,8 +825,13 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    Resource *pResource = CastResource(hResource);
    Device *device = CastDevice(hDevice);
    if (pResource->hAllocation) {
-      if (pResource->shared_dirty)
-         SetError(hDevice, TransferSharedResource(device, pResource, true));
+      if (pResource->shared_dirty) {
+         pipe->flush(pipe, NULL, 0);
+         HRESULT hr = PublishSharedResource(device, pResource);
+         if (FAILED(hr))
+            DebugPrintf("DestroyResource: final shared publication failed hr=0x%08lx\n",
+                        (unsigned long)hr);
+      }
       Resource **entry = &device->shared_resources;
       while (*entry && *entry != pResource)
          entry = &(*entry)->shared_next;

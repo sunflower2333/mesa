@@ -34,6 +34,24 @@ struct Device {
    ComPtr<ID3D11DeviceContext> context;
 };
 
+static void CheckDevice(Device &d, const char *operation)
+{
+   HRESULT reason = d.device->GetDeviceRemovedReason();
+   printf("%s: GetDeviceRemovedReason=0x%08lx\n", operation, (unsigned long)reason);
+   if (FAILED(reason))
+      throw reason;
+}
+
+static void CheckDeviceCall(Device &d, HRESULT hr, const char *operation)
+{
+   printf("%s: hr=0x%08lx\n", operation, (unsigned long)hr);
+   if (FAILED(hr)) {
+      HRESULT reason = d.device->GetDeviceRemovedReason();
+      printf("%s: GetDeviceRemovedReason=0x%08lx\n", operation, (unsigned long)reason);
+      throw hr;
+   }
+}
+
 static Device CreateDevice(IDXGIAdapter *adapter)
 {
    Device d;
@@ -73,8 +91,10 @@ static void VerifyPixels(Device &d, ID3D11Texture2D *texture,
    ComPtr<ID3D11Texture2D> staging;
    Check(d.device->CreateTexture2D(&desc, NULL, &staging), "Create readback");
    d.context->CopyResource(staging.Get(), texture);
+   CheckDevice(d, "after CopyResource");
    D3D11_MAPPED_SUBRESOURCE map;
-   Check(d.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map), "Map readback");
+   CheckDeviceCall(d, d.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map),
+                   "Map readback");
    const unsigned char expected[] = {
       (unsigned char)(255 * color[2]), (unsigned char)(255 * color[1]),
       (unsigned char)(255 * color[0]), (unsigned char)(255 * color[3]),
@@ -180,6 +200,7 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
          Acquire(producerMutex.Get(), 0, "Producer AcquireSync");
       producer.context->ClearRenderTargetView(target.Get(), colors[frame]);
       producer.context->Flush();
+      CheckDevice(producer, "producer after Flush");
       // Blocking readback proves the producer finished before a legacy shared read.
       VerifyPixels(producer, texture.Get(), colors[frame], "producer");
       if (keyed)
@@ -231,6 +252,7 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
          const D3D11_BOX box = {16, 16, 0, 48, 48, 1};
          consumer.context->UpdateSubresource(opened.Get(), 0, &box, data, 32 * 4, 0);
          consumer.context->Flush();
+         CheckDevice(consumer, "consumer after partial Flush");
          VerifyPixels(producer, texture.Get(), colors[frame], "reverse partial update", changed);
       }
       if (keyed)

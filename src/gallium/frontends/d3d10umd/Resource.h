@@ -40,6 +40,7 @@ struct Resource;
 struct pipe_resource;
 
 HRESULT RefreshSharedResource(Device *device, Resource *resource);
+HRESULT PublishSharedResource(Device *device, Resource *resource);
 HRESULT PublishSharedResources(Device *device);
 bool PrepareSharedDraw(Device *device);
 void MarkSharedResourceWritten(Device *device, struct pipe_resource *resource);

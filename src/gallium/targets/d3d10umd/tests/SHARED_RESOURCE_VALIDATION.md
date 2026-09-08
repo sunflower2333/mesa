@@ -38,10 +38,12 @@ textures therefore use their WDDM allocation as inter-process storage and the
 Gallium texture as a GPU cache. This is GPU rendering with CPU content transfer,
 not zero-copy sharing.
 
-Writes mark a cache dirty. Flush, Present and ResolveSharedResource publish
-dirty GPU contents using synchronized readback and LockCb/UnlockCb. Before a
-copy or draw consumes a clean shared resource, the frontend imports its current
-WDDM contents. Partial destination updates import untouched pixels first.
+Writes mark a cache dirty. Flush publishes dirty GPU contents for legacy
+sharing, while Present and ResolveSharedResource operate only on the resource
+the runtime names. GPU commands are flushed before synchronized readback and
+LockCb/UnlockCb publication. Before a copy or draw consumes a clean shared
+resource, the frontend imports its current WDDM contents. Partial destination
+updates import untouched pixels first.
 Opened resources retain the existing allocation rather than inventing shared
 contents. Failed maps/locks/publication are returned to the runtime.
 

@@ -492,12 +492,14 @@ Flush(D3D10DDI_HDEVICE hDevice)  // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
 
+   pipe->flush(pipe, NULL, 0);
    HRESULT hr = PublishSharedResources(CastDevice(hDevice));
    if (FAILED(hr)) {
-      SetError(hDevice, hr);
+      DebugPrintf("Flush: shared publication failed hr=0x%08lx\n", (unsigned long)hr);
+      if (hr == D3DDDIERR_DEVICEREMOVED)
+         SetError(hDevice, hr);
       return;
    }
-   pipe->flush(pipe, NULL, 0);
 }
 
 
