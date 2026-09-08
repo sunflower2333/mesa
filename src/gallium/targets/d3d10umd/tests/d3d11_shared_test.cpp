@@ -10,6 +10,10 @@
 #include <wrl/client.h>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <cerrno>
+#include <cstdint>
+#include <cwchar>
 
 using Microsoft::WRL::ComPtr;
 
@@ -273,6 +277,136 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l)
    return DefWindowProcW(hwnd, msg, w, l);
 }
 
+static void CheckWin(BOOL result, const char *operation)
+{
+   if (!result)
+      Check(HRESULT_FROM_WIN32(GetLastError()), operation);
+}
+
+static HANDLE ParseHandle(const char *text)
+{
+   char *end = NULL;
+   errno = 0;
+   unsigned long long value = strtoull(text, &end, 10);
+   if (errno || !value || end == text || *end || value > UINTPTR_MAX)
+      Check(E_INVALIDARG, "Child IPC handle");
+   return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(value));
+}
+
+static void WaitEvent(HANDLE event, const char *operation)
+{
+   DWORD result = WaitForSingleObject(event, 5000);
+   printf("%s: wait=%lu\n", operation, result);
+   if (result != WAIT_OBJECT_0)
+      Check(result == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : E_FAIL, operation);
+}
+
+static void ProcessConsumer(IDXGIAdapter *adapter, HANDLE shared, HANDLE ready, HANDLE done)
+{
+   Device consumer = CreateDevice(adapter);
+   ComPtr<ID3D11Texture2D> opened;
+   for (unsigned frame = 0; frame < ARRAYSIZE(colors); ++frame) {
+      WaitEvent(ready, "Child waits for producer");
+      if (!opened)
+         Check(consumer.device->OpenSharedResource(shared, IID_PPV_ARGS(&opened)),
+               "Child OpenSharedResource");
+      printf("CHILD FRAME %u pid=%lu\n", frame, GetCurrentProcessId());
+      VerifyPixels(consumer, opened.Get(), colors[frame], "cross-process consumer");
+      CheckWin(SetEvent(done), "Child signals readback complete");
+   }
+}
+
+struct ChildLifetime {
+   HANDLE job = NULL, ready = NULL, done = NULL;
+   PROCESS_INFORMATION process = {};
+   ~ChildLifetime()
+   {
+      // Parent exceptions and outer harness termination must not orphan a GPU child.
+      if (job) CloseHandle(job);
+      if (process.hThread) CloseHandle(process.hThread);
+      if (process.hProcess) CloseHandle(process.hProcess);
+      if (ready) CloseHandle(ready);
+      if (done) CloseHandle(done);
+   }
+};
+
+static void ProcessSharedTest(IDXGIAdapter *adapter)
+{
+   Device producer = CreateDevice(adapter);
+   D3D11_TEXTURE2D_DESC desc = {};
+   desc.Width = desc.Height = 64;
+   desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+   desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+   desc.Usage = D3D11_USAGE_DEFAULT;
+   desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+   desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+   ComPtr<ID3D11Texture2D> texture;
+   ComPtr<ID3D11RenderTargetView> target;
+   ComPtr<IDXGIResource> resource;
+   Check(producer.device->CreateTexture2D(&desc, NULL, &texture), "Process producer texture");
+   Check(producer.device->CreateRenderTargetView(texture.Get(), NULL, &target), "Process producer RTV");
+   Check(texture.As(&resource), "Process IDXGIResource");
+   HANDLE shared = NULL;
+   Check(resource->GetSharedHandle(&shared), "Process GetSharedHandle");
+   if (!shared)
+      Check(E_FAIL, "Process shared handle must be non-null");
+
+   ChildLifetime child;
+   SECURITY_ATTRIBUTES inherit = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
+   child.ready = CreateEventW(&inherit, FALSE, FALSE, NULL);
+   CheckWin(child.ready != NULL, "Create producer event");
+   child.done = CreateEventW(&inherit, FALSE, FALSE, NULL);
+   CheckWin(child.done != NULL, "Create consumer event");
+   child.job = CreateJobObjectW(NULL, NULL); // Not inheritable by the child.
+   CheckWin(child.job != NULL, "Create child lifetime job");
+   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+   CheckWin(SetInformationJobObject(child.job, JobObjectExtendedLimitInformation,
+                                    &limits, sizeof(limits)), "Set child job limits");
+   wchar_t executable[MAX_PATH] = {};
+   DWORD length = GetModuleFileNameW(NULL, executable, ARRAYSIZE(executable));
+   if (!length || length >= ARRAYSIZE(executable))
+      Check(E_FAIL, "Resolve child executable");
+   wchar_t command[MAX_PATH + 160];
+   if (swprintf_s(command, L"\"%ls\" --process-child %llu %llu %llu", executable,
+                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(shared)),
+                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(child.ready)),
+                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(child.done))) < 0)
+      Check(E_FAIL, "Format child command");
+   STARTUPINFOW startup = {};
+   startup.cb = sizeof(startup);
+   CheckWin(CreateProcessW(executable, command, NULL, NULL, TRUE, CREATE_SUSPENDED,
+                           NULL, NULL, &startup, &child.process), "Create consumer process");
+   if (!AssignProcessToJobObject(child.job, child.process.hProcess)) {
+      DWORD error = GetLastError();
+      TerminateProcess(child.process.hProcess, 1); // It has never executed.
+      Check(HRESULT_FROM_WIN32(error), "Assign consumer lifetime job");
+   }
+   if (ResumeThread(child.process.hThread) == static_cast<DWORD>(-1))
+      Check(HRESULT_FROM_WIN32(GetLastError()), "Resume consumer");
+   printf("PROCESS PAIR producer=%lu consumer=%lu\n", GetCurrentProcessId(), child.process.dwProcessId);
+
+   for (unsigned frame = 0; frame < ARRAYSIZE(colors); ++frame) {
+      printf("PARENT FRAME %u\n", frame);
+      producer.context->ClearRenderTargetView(target.Get(), colors[frame]);
+      producer.context->Flush();
+      CheckDevice(producer, "Process producer after Flush");
+      VerifyPixels(producer, texture.Get(), colors[frame], "cross-process producer");
+      CheckWin(SetEvent(child.ready), "Signal producer completion");
+      HANDLE waitFor[] = {child.done, child.process.hProcess};
+      DWORD wait = WaitForMultipleObjects(ARRAYSIZE(waitFor), waitFor, FALSE, 5000);
+      if (wait != WAIT_OBJECT_0)
+         Check(wait == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : E_FAIL,
+               "Consumer readback timeout or early exit");
+   }
+   WaitEvent(child.process.hProcess, "Wait consumer exit");
+   DWORD exitCode = STILL_ACTIVE;
+   CheckWin(GetExitCodeProcess(child.process.hProcess, &exitCode), "Get consumer exit code");
+   printf("CONSUMER_EXIT=%lu\n", exitCode);
+   if (exitCode != 0)
+      Check(E_FAIL, "Cross-process consumer must pass");
+}
+
 static void CompositionTest(IDXGIAdapter *adapter)
 {
    Device d = CreateDevice(adapter);
@@ -337,11 +471,13 @@ static void CompositionTest(IDXGIAdapter *adapter)
 int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
-   const char *mode = argc == 2 ? argv[1] : "--shared";
-   if (strcmp(mode, "--local") && strcmp(mode, "--shared") &&
+   const char *mode = argc >= 2 ? argv[1] : "--shared";
+   const bool child = !strcmp(mode, "--process-child") && argc == 5;
+   if (!child && ((argc != 1 && argc != 2) ||
+       (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
-       strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime")) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--keyed|--nt|--sample|--partial|--lifetime|--dcomp]\n");
+       strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime")))) {
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--dcomp]\n");
       return 2;
    }
    DWORD session;
@@ -370,7 +506,11 @@ int main(int argc, char **argv)
       }
       if (!adapter)
          Check(E_FAIL, "VIOGPU hardware adapter required");
-      if (!strcmp(mode, "--dcomp"))
+      if (child)
+         ProcessConsumer(adapter.Get(), ParseHandle(argv[2]), ParseHandle(argv[3]), ParseHandle(argv[4]));
+      else if (!strcmp(mode, "--process"))
+         ProcessSharedTest(adapter.Get());
+      else if (!strcmp(mode, "--dcomp"))
          CompositionTest(adapter.Get());
       else
          SharedTest(adapter.Get(), mode);

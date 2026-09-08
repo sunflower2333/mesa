@@ -6,6 +6,10 @@ requires the installed VIOGPU UMD to be loaded, and tests:
 - `--local`: four 64x64 BGRA patterns, all pixels read back on one device.
 - `--shared`: the same patterns opened and read by another device. The opened
   texture remains alive across all four producer updates.
+- `--process`: a separate child process opens the shared texture and checks all
+  pixels after each producer update. Events serialize ownership; distinct PIDs,
+  four exact readbacks and the real child exit code are required. A kill-on-close
+  job bounds child lifetime if the parent or outer harness terminates.
 - `--keyed`: producer/consumer ownership changes with keyed mutexes. Positive
   WAIT_TIMEOUT/WAIT_ABANDONED results are failures too.
 - `--nt`: keyed sharing using CreateSharedHandle/OpenSharedResource1.
