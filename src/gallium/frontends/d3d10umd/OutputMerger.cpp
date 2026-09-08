@@ -32,6 +32,7 @@
 
 
 #include "OutputMerger.h"
+#include "Resource.h"
 #include "State.h"
 
 #include "Debug.h"
@@ -178,6 +179,7 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    struct pipe_surface *surface = CastPipeRenderTargetView(hRenderTargetView);
    union pipe_color_union clear_color;
+   MarkSharedResourceWritten(CastDevice(hDevice), surface->texture);
 
    /*
     * DX10 always uses float clear color but gallium does not.

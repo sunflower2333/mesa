@@ -35,6 +35,15 @@
 
 #include "DriverIncludes.h"
 
+struct Device;
+struct Resource;
+struct pipe_resource;
+
+HRESULT RefreshSharedResource(Device *device, Resource *resource);
+HRESULT PublishSharedResources(Device *device);
+bool PrepareSharedDraw(Device *device);
+void MarkSharedResourceWritten(Device *device, struct pipe_resource *resource);
+
 SIZE_T APIENTRY CalcPrivateResourceSize(
    D3D10DDI_HDEVICE hDevice,
    __in const D3D10DDIARG_CREATERESOURCE *pCreateResource);

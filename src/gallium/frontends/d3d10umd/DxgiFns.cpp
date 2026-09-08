@@ -33,6 +33,7 @@
 #include <stdio.h>
 
 #include "DxgiFns.h"
+#include "Resource.h"
 #include "util/u_memory.h"
 #ifndef UMDF_USING_NTSTATUS
 #define UMDF_USING_NTSTATUS
@@ -266,11 +267,28 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    struct Device *device = CastDevice(pPresentData->hDevice);
    Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
 
+   HRESULT hr = PublishSharedResources(device);
+   if (SUCCEEDED(hr))
+      hr = RefreshSharedResource(device, pSrcResource);
+   if (FAILED(hr))
+      return hr;
    device->pipe->flush(device->pipe, NULL, 0);
    PublishPresentFrame(device, pSrcResource);
    device->pipe->screen->flush_frontbuffer(device->pipe->screen, device->pipe, 
       pSrcResource->resource, 0, 0, pPresentData->pDXGIContext, 0, NULL);
 
+   return S_OK;
+}
+
+HRESULT APIENTRY
+_ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *resolve)
+{
+   LOG_ENTRYPOINT();
+   Device *device = CastDevice(resolve->hDevice);
+   HRESULT hr = PublishSharedResources(device);
+   if (FAILED(hr))
+      return hr;
+   device->pipe->flush(device->pipe, NULL, 0);
    return S_OK;
 }
 

@@ -34,6 +34,7 @@
 #include "Draw.h"
 #include "State.h"
 #include "Shader.h"
+#include "Resource.h"
 
 #include "Debug.h"
 
@@ -76,9 +77,11 @@ update_velems(Device *pDevice)
  * state are incorrect and we need to remap them back to the correct
  * state.
  */
-static void
+static bool
 ResolveState(Device *pDevice)
 {
+   if (!PrepareSharedDraw(pDevice))
+      return false;
    if (pDevice->bound_empty_gs && pDevice->bound_vs &&
        pDevice->bound_vs->state.tokens) {
       Shader *gs = pDevice->bound_empty_gs;
@@ -108,6 +111,7 @@ ResolveState(Device *pDevice)
       cso_set_vertex_buffers(pDevice->cso, PIPE_MAX_ATTRIBS, pDevice->vertex_buffers);
       pDevice->vbuffers_changed = false;
    }
+   return true;
 }
 
 
@@ -154,7 +158,8 @@ Draw(D3D10DDI_HDEVICE hDevice,   // IN
 
    Device *pDevice = CastDevice(hDevice);
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice))
+      return;
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
    util_draw_arrays(pDevice->pipe,
@@ -200,7 +205,8 @@ DrawIndexed(D3D10DDI_HDEVICE hDevice,  // IN
                                   &restart_index, &index_size, &ib_offset);
    }
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice))
+      return;
 
    util_draw_init_info(&info);
    info.index_size = index_size;
@@ -246,7 +252,8 @@ DrawInstanced(D3D10DDI_HDEVICE hDevice,      // IN
       return;
    }
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice))
+      return;
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
    util_draw_arrays_instanced(pDevice->pipe,
@@ -301,7 +308,8 @@ DrawIndexedInstanced(D3D10DDI_HDEVICE hDevice,   // IN
                                   &restart_index, &index_size, &ib_offset);
    }
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice))
+      return;
 
    util_draw_init_info(&info);
    info.index_size = index_size;
@@ -355,7 +363,8 @@ DrawAuto(D3D10DDI_HDEVICE hDevice)  // IN
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice))
+      return;
 
    util_draw_init_info(&info);
    info.mode = pDevice->primitive;

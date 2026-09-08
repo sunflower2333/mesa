@@ -322,6 +322,11 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       _RotateResourceIdentities;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
       _Blt;
+   if (IS_DXGI1_1_BASE_FUNCTIONS(pCreateData->Interface, pCreateData->Version)) {
+      DXGI1_1_DDI_BASE_FUNCTIONS *functions =
+         reinterpret_cast<DXGI1_1_DDI_BASE_FUNCTIONS *>(pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions);
+      functions->pfnResolveSharedResource = _ResolveSharedResource;
+   }
 
    /* DXGI_STATUS_NO_REDIRECTION opts this driver out of the shared-resource
     * presentation path DWM uses, leaving DWM to present against a driver that
@@ -487,6 +492,11 @@ Flush(D3D10DDI_HDEVICE hDevice)  // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
 
+   HRESULT hr = PublishSharedResources(CastDevice(hDevice));
+   if (FAILED(hr)) {
+      SetError(hDevice, hr);
+      return;
+   }
    pipe->flush(pipe, NULL, 0);
 }
 

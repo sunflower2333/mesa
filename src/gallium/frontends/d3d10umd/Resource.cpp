@@ -38,10 +38,134 @@
 #include "Query.h"
 
 #include "Debug.h"
+#include <limits.h>
 
 #include "util/u_math.h"
 #include "util/u_rect.h"
 #include "util/u_surface.h"
+
+/* WDDM owns the inter-process backing. Gallium textures are GPU caches of that
+ * allocation until Turnip implements external-memory import. Flush/ownership
+ * release publishes GPU writes; a resource read refreshes a clean GPU cache.
+ * Never replace a shared allocation with a private texture and report success.
+ */
+static HRESULT
+TransferSharedResource(Device *device, Resource *resource, bool publish)
+{
+   if (resource->hAllocation == 0)
+      return S_OK;
+   if (!device->KTCallbacks.pfnLockCb || !device->KTCallbacks.pfnUnlockCb)
+      return E_NOTIMPL;
+
+   struct pipe_context *pipe = device->pipe;
+   struct pipe_resource *texture = resource->resource;
+   struct pipe_box box = {};
+   box.width = texture->width0;
+   box.height = texture->height0;
+   box.depth = 1;
+   struct pipe_transfer *transfer = NULL;
+   // A synchronized map waits for the GPU before publishing its pixels.
+   void *pixels = pipe->texture_map(pipe, texture, 0,
+                                   publish ? PIPE_MAP_READ : PIPE_MAP_WRITE,
+                                   &box, &transfer);
+   if (!pixels)
+      return E_OUTOFMEMORY;
+
+   D3DDDICB_LOCK lock = {};
+   lock.hAllocation = resource->hAllocation;
+   lock.Flags.LockEntire = 1;
+   lock.Flags.ReadOnly = !publish;
+   lock.Flags.WriteOnly = publish;
+   HRESULT hr = device->KTCallbacks.pfnLockCb(device->hDevice, &lock);
+   if (SUCCEEDED(hr)) {
+      if (!lock.pData) {
+         hr = E_FAIL;
+      } else {
+         const size_t row_bytes = (size_t)texture->width0 * 4;
+         for (unsigned y = 0; y < texture->height0; ++y) {
+            void *gpu = (char *)pixels + (size_t)y * transfer->stride;
+            void *shared = (char *)lock.pData + (size_t)y * resource->shared_pitch;
+            if (publish)
+               memcpy(shared, gpu, row_bytes);
+            else
+               memcpy(gpu, shared, row_bytes);
+         }
+      }
+      D3DDDICB_UNLOCK unlock = {};
+      unlock.NumAllocations = 1;
+      unlock.phAllocations = &lock.hAllocation;
+      HRESULT unlock_hr = device->KTCallbacks.pfnUnlockCb(device->hDevice, &unlock);
+      if (FAILED(unlock_hr))
+         hr = unlock_hr;
+   }
+   pipe_texture_unmap(pipe, transfer);
+   if (FAILED(hr))
+      DebugPrintf("shared %s hAllocation=0x%x hr=0x%08lx\n",
+                  publish ? "publish" : "refresh", resource->hAllocation,
+                  (unsigned long)hr);
+   return hr;
+}
+
+HRESULT
+RefreshSharedResource(Device *device, Resource *resource)
+{
+   if (!resource || resource->hAllocation == 0 || resource->shared_dirty)
+      return S_OK;
+   return TransferSharedResource(device, resource, false);
+}
+
+HRESULT
+PublishSharedResources(Device *device)
+{
+   for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
+      if (!resource->shared_dirty)
+         continue;
+      HRESULT hr = TransferSharedResource(device, resource, true);
+      if (FAILED(hr))
+         return hr;
+      resource->shared_dirty = false;
+   }
+   return S_OK;
+}
+
+void
+MarkSharedResourceWritten(Device *device, struct pipe_resource *texture)
+{
+   for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
+      if (resource->resource == texture) {
+         resource->shared_dirty = true;
+         return;
+      }
+   }
+}
+
+bool
+PrepareSharedDraw(Device *device)
+{
+   // Only refresh resources referenced by this draw: unrelated keyed resources
+   // may be owned by another device. Dirty caches already include our writes.
+   for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
+      bool input = false, output = false;
+      for (unsigned stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
+         for (unsigned slot = 0; slot < PIPE_MAX_SHADER_SAMPLER_VIEWS; ++slot) {
+            struct pipe_sampler_view *view = device->sampler_views[stage][slot];
+            input |= view && view->texture == resource->resource;
+         }
+      }
+      for (unsigned slot = 0; slot < device->fb.nr_cbufs; ++slot)
+         output |= device->fb.cbufs[slot] && device->fb.cbufs[slot]->texture == resource->resource;
+      if (input || output) {
+         HRESULT hr = RefreshSharedResource(device, resource);
+         if (FAILED(hr)) {
+            device->UMCallbacks.pfnSetErrorCb(device->hRTCoreLayer, hr);
+            return false;
+         }
+      }
+      if (output)
+         resource->shared_dirty = true;
+   }
+   return true;
+}
 
 
 /*
@@ -294,6 +418,17 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    templat.bind       = translate_resource_flags(pCreateResource->BindFlags);
    templat.usage      = translate_resource_usage(pCreateResource->Usage);
 
+   const bool shared = (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) != 0;
+   if (shared && (templat.target != PIPE_TEXTURE_2D ||
+                  templat.format != PIPE_FORMAT_B8G8R8A8_UNORM ||
+                  templat.width0 == 0 || templat.width0 > UINT_MAX / 4 ||
+                  templat.height0 == 0 || templat.array_size != 1 ||
+                  templat.last_level != 0 || templat.nr_samples != 1 ||
+                  templat.usage != PIPE_USAGE_DEFAULT)) {
+      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+      return;
+   }
+
    if (templat.target != PIPE_BUFFER) {
       if (!screen->is_format_supported(screen,
                                        templat.format,
@@ -309,7 +444,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    }
 
    pResource->resource = screen->resource_create(screen, &templat);
-   if (!pResource) {
+   if (!pResource->resource) {
       DebugPrintf("%s: failed to create resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);
       return;
@@ -318,6 +453,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->NumSubResources = pCreateResource->MipLevels * pCreateResource->ArraySize;
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
+   if (!pResource->transfers) {
+      pipe_resource_reference(&pResource->resource, NULL);
+      SetError(hDevice, E_OUTOFMEMORY);
+      return;
+   }
 
    /* A shared resource must have a real kernel allocation behind it. Without
     * one the runtime still reports success from GetSharedHandle and hands back
@@ -396,6 +536,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       pResource->hKMResource = allocate.hKMResource;
       pResource->hAllocation = allocationInfo.hAllocation;
       pResource->hRTResourceHandle = allocate.hResource;
+      pResource->shared_pitch = shared_pitch;
+      pResource->shared_next = pDevice->shared_resources;
+      pDevice->shared_resources = pResource;
+      // A fresh resource has no defined contents until the client writes it.
+      pResource->shared_dirty = pCreateResource->pInitialDataUP != NULL;
    }
 
    if (pCreateResource->pInitialDataUP) {
@@ -500,20 +645,15 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
 {
    LOG_ENTRYPOINT();
 
-   /* Compositing is the act of opening surfaces other processes created, so a
-    * driver that fails every open cannot show a desktop: dwm.exe takes the
-    * failing HRESULT straight to MilFailFastForHR and dies. The allocation's
-    * private data is this driver's own VIOGPU_WDDM_ALLOCATION_INFO and already
-    * describes the surface, so rebuild a matching resource and keep the
-    * existing allocation handle. */
+   /* Reconstruct the GPU cache of the existing WDDM backing. Its actual pixels
+    * are refreshed before use, including uses after another owner updates it. */
    struct pipe_context *pipe = CastPipeContext(hDevice);
    struct pipe_screen *screen = pipe->screen;
    Resource *pResource = CastResource(hResource);
 
    memset(pResource, 0, sizeof *pResource);
 
-   /* Record every open so a refusal can be characterised: this entry point
-    * failing is what stops the desktop compositing. */
+   /* Record the ABI shape independently of the shared-content transfer. */
    {
       HANDLE log = CreateFileA("C:\\Users\\Public\\umd_open.log",
                                FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -523,7 +663,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
          int n = _snprintf_s(line, sizeof line, _TRUNCATE,
                              "open numAlloc=%u privSize=%u expect=%u\r\n",
                              pOpenResource ? pOpenResource->NumAllocations : 0u,
-                             (pOpenResource && pOpenResource->pOpenAllocationInfo)
+                             (pOpenResource && pOpenResource->NumAllocations && pOpenResource->pOpenAllocationInfo)
                                 ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0u,
                              (unsigned)sizeof(VIOGPU_WDDM_ALLOCATION_INFO));
          DWORD written = 0;
@@ -552,7 +692,15 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
 
    VIOGPU_WDDM_ALLOCATION_INFO info;
    memcpy(&info, openInfo->pPrivateDriverData, sizeof info);
-   if (info.Header.Magic != VIOGPU_WDDM_ABI_MAGIC || info.Width == 0 || info.Height == 0) {
+   if (info.Header.Magic != VIOGPU_WDDM_ABI_MAGIC ||
+       info.Header.Version != VIOGPU_WDDM_ABI_VERSION ||
+       info.Header.Size != sizeof info || info.Header.Reserved != 0 ||
+       info.Flags != VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE ||
+       info.Format != VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM ||
+       info.Width == 0 || info.Width > UINT_MAX / 4 || info.Height == 0 ||
+       info.Pitch < info.Width * 4 ||
+       (VIOGPU_WDDM_UINT64)info.Pitch * info.Height > info.Size ||
+       openInfo->hAllocation == 0) {
       DebugPrintf("%s: allocation private data is not this driver's\n", __func__);
       SetError(hDevice, E_INVALIDARG);
       return;
@@ -583,11 +731,20 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    pResource->NumSubResources = 1;
    pResource->buffer = false;
    pResource->transfers = (struct pipe_transfer **)calloc(1, sizeof *pResource->transfers);
+   if (!pResource->transfers) {
+      pipe_resource_reference(&pResource->resource, NULL);
+      SetError(hDevice, E_OUTOFMEMORY);
+      return;
+   }
    pResource->hAllocation = openInfo->hAllocation;
    pResource->hKMResource = 0;
    /* The allocation belongs to whoever created it; this device only holds a
     * view, so destruction here must not deallocate it. */
    pResource->hRTResourceHandle = NULL;
+   Device *device = CastDevice(hDevice);
+   pResource->shared_pitch = info.Pitch;
+   pResource->shared_next = device->shared_resources;
+   device->shared_resources = pResource;
 
    DebugPrintf("%s: opened %ux%u hAllocation=0x%x\n", __func__,
                info.Width, info.Height, openInfo->hAllocation);
@@ -616,6 +773,16 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Resource *pResource = CastResource(hResource);
+   Device *device = CastDevice(hDevice);
+   if (pResource->hAllocation) {
+      if (pResource->shared_dirty)
+         SetError(hDevice, TransferSharedResource(device, pResource, true));
+      Resource **entry = &device->shared_resources;
+      while (*entry && *entry != pResource)
+         entry = &(*entry)->shared_next;
+      if (*entry)
+         *entry = pResource->shared_next;
+   }
 
    /* Only free an allocation this device created. An opened resource holds a
     * view of another process's allocation and must not deallocate it. */
@@ -859,6 +1026,13 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    struct pipe_resource *src_resource = pSrcResource->resource;
    bool compatible;
 
+   HRESULT shared_hr = RefreshSharedResource(pDevice, pSrcResource);
+   if (FAILED(shared_hr)) {
+      SetError(hDevice, shared_hr);
+      return;
+   }
+   MarkSharedResourceWritten(pDevice, dst_resource);
+
    assert(dst_resource->target == src_resource->target);
    assert(dst_resource->width0 == src_resource->width0);
    assert(dst_resource->height0 == src_resource->height0);
@@ -936,6 +1110,15 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
    unsigned dst_layer = DstSubResource / (dst_resource->last_level + 1);
    unsigned src_level = SrcSubResource % (src_resource->last_level + 1);
    unsigned src_layer = SrcSubResource / (src_resource->last_level + 1);
+
+   HRESULT shared_hr = RefreshSharedResource(pDevice, pSrcResource);
+   if (SUCCEEDED(shared_hr))
+      shared_hr = RefreshSharedResource(pDevice, pDstResource);
+   if (FAILED(shared_hr)) {
+      SetError(hDevice, shared_hr);
+      return;
+   }
+   MarkSharedResourceWritten(pDevice, dst_resource);
 
    struct pipe_box src_box;
    if (pSrcBox) {
@@ -1071,6 +1254,13 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
    Resource *pDstResource = CastResource(hDstResource);
    struct pipe_resource *dst_resource = pDstResource->resource;
 
+   HRESULT shared_hr = RefreshSharedResource(pDevice, pDstResource);
+   if (FAILED(shared_hr)) {
+      SetError(hDevice, shared_hr);
+      return;
+   }
+   MarkSharedResourceWritten(pDevice, dst_resource);
+
    unsigned level;
    struct pipe_box box;
 
@@ -1125,4 +1315,3 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       }
    }
 }
-

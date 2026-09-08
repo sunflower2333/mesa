@@ -71,6 +71,7 @@ struct Shader
 
 struct Query;
 struct ElementLayout;
+struct Resource;
 
 struct Device
 {
@@ -112,6 +113,7 @@ struct Device
     * hand the pixels to the miniport. */
    struct pipe_resource *present_staging;
    bool present_publish_failed;
+   Resource *shared_resources;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;
    DXGI_DDI_BASE_CALLBACKS *pDXGIBaseCallbacks;
 
@@ -175,6 +177,9 @@ struct Resource
    D3DKMT_HANDLE hKMResource;
    D3DKMT_HANDLE hAllocation;
    HANDLE hRTResourceHandle;
+   Resource *shared_next;
+   UINT shared_pitch;
+   bool shared_dirty;
 
    DXGI_FORMAT Format;
    UINT MipLevels;
