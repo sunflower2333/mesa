@@ -512,6 +512,27 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
 
    memset(pResource, 0, sizeof *pResource);
 
+   /* Record every open so a refusal can be characterised: this entry point
+    * failing is what stops the desktop compositing. */
+   {
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_open.log",
+                               FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[256];
+         int n = _snprintf_s(line, sizeof line, _TRUNCATE,
+                             "open numAlloc=%u privSize=%u expect=%u\r\n",
+                             pOpenResource ? pOpenResource->NumAllocations : 0u,
+                             (pOpenResource && pOpenResource->pOpenAllocationInfo)
+                                ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0u,
+                             (unsigned)sizeof(VIOGPU_WDDM_ALLOCATION_INFO));
+         DWORD written = 0;
+         if (n > 0)
+            WriteFile(log, line, (DWORD)n, &written, NULL);
+         CloseHandle(log);
+      }
+   }
+
    if (pOpenResource == NULL || pOpenResource->NumAllocations != 1 ||
        pOpenResource->pOpenAllocationInfo == NULL) {
       DebugPrintf("%s: unexpected open shape\n", __func__);
