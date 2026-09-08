@@ -114,6 +114,7 @@ struct Device
    struct pipe_resource *present_staging;
    bool present_publish_failed;
    Resource *shared_resources;
+   D3DDDICB_CREATECONTEXT shared_copy_context;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;
    DXGI_DDI_BASE_CALLBACKS *pDXGIBaseCallbacks;
 
@@ -179,6 +180,7 @@ struct Resource
    HANDLE hRTResourceHandle;
    Resource *shared_next;
    UINT shared_pitch;
+   D3DKMT_HANDLE shared_staging_allocation;
    bool shared_dirty;
 
    DXGI_FORMAT Format;

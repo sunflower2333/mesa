@@ -140,8 +140,16 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    struct pipe_screen *screen = pAdapter->screen;
    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
+   if (!pipe)
+      return E_OUTOFMEMORY;
+
    pDevice->pipe = pipe;
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
+   if (!pDevice->cso) {
+      pipe->destroy(pipe);
+      pDevice->pipe = NULL;
+      return E_OUTOFMEMORY;
+   }
 
    pDevice->empty_vs = CreateEmptyShader(pDevice, MESA_SHADER_VERTEX);
    pDevice->empty_fs = CreateEmptyShader(pDevice, MESA_SHADER_FRAGMENT);
@@ -424,6 +432,13 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    pipe->set_sampler_views(pipe, MESA_SHADER_GEOMETRY, 0,
                            PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
 
+   if (pDevice->shared_copy_context.hContext) {
+      D3DDDICB_DESTROYCONTEXT destroy = {};
+      destroy.hContext = pDevice->shared_copy_context.hContext;
+      HRESULT hr = pDevice->KTCallbacks.pfnDestroyContextCb(pDevice->hDevice, &destroy);
+      if (FAILED(hr))
+         DebugPrintf("DestroyDevice: shared copy context failed hr=0x%08lx\n", (unsigned long)hr);
+   }
    pipe->destroy(pipe);
 }
 

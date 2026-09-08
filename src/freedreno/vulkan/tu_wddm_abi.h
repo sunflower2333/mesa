@@ -43,6 +43,7 @@ typedef enum VIOGPU_WDDM_FORMAT {
 
 typedef enum VIOGPU_WDDM_RENDER_OPCODE {
    VIOGPU_WDDM_RENDER_NATIVE_SUBMIT = 1,
+   VIOGPU_WDDM_RENDER_ALLOCATION_COPY = 2,
 } VIOGPU_WDDM_RENDER_OPCODE;
 
 typedef enum VIOGPU_WDDM_ESCAPE_OPCODE {
@@ -141,6 +142,18 @@ typedef struct VIOGPU_WDDM_RENDER_COMMAND {
    VIOGPU_WDDM_UINT32 CommandStreamSize;
    VIOGPU_WDDM_UINT32 Reserved[4];
 } VIOGPU_WDDM_RENDER_COMMAND;
+
+/* Scheduled BGRA allocation copy. The runtime allocation list supplies source
+ * at index 0 and destination at index 1; no user pointers or GPU addresses are
+ * accepted. VidMm pages both allocations in before VidSch executes the copy. */
+typedef struct VIOGPU_WDDM_ALLOCATION_COPY {
+   VIOGPU_WDDM_ABI_HEADER Header;
+   VIOGPU_WDDM_UINT32 Opcode;
+   VIOGPU_WDDM_UINT32 Flags;
+   VIOGPU_WDDM_UINT32 Width;
+   VIOGPU_WDDM_UINT32 Height;
+   VIOGPU_WDDM_UINT32 Reserved[8];
+} VIOGPU_WDDM_ALLOCATION_COPY;
 
 /* Frame publication. The user-mode driver renders on the host, so the guest
  * pages behind its back buffer stay zero and nothing the display path copies

@@ -41,9 +41,16 @@ not zero-copy sharing.
 Writes mark a cache dirty. Flush publishes dirty GPU contents for legacy
 sharing, while Present and ResolveSharedResource operate only on the resource
 the runtime names. GPU commands are flushed before synchronized readback and
-LockCb/UnlockCb publication. Before a copy or draw consumes a clean shared
-resource, the frontend imports its current WDDM contents. Partial destination
-updates import untouched pixels first.
+publication. LockCb/UnlockCb touch only a private staging allocation created by
+the calling device. A standard KMD context submits ALLOCATION_COPY through
+RenderCb with runtime-validated source/destination allocations; VidMm handles
+residency and VidSch fences the copy using the existing blit lifecycle. A
+blocking staging lock waits for completion before shared ownership is released
+or GPU cache contents are refreshed. The copy does not publish to the scanout.
+Before a copy or draw consumes a clean shared resource, the frontend imports
+its current WDDM contents. Partial destination updates import untouched pixels
+first. Both creators and consumers use this path: Windows forbids locking a
+shared allocation from a process that did not create it.
 Opened resources retain the existing allocation rather than inventing shared
 contents. Failed maps/locks/publication are returned to the runtime.
 

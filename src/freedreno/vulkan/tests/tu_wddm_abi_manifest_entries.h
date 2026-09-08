@@ -117,3 +117,11 @@ ABI_OFFSET(offset.present_blit.source_pitch, VIOGPU_WDDM_PRESENT_BLIT, SourcePit
 ABI_OFFSET(offset.present_blit.format, VIOGPU_WDDM_PRESENT_BLIT, Format, 36);
 ABI_OFFSET(offset.present_blit.payload_size, VIOGPU_WDDM_PRESENT_BLIT, PayloadSize, 40);
 ABI_OFFSET(offset.present_blit.reserved, VIOGPU_WDDM_PRESENT_BLIT, Reserved, 44);
+ABI_VALUE(render.opcode.allocation_copy, VIOGPU_WDDM_RENDER_ALLOCATION_COPY, 2);
+ABI_SIZE(size.allocation_copy, VIOGPU_WDDM_ALLOCATION_COPY, 64);
+ABI_OFFSET(offset.allocation_copy.header, VIOGPU_WDDM_ALLOCATION_COPY, Header, 0);
+ABI_OFFSET(offset.allocation_copy.opcode, VIOGPU_WDDM_ALLOCATION_COPY, Opcode, 16);
+ABI_OFFSET(offset.allocation_copy.flags, VIOGPU_WDDM_ALLOCATION_COPY, Flags, 20);
+ABI_OFFSET(offset.allocation_copy.width, VIOGPU_WDDM_ALLOCATION_COPY, Width, 24);
+ABI_OFFSET(offset.allocation_copy.height, VIOGPU_WDDM_ALLOCATION_COPY, Height, 28);
+ABI_OFFSET(offset.allocation_copy.reserved, VIOGPU_WDDM_ALLOCATION_COPY, Reserved, 32);

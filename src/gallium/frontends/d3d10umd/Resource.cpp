@@ -44,6 +44,117 @@
 #include "util/u_rect.h"
 #include "util/u_surface.h"
 
+static void
+LogSharedCopyFailure(const char *stage, HRESULT hr)
+{
+   if (SUCCEEDED(hr))
+      return;
+   HANDLE log = CreateFileA("C:\\Users\\Public\\umd_shared.log", FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+   if (log != INVALID_HANDLE_VALUE) {
+      char line[128];
+      int n = _snprintf_s(line, sizeof(line), _TRUNCATE,
+                          "pid=%lu shared-copy stage=%s hr=0x%08lx\r\n",
+                          GetCurrentProcessId(), stage, (unsigned long)hr);
+      DWORD written;
+      if (n > 0)
+         WriteFile(log, line, (DWORD)n, &written, NULL);
+      CloseHandle(log);
+   }
+}
+
+static HRESULT
+EnsureSharedCopy(Device *device, Resource *resource)
+{
+   if (!device->KTCallbacks.pfnCreateContextCb || !device->KTCallbacks.pfnDestroyContextCb ||
+       !device->KTCallbacks.pfnAllocateCb || !device->KTCallbacks.pfnDeallocateCb ||
+       !device->KTCallbacks.pfnRenderCb || !device->KTCallbacks.pfnLockCb ||
+       !device->KTCallbacks.pfnUnlockCb)
+      return E_NOTIMPL;
+
+   if (!device->shared_copy_context.hContext) {
+      D3DDDICB_CREATECONTEXT create = {};
+      create.EngineAffinity = 1;
+      HRESULT hr = device->KTCallbacks.pfnCreateContextCb(device->hDevice, &create);
+      LogSharedCopyFailure("create-context", hr);
+      if (FAILED(hr))
+         return hr;
+      device->shared_copy_context = create;
+   }
+   if (!resource->shared_staging_allocation) {
+      VIOGPU_WDDM_ALLOCATION_INFO info = {};
+      info.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+      info.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+      info.Header.Size = sizeof(info);
+      info.Width = resource->resource->width0;
+      info.Height = resource->resource->height0;
+      info.Pitch = resource->shared_pitch;
+      info.Size = (VIOGPU_WDDM_UINT64)info.Pitch * info.Height;
+      info.Alignment = 4096;
+      info.Flags = VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+      info.Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
+      D3DDDI_ALLOCATIONINFO allocation = {};
+      allocation.pPrivateDriverData = &info;
+      allocation.PrivateDriverDataSize = sizeof(info);
+      D3DDDICB_ALLOCATE allocate = {};
+      allocate.NumAllocations = 1;
+      allocate.pAllocationInfo = &allocation;
+      // Private staging belongs to this device, not to the shared resource.
+      HRESULT hr = device->KTCallbacks.pfnAllocateCb(device->hDevice, &allocate);
+      LogSharedCopyFailure("allocate-staging", hr);
+      if (FAILED(hr))
+         return hr;
+      if (!allocation.hAllocation)
+         return E_FAIL;
+      resource->shared_staging_allocation = allocation.hAllocation;
+   }
+   return S_OK;
+}
+
+static HRESULT
+SubmitSharedCopy(Device *device, Resource *resource, bool publish)
+{
+   D3DDDICB_CREATECONTEXT *context = &device->shared_copy_context;
+   if (!context->hContext || !context->pCommandBuffer ||
+       context->CommandBufferSize < sizeof(VIOGPU_WDDM_ALLOCATION_COPY) ||
+       !context->pAllocationList || context->AllocationListSize < 2 ||
+       !context->pPatchLocationList || context->PatchLocationListSize < 2)
+      return E_FAIL;
+
+   VIOGPU_WDDM_ALLOCATION_COPY copy = {};
+   copy.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   copy.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   copy.Header.Size = sizeof(copy);
+   copy.Opcode = VIOGPU_WDDM_RENDER_ALLOCATION_COPY;
+   copy.Width = resource->resource->width0;
+   copy.Height = resource->resource->height0;
+   memcpy(context->pCommandBuffer, &copy, sizeof(copy));
+   memset(context->pAllocationList, 0, 2 * sizeof(*context->pAllocationList));
+   context->pAllocationList[0].hAllocation = publish ? resource->shared_staging_allocation : resource->hAllocation;
+   context->pAllocationList[1].hAllocation = publish ? resource->hAllocation : resource->shared_staging_allocation;
+   context->pAllocationList[1].WriteOperation = 1;
+   D3DDDICB_RENDER render = {};
+   render.hContext = context->hContext;
+   render.CommandLength = sizeof(copy);
+   render.NumAllocations = 2;
+   // The KMD creates the two relocations in its own DMA packet.
+   render.NewCommandBufferSize = context->CommandBufferSize;
+   render.NewAllocationListSize = context->AllocationListSize;
+   render.NewPatchLocationListSize = context->PatchLocationListSize;
+   HRESULT hr = device->KTCallbacks.pfnRenderCb(device->hDevice, &render);
+   LogSharedCopyFailure(publish ? "submit-publish" : "submit-refresh", hr);
+   if (SUCCEEDED(hr)) {
+      context->pCommandBuffer = render.pNewCommandBuffer;
+      context->CommandBufferSize = render.NewCommandBufferSize;
+      context->pAllocationList = render.pNewAllocationList;
+      context->AllocationListSize = render.NewAllocationListSize;
+      context->pPatchLocationList = render.pNewPatchLocationList;
+      context->PatchLocationListSize = render.NewPatchLocationListSize;
+   }
+   return hr;
+}
+
 /* WDDM owns the inter-process backing. Gallium textures are GPU caches of that
  * allocation until Turnip implements external-memory import. Flush/ownership
  * release publishes GPU writes; a resource read refreshes a clean GPU cache.
@@ -64,6 +175,9 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
 
    if (resource->hAllocation == 0)
       return S_OK;
+   HRESULT setup_hr = EnsureSharedCopy(device, resource);
+   if (FAILED(setup_hr))
+      return setup_hr;
 
    struct pipe_context *pipe = device->pipe;
    struct pipe_resource *texture = resource->resource;
@@ -86,11 +200,15 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
       } else {
          transfer_stride = transfer->stride;
          D3DDDICB_LOCK lock = {};
-         lock.hAllocation = resource->hAllocation;
+         // Only an allocation's creator may LockCb it. Copy the shared backing
+         // through VidSch into our private staging before acquiring its lock.
+         lock.hAllocation = resource->shared_staging_allocation;
          lock.Flags.LockEntire = 1;
          lock.Flags.ReadOnly = !publish;
          lock.Flags.WriteOnly = publish;
-         lock_hr = device->KTCallbacks.pfnLockCb(device->hDevice, &lock);
+         lock_hr = publish ? S_OK : SubmitSharedCopy(device, resource, false);
+         if (SUCCEEDED(lock_hr))
+            lock_hr = device->KTCallbacks.pfnLockCb(device->hDevice, &lock);
          lock_data = lock.pData;
          if (SUCCEEDED(lock_hr)) {
             if (!lock.pData) {
@@ -110,6 +228,21 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
             unlock.NumAllocations = 1;
             unlock.phAllocations = &lock.hAllocation;
             unlock_hr = device->KTCallbacks.pfnUnlockCb(device->hDevice, &unlock);
+            if (publish && SUCCEEDED(lock_hr) && SUCCEEDED(unlock_hr)) {
+               unlock_hr = SubmitSharedCopy(device, resource, true);
+               if (SUCCEEDED(unlock_hr)) {
+                  // A read/write lock waits for the copy's read of staging too.
+                  // Ownership may be released only after the destination is current.
+                  D3DDDICB_LOCK wait = {};
+                  wait.hAllocation = resource->shared_staging_allocation;
+                  wait.Flags.LockEntire = 1;
+                  unlock_hr = device->KTCallbacks.pfnLockCb(device->hDevice, &wait);
+                  if (SUCCEEDED(unlock_hr)) {
+                     unlock.phAllocations = &wait.hAllocation;
+                     unlock_hr = device->KTCallbacks.pfnUnlockCb(device->hDevice, &unlock);
+                  }
+               }
+            }
          }
          pipe_texture_unmap(pipe, transfer);
          reset_status = pipe->get_device_reset_status
@@ -837,6 +970,15 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
          entry = &(*entry)->shared_next;
       if (*entry)
          *entry = pResource->shared_next;
+   }
+   if (pResource->shared_staging_allocation) {
+      D3DDDICB_DEALLOCATE deallocate = {};
+      deallocate.NumAllocations = 1;
+      deallocate.HandleList = &pResource->shared_staging_allocation;
+      HRESULT hr = device->KTCallbacks.pfnDeallocateCb(device->hDevice, &deallocate);
+      if (FAILED(hr))
+         DebugPrintf("DestroyResource: staging deallocation failed hr=0x%08lx\n", (unsigned long)hr);
+      pResource->shared_staging_allocation = 0;
    }
 
    /* Only free an allocation this device created. An opened resource holds a
