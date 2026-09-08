@@ -6,6 +6,7 @@
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <dcomp.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <cstdio>
 #include <cstring>
@@ -60,7 +61,8 @@ static const float colors[][4] = {
 };
 
 static void VerifyPixels(Device &d, ID3D11Texture2D *texture,
-                         const float color[4], const char *label)
+                         const float color[4], const char *label,
+                         const float *inset = NULL)
 {
    D3D11_TEXTURE2D_DESC desc;
    texture->GetDesc(&desc);
@@ -77,13 +79,22 @@ static void VerifyPixels(Device &d, ID3D11Texture2D *texture,
       (unsigned char)(255 * color[2]), (unsigned char)(255 * color[1]),
       (unsigned char)(255 * color[0]), (unsigned char)(255 * color[3]),
    };
+   unsigned char insetExpected[4] = {};
+   if (inset) {
+      insetExpected[0] = (unsigned char)(255 * inset[2]);
+      insetExpected[1] = (unsigned char)(255 * inset[1]);
+      insetExpected[2] = (unsigned char)(255 * inset[0]);
+      insetExpected[3] = (unsigned char)(255 * inset[3]);
+   }
    unsigned mismatches = 0;
    unsigned char first[4];
    memcpy(first, map.pData, sizeof first);
    for (UINT y = 0; y < desc.Height; ++y) {
       const unsigned char *row = (const unsigned char *)map.pData + y * map.RowPitch;
-      for (UINT x = 0; x < desc.Width; ++x)
-         mismatches += memcmp(row + x * 4, expected, sizeof expected) != 0;
+      for (UINT x = 0; x < desc.Width; ++x) {
+         const bool inside = inset && x >= 16 && x < 48 && y >= 16 && y < 48;
+         mismatches += memcmp(row + x * 4, inside ? insetExpected : expected, sizeof expected) != 0;
+      }
    }
    d.context->Unmap(staging.Get(), 0);
    printf("%s: first=%u,%u,%u,%u expected=%u,%u,%u,%u mismatches=%u/%u\n",
@@ -94,11 +105,52 @@ static void VerifyPixels(Device &d, ID3D11Texture2D *texture,
       Check(E_FAIL, "Shared or local pixel contents");
 }
 
+static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[4])
+{
+   const char *vsSource = "float4 main(uint id:SV_VertexID):SV_Position {"
+      "float2 p=float2((id<<1)&2,id&2);return float4(p*float2(2,-2)+float2(-1,1),0,1);}";
+   const char *psSource = "Texture2D<float4> tex:register(t0);"
+      "float4 main(float4 p:SV_Position):SV_Target{return tex.Load(int3(p.xy,0));}";
+   ComPtr<ID3DBlob> vsCode, psCode, errors;
+   Check(D3DCompile(vsSource, strlen(vsSource), NULL, NULL, NULL, "main", "vs_4_1",
+                    D3DCOMPILE_ENABLE_STRICTNESS, 0, &vsCode, &errors), "Compile VS");
+   errors.Reset();
+   Check(D3DCompile(psSource, strlen(psSource), NULL, NULL, NULL, "main", "ps_4_1",
+                    D3DCOMPILE_ENABLE_STRICTNESS, 0, &psCode, &errors), "Compile PS");
+   ComPtr<ID3D11VertexShader> vs;
+   ComPtr<ID3D11PixelShader> ps;
+   Check(d.device->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), NULL, &vs), "Create VS");
+   Check(d.device->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), NULL, &ps), "Create PS");
+   D3D11_TEXTURE2D_DESC desc;
+   source->GetDesc(&desc);
+   desc.MiscFlags = 0;
+   ComPtr<ID3D11Texture2D> output;
+   Check(d.device->CreateTexture2D(&desc, NULL, &output), "Create sample output");
+   ComPtr<ID3D11RenderTargetView> target;
+   ComPtr<ID3D11ShaderResourceView> input;
+   Check(d.device->CreateRenderTargetView(output.Get(), NULL, &target), "Create sample RTV");
+   Check(d.device->CreateShaderResourceView(source, NULL, &input), "Create shared SRV");
+   ID3D11RenderTargetView *rtv = target.Get();
+   ID3D11ShaderResourceView *srv = input.Get();
+   d.context->OMSetRenderTargets(1, &rtv, NULL);
+   d.context->PSSetShaderResources(0, 1, &srv);
+   d.context->VSSetShader(vs.Get(), NULL, 0);
+   d.context->PSSetShader(ps.Get(), NULL, 0);
+   d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   D3D11_VIEWPORT viewport = {0, 0, (float)desc.Width, (float)desc.Height, 0, 1};
+   d.context->RSSetViewports(1, &viewport);
+   d.context->Draw(3, 0);
+   VerifyPixels(d, output.Get(), color, "sampled shared texture");
+   d.context->ClearState();
+}
+
 static void SharedTest(IDXGIAdapter *adapter, const char *mode)
 {
    const bool local = strcmp(mode, "--local") == 0;
    const bool nt = strcmp(mode, "--nt") == 0;
    const bool keyed = nt || strcmp(mode, "--keyed") == 0;
+   const bool sample = strcmp(mode, "--sample") == 0;
+   const bool partial = strcmp(mode, "--partial") == 0;
    Device producer = CreateDevice(adapter);
    Device consumer;
    if (!local)
@@ -163,9 +215,34 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
       }
       if (keyed)
          Acquire(consumerMutex.Get(), frame + 1, "Consumer AcquireSync");
-      VerifyPixels(consumer, opened.Get(), colors[frame], "consumer");
+      if (sample)
+         SampleTexture(consumer, opened.Get(), colors[frame]);
+      else
+         VerifyPixels(consumer, opened.Get(), colors[frame], "consumer");
+      if (partial) {
+         const float *changed = colors[(frame + 1) % ARRAYSIZE(colors)];
+         unsigned char data[32 * 32 * 4];
+         for (unsigned p = 0; p < 32 * 32; ++p) {
+            data[p * 4] = (unsigned char)(255 * changed[2]);
+            data[p * 4 + 1] = (unsigned char)(255 * changed[1]);
+            data[p * 4 + 2] = (unsigned char)(255 * changed[0]);
+            data[p * 4 + 3] = 255;
+         }
+         const D3D11_BOX box = {16, 16, 0, 48, 48, 1};
+         consumer.context->UpdateSubresource(opened.Get(), 0, &box, data, 32 * 4, 0);
+         consumer.context->Flush();
+         VerifyPixels(producer, texture.Get(), colors[frame], "reverse partial update", changed);
+      }
       if (keyed)
          Check(consumerMutex->ReleaseSync(0), "Consumer ReleaseSync");
+   }
+   if (!strcmp(mode, "--lifetime")) {
+      producer.context->ClearState();
+      target.Reset();
+      texture.Reset();
+      producer.context.Reset();
+      producer.device.Reset();
+      VerifyPixels(consumer, opened.Get(), colors[3], "consumer after producer destruction");
    }
 }
 
@@ -240,8 +317,9 @@ int main(int argc, char **argv)
    setvbuf(stdout, NULL, _IONBF, 0);
    const char *mode = argc == 2 ? argv[1] : "--shared";
    if (strcmp(mode, "--local") && strcmp(mode, "--shared") &&
-       strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp")) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--keyed|--nt|--dcomp]\n");
+       strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
+       strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime")) {
+      printf("Usage: d3d11_shared_test [--local|--shared|--keyed|--nt|--sample|--partial|--lifetime|--dcomp]\n");
       return 2;
    }
    DWORD session;

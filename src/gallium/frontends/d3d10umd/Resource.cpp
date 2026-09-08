@@ -153,7 +153,7 @@ PrepareSharedDraw(Device *device)
          }
       }
       for (unsigned slot = 0; slot < device->fb.nr_cbufs; ++slot)
-         output |= device->fb.cbufs[slot] && device->fb.cbufs[slot]->texture == resource->resource;
+         output |= device->fb.cbufs[slot].texture == resource->resource;
       if (input || output) {
          HRESULT hr = RefreshSharedResource(device, resource);
          if (FAILED(hr)) {

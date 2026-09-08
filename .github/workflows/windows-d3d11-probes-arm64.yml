@@ -25,7 +25,7 @@ jobs:
           cl /nologo /std:c++17 /EHsc /W4 /WX /MT /Zi `
             src/gallium/targets/d3d10umd/tests/d3d11_shared_test.cpp `
             /Fe:probes/d3d11_shared_test.exe /Fo:probes/ /Fd:probes/compiler.pdb `
-            /link /DEBUG /PDB:probes/d3d11_shared_test.pdb d3d11.lib dxgi.lib dcomp.lib user32.lib
+            /link /DEBUG /PDB:probes/d3d11_shared_test.pdb d3d11.lib dxgi.lib dcomp.lib user32.lib d3dcompiler.lib
           if ($LASTEXITCODE -ne 0) { throw 'Probe compilation failed' }
           $bytes = [IO.File]::ReadAllBytes('probes/d3d11_shared_test.exe')
           $pe = [BitConverter]::ToInt32($bytes, 0x3c)
