@@ -34,6 +34,27 @@ DebugPrintf(const char *format, ...)
     va_end(ap);
 
     OutputDebugStringA(buf);
+
+    /* OutputDebugString buffers are session scoped, so a capture started from a
+     * remote shell never sees output from dwm.exe, which runs as SYSTEM. Append
+     * to a file as well when asked, so the last entry point before a crash can
+     * be read back. */
+    static int trace = -1;
+    if (trace < 0) {
+        char enabled[8];
+        trace = GetEnvironmentVariableA("VIOGPU_UMD_TRACE", enabled, sizeof enabled) > 0 &&
+                enabled[0] == '1';
+    }
+    if (trace) {
+        HANDLE log = CreateFileA("C:\\Users\\Public\\umd_trace.log",
+                                 FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                 NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (log != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            WriteFile(log, buf, (DWORD)strlen(buf), &written, NULL);
+            CloseHandle(log);
+        }
+    }
 }
 
 

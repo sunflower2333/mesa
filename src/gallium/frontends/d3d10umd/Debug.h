@@ -67,11 +67,11 @@ AssertFail(const char *expr, const char *file, unsigned line, const char *functi
 #endif
 
 
-#if 0 && !defined(NDEBUG)
+/* Every DDI carries this. Enabling it, with DebugPrintf also writing to a file,
+ * is the only way to see which entry point a SYSTEM process such as dwm.exe
+ * last reached before it died -- its debug output is not visible to a capture
+ * started from a remote shell, and a fail-fast leaves no argument behind. */
 #define LOG_ENTRYPOINT() DebugPrintf("%s\n", __func__)
-#else
-#define LOG_ENTRYPOINT() (void)0
-#endif
 
 #define LOG_UNSUPPORTED_ENTRYPOINT() DebugPrintf("%s XXX\n", __func__)
 
