@@ -383,7 +383,7 @@ jobs:
           if (-not (Test-Path $src)) { throw "present test source is missing: $src" }
           $exe = Join-Path $probeDir 'd3d11_present_test.exe'
           & clang-cl --target=aarch64-pc-windows-msvc /std:c++17 /EHsc /W3 /Zi `
-            $src /Fe:$exe /Fo:$probeDir\ /link /DEBUG d3d11.lib dxgi.lib user32.lib
+            $src /Fe:$exe /Fo:$probeDir\ /link /DEBUG d3d11.lib dxgi.lib user32.lib dcomp.lib
           if ($LASTEXITCODE -ne 0) { throw "the D3D11 present test did not compile" }
           if (-not (Test-Path $exe)) { throw "the D3D11 present test did not link" }
           $headers = & dumpbin /headers $exe 2>&1

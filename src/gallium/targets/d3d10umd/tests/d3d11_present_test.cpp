@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <dcomp.h>
 #include <stdio.h>
 
 static const struct { float r, g, b; unsigned char br, bg, bb; const char *name; } kFrames[] = {
@@ -150,6 +151,48 @@ int main(int argc, char **argv)
                shtex->Release();
             }
             fflush(stdout);
+         }
+
+         /* DirectComposition is what LogonUI and dwm use, and what faults at
+          * DCompSurface::InitializeSurface on this driver. Drive the same flow
+          * here, where the failing call and its HRESULT are visible. */
+         IDXGIDevice *dxgiDev = NULL;
+         HRESULT dhr = probeDev->QueryInterface(__uuidof(IDXGIDevice), (void **)&dxgiDev);
+         printf("[step] dcomp: QueryInterface(IDXGIDevice) hr=0x%08lX\n", (unsigned long)dhr);
+         fflush(stdout);
+         if (SUCCEEDED(dhr)) {
+            IDCompositionDevice *dcomp = NULL;
+            dhr = DCompositionCreateDevice(dxgiDev, __uuidof(IDCompositionDevice), (void **)&dcomp);
+            printf("[step] dcomp: DCompositionCreateDevice hr=0x%08lX\n", (unsigned long)dhr);
+            fflush(stdout);
+            if (SUCCEEDED(dhr)) {
+               IDCompositionVisual *visual = NULL;
+               dhr = dcomp->CreateVisual(&visual);
+               printf("[step] dcomp: CreateVisual hr=0x%08lX\n", (unsigned long)dhr);
+               fflush(stdout);
+
+               IDCompositionSurface *surface = NULL;
+               dhr = dcomp->CreateSurface(256, 256, DXGI_FORMAT_B8G8R8A8_UNORM,
+                                          DXGI_ALPHA_MODE_PREMULTIPLIED, &surface);
+               printf("[step] dcomp: CreateSurface hr=0x%08lX  <-- LogonUI/dwm fault here\n",
+                      (unsigned long)dhr);
+               fflush(stdout);
+               if (SUCCEEDED(dhr)) {
+                  ID3D11Texture2D *dcTex = NULL;
+                  POINT offset = {};
+                  dhr = surface->BeginDraw(NULL, __uuidof(ID3D11Texture2D), (void **)&dcTex, &offset);
+                  printf("[step] dcomp: BeginDraw hr=0x%08lX\n", (unsigned long)dhr);
+                  fflush(stdout);
+                  if (SUCCEEDED(dhr)) {
+                     surface->EndDraw();
+                     if (dcTex) dcTex->Release();
+                  }
+                  surface->Release();
+               }
+               if (visual) visual->Release();
+               dcomp->Release();
+            }
+            dxgiDev->Release();
          }
 
          if (probeCtx) probeCtx->Release();
