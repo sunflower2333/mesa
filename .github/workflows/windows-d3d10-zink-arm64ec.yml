@@ -161,10 +161,20 @@ jobs:
           # type arm"). Drop whatever machine flag it passes and force the
           # right one.
           $wrapper = Join-Path $env:RUNNER_TEMP 'ar-arm64ec.py'
+          # meson stops recognising llvm-lib once the archiver is a script and
+          # falls back to GNU ar syntax ("csr <out> <objs>"), so accept both
+          # forms and always emit llvm-lib's.
           $lines = @(
             'import subprocess, sys'
-            'args = [a for a in sys.argv[1:] if not a.lower().startswith("/machine:")]'
-            'sys.exit(subprocess.call(["llvm-lib", "/MACHINE:ARM64EC"] + args))'
+            'argv = sys.argv[1:]'
+            'if argv and not argv[0].startswith("/") and not argv[0].startswith("-"):'
+            '    out, objs = argv[1], argv[2:]'
+            'else:'
+            '    rest = [a for a in argv if not a.lower().startswith("/machine:")]'
+            '    out = next((a[5:] for a in rest if a.lower().startswith("/out:")), None)'
+            '    objs = [a for a in rest if not a.lower().startswith("/out:") and not a.startswith("/")]'
+            'cmd = ["llvm-lib", "/NOLOGO", "/MACHINE:ARM64EC", "/OUT:" + out] + objs'
+            'sys.exit(subprocess.call(cmd))'
           )
           Set-Content -LiteralPath $wrapper -Value $lines -Encoding ASCII
           "ARM64EC_AR=$wrapper" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
