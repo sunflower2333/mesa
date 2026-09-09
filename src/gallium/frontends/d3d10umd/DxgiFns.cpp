@@ -576,6 +576,9 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
 {
    LOG_ENTRYPOINT();
 
+   if (!RotateResourceIdentities || !RotateResourceIdentities->hDevice ||
+       (RotateResourceIdentities->Resources && !RotateResourceIdentities->pResources))
+      return E_INVALIDARG;
    if (RotateResourceIdentities->Resources <= 1) {
       return S_OK;
    }
@@ -583,6 +586,24 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    Device *device = CastDevice(RotateResourceIdentities->hDevice);
    struct pipe_context *pipe = device->pipe;
    struct pipe_screen *screen = pipe->screen;
+   Resource *first = CastResource(RotateResourceIdentities->pResources[0]);
+   if (!first || !first->resource)
+      return E_INVALIDARG;
+   // Kernel-backed back buffers must rotate as a homogeneous set. Validate
+   // before copying pixels or changing any allocation identity.
+   for (UINT i = 0; i < RotateResourceIdentities->Resources; ++i) {
+      Resource *current = CastResource(RotateResourceIdentities->pResources[i]);
+      if (!current || !current->resource ||
+          bool(current->hAllocation) != bool(first->hAllocation))
+         return E_INVALIDARG;
+      if (first->hAllocation &&
+          (current->resource->target != PIPE_TEXTURE_2D || current->MipLevels != 1 ||
+           current->resource->array_size != 1 || current->Format != first->Format ||
+           current->resource->width0 != first->resource->width0 ||
+           current->resource->height0 != first->resource->height0 ||
+           current->shared_pitch != first->shared_pitch))
+         return DXGI_DDI_ERR_UNSUPPORTED;
+   }
 
    for (UINT i = 0; i < RotateResourceIdentities->Resources; ++i) {
       HRESULT hr = RefreshSharedResource(device,
@@ -646,6 +667,20 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    }
 
    pipe_resource_reference(&temp_resource, NULL);
+
+   // DXGI rotates kernel identities, while the runtime handles stay attached
+   // to their Resource objects. Pixel copies above preserve existing views.
+   const D3DKMT_HANDLE firstAllocation = first->hAllocation;
+   const D3DKMT_HANDLE firstKMResource = first->hKMResource;
+   for (UINT i = 0; i + 1 < RotateResourceIdentities->Resources; ++i) {
+      Resource *current = CastResource(RotateResourceIdentities->pResources[i]);
+      Resource *next = CastResource(RotateResourceIdentities->pResources[i + 1]);
+      current->hAllocation = next->hAllocation;
+      current->hKMResource = next->hKMResource;
+   }
+   Resource *last = CastResource(RotateResourceIdentities->pResources[RotateResourceIdentities->Resources - 1]);
+   last->hAllocation = firstAllocation;
+   last->hKMResource = firstKMResource;
 
    return S_OK;
 }
