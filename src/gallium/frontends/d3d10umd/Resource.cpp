@@ -82,7 +82,7 @@ EnsureSharedCopy(Device *device, Resource *resource)
          return hr;
       device->shared_copy_context = create;
    }
-   if (!resource->shared_staging_allocation) {
+   if (!resource->allocation_lockable && !resource->shared_staging_allocation) {
       VIOGPU_WDDM_ALLOCATION_INFO info = {};
       info.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
       info.Header.Version = VIOGPU_WDDM_ABI_VERSION;
@@ -227,13 +227,16 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
       } else {
          transfer_stride = transfer->stride;
          D3DDDICB_LOCK lock = {};
-         // Only an allocation's creator may LockCb it. Copy the shared backing
-         // through VidSch into our private staging before acquiring its lock.
-         lock.hAllocation = resource->shared_staging_allocation;
+         // LockCb synchronizes CPU-visible allocations created by this device
+         // directly with VidSch. Opened handles and non-lockable primaries
+         // still need a scheduled copy through device-owned private staging.
+         lock.hAllocation = resource->allocation_lockable
+                               ? resource->hAllocation : resource->shared_staging_allocation;
          lock.Flags.LockEntire = 1;
          lock.Flags.ReadOnly = !publish;
          lock.Flags.WriteOnly = publish;
-         lock_hr = publish ? S_OK : SubmitSharedCopy(device, resource, false);
+         lock_hr = publish || resource->allocation_lockable
+                      ? S_OK : SubmitSharedCopy(device, resource, false);
          if (SUCCEEDED(lock_hr))
             lock_hr = device->KTCallbacks.pfnLockCb(device->hDevice, &lock);
          recordPhase(1);
@@ -258,7 +261,8 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
             unlock.phAllocations = &lock.hAllocation;
             unlock_hr = device->KTCallbacks.pfnUnlockCb(device->hDevice, &unlock);
             recordPhase(3);
-            if (publish && SUCCEEDED(lock_hr) && SUCCEEDED(unlock_hr)) {
+            if (publish && !resource->allocation_lockable &&
+                SUCCEEDED(lock_hr) && SUCCEEDED(unlock_hr)) {
                unlock_hr = SubmitSharedCopy(device, resource, true);
                if (SUCCEEDED(unlock_hr)) {
                   // A read/write lock waits for the copy's read of staging too.
@@ -304,11 +308,12 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
             char line[512];
             int len = _snprintf_s(line, sizeof line, _TRUNCATE,
                                   "shared op=%s samples=%ld last=%lldus mean=%lldus "
-                                  "pid=%lu tick=%llu size=%ux%u allocation=0x%x hr=0x%08lx "
+                                  "pid=%lu tick=%llu size=%ux%u allocation=0x%x direct=%u hr=0x%08lx "
                                   "prepare_map=%lld lock=%lld copy=%lld unlock=%lld publish=%lld unmap=%lldus\r\n",
                                   publish ? "publish" : "refresh", n, usec, running / n,
                                   GetCurrentProcessId(), GetTickCount64(),
                                   texture->width0, texture->height0, resource->hAllocation,
+                                  resource->allocation_lockable ? 1u : 0u,
                                   (unsigned long)hr, phaseUsec[0], phaseUsec[1], phaseUsec[2],
                                   phaseUsec[3], phaseUsec[4], phaseUsec[5]);
             DWORD written = 0;
@@ -843,6 +848,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       pResource->hKMResource = allocate.hKMResource;
       pResource->hAllocation = allocationInfo.hAllocation;
       pResource->hRTResourceHandle = allocate.hResource;
+      pResource->allocation_lockable = !pResource->scanout_primary;
       pResource->shared_pitch = shared_pitch;
       pResource->shared_next = pDevice->shared_resources;
       pDevice->shared_resources = pResource;

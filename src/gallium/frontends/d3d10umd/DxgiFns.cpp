@@ -747,6 +747,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    const D3DKMT_HANDLE firstAllocation = first->hAllocation;
    const D3DKMT_HANDLE firstKMResource = first->hKMResource;
    const bool firstDirty = first->shared_dirty;
+   const bool firstLockable = first->allocation_lockable;
    // The copied GPU contents and the kernel allocation rotate together. A
    // clean source already matches that allocation; copying it into another
    // cache is not a new write to publish back through VidSch. Pending writes
@@ -758,11 +759,13 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
       current->hAllocation = next->hAllocation;
       current->hKMResource = next->hKMResource;
       current->shared_dirty = next->shared_dirty;
+      current->allocation_lockable = next->allocation_lockable;
    }
    Resource *last = CastResource(RotateResourceIdentities->pResources[RotateResourceIdentities->Resources - 1]);
    last->hAllocation = firstAllocation;
    last->hKMResource = firstKMResource;
    last->shared_dirty = firstDirty;
+   last->allocation_lockable = firstLockable;
 
    static volatile LONG rotations;
    const LONG rotation = InterlockedIncrement(&rotations);

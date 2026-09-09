@@ -190,6 +190,9 @@ struct Resource
    D3DKMT_HANDLE shared_staging_allocation;
    bool shared_dirty;
    bool scanout_primary;
+   // Only a CPU-visible allocation created by this device can be locked
+   // directly. Opened handles and primaries use scheduled private staging.
+   bool allocation_lockable;
 
    DXGI_FORMAT Format;
    UINT MipLevels;
