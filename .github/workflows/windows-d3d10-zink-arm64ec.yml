@@ -18,6 +18,7 @@ on:
       - 'wip/turnip-wddm-assumenotinuse'
     paths:
       - '.github/workflows/windows-d3d10-zink-arm64ec.yml'
+      - 'bin/verify-arm64ec-pe.py'
       - 'src/gallium/frontends/d3d10umd/**'
       - 'src/gallium/targets/d3d10umd/**'
 
@@ -251,8 +252,10 @@ jobs:
             # normal options.
             "c_args = ['/Zi']"
             "cpp_args = ['/Zi']"
-            "c_link_args = ['/DEBUG']"
-            "cpp_link_args = ['/DEBUG']"
+            # The archiver wrapper cannot fix Meson's dynamic-link machine.
+            # Its inferred /MACHINE:arm must be overridden for DLL links too.
+            "c_link_args = ['/DEBUG', '/MACHINE:ARM64EC']"
+            "cpp_link_args = ['/DEBUG', '/MACHINE:ARM64EC']"
           )
           Set-Content -LiteralPath $crossFile -Value $crossFileLines -Encoding ascii
           $setupArgs = @('setup', $buildDir, '.', '--cross-file', $crossFile) + $mesonOptions
@@ -273,16 +276,17 @@ jobs:
           Write-Host "Linked target: $($library.FullName)"
           $headers = & dumpbin /headers $library.FullName 2>&1
           if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the linked target" }
-          if (-not ($headers -match "AA64 machine")) {
-            throw "linked target machine type does not match ARM64"
-          }
+          # ARM64EC objects are A641, but linked images use AMD64 (8664) plus
+          # hybrid metadata. AA64 is a native ARM64 image, not this target.
+          python bin/verify-arm64ec-pe.py $library.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Linked target is not an ARM64EC image' }
           $exports = & dumpbin /exports $library.FullName 2>&1
           foreach ($symbol in @('OpenAdapter10', 'OpenAdapter10_2')) {
             if (-not ($exports -match $symbol)) {
               throw "the D3D10 UMD must export $symbol"
             }
           }
-          Write-Host 'ARM64 D3D10 UMD links and exports its adapter entry points.'
+          Write-Host 'ARM64EC D3D10 UMD links and exports its adapter entry points; runtime remains untested.'
 
       - name: Stage the ARM64EC user-mode driver
         shell: pwsh
