@@ -410,8 +410,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "validate", DXGI_DDI_ERR_UNSUPPORTED, started);
       device->pipe->flush(device->pipe, NULL, 0);
-      const bool readback = !pDstResource && !pSrcResource->scanout_primary;
-      HRESULT hr = PreparePresentResource(device, pSrcResource, readback);
+      HRESULT hr = PreparePresentResource(device, pSrcResource, false);
       if (FAILED(hr))
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "prepare", hr, started);
@@ -429,12 +428,11 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
                  sample, present.hSrcAllocation, present.hDstAllocation,
                  pPresentData->Flags.Value, (unsigned long)hr);
       }
-      // An explicit destination belongs to the runtime's composition path.
-      // Its pixels must never be sent straight to the global scanout escape.
-      if (SUCCEEDED(hr) && readback)
-         hr = PublishPresentFrame(device, pSrcResource);
+      // DXGI supplies the window's redirection destination internally even
+      // when hDstResource is null. PresentCb owns that copy and its completion;
+      // a global escape here would overwrite DWM with one application's frame.
       return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
-                                  "callback-and-publication", hr, started);
+                                  "callback", hr, started);
    }
 
    /* Split the present into its three parts and report a running average.

@@ -346,19 +346,17 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       functions->pfnResolveSharedResource = _ResolveSharedResource;
    }
 
-   /* DXGI_STATUS_NO_REDIRECTION opts this driver out of the shared-resource
-    * presentation path DWM uses, leaving DWM to present against a driver that
-    * has never composited here: it crash-loops in NDXGI::CDevice::SetPriorityCB
-    * at the same rate on every user-mode driver version tried, including the
-    * one from before any of this work. Let the environment select the path so
-    * the two can be compared on hardware rather than argued about. */
+   /* Windowed presentation must reach DWM's redirection surface. Opting out
+    * reports successful Presents without visible application pixels even when
+    * the KMD implements the destination copy. Keep only an explicit diagnostic
+    * opt-out now that shared publication and redirection copies are supported. */
    {
       char buf[8];
       if (GetEnvironmentVariableA("VIOGPU_DXGI_REDIRECTION", buf, sizeof buf) > 0 &&
-          buf[0] == '1') {
-         return S_OK;
+          buf[0] == '0') {
+         return DXGI_STATUS_NO_REDIRECTION;
       }
-      return DXGI_STATUS_NO_REDIRECTION;
+      return S_OK;
    }
 }
 
