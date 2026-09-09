@@ -381,7 +381,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    /* Split the present into its three parts and report a running average.
     * The scanout publication and the shared transfer together account for
     * well under half the frame, so the rest is in here somewhere. */
-   LARGE_INTEGER presentFreq, tEnter, tFlush, tShared, tPublish;
+   LARGE_INTEGER presentFreq, tEnter, tFlush, tShared, tPublish, tFrontbuffer;
    QueryPerformanceFrequency(&presentFreq);
    QueryPerformanceCounter(&tEnter);
 
@@ -395,34 +395,41 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       return hr;
    PublishPresentFrame(device, pSrcResource);
    QueryPerformanceCounter(&tPublish);
+   device->pipe->screen->flush_frontbuffer(device->pipe->screen, device->pipe,
+      pSrcResource->resource, 0, 0, pPresentData->pDXGIContext, 0, NULL);
+   QueryPerformanceCounter(&tFrontbuffer);
    {
-      static volatile LONG64 flush_usec, shared_usec, publish_usec;
+      static volatile LONG64 flush_usec, shared_usec, publish_usec, frontbuffer_usec;
       static volatile LONG present_samples;
       const LONGLONG hz = presentFreq.QuadPart > 0 ? presentFreq.QuadPart : 1;
       const LONG64 f = ((tFlush.QuadPart - tEnter.QuadPart) * 1000000LL) / hz;
       const LONG64 s2 = ((tShared.QuadPart - tFlush.QuadPart) * 1000000LL) / hz;
       const LONG64 p2 = ((tPublish.QuadPart - tShared.QuadPart) * 1000000LL) / hz;
+      const LONG64 fb = ((tFrontbuffer.QuadPart - tPublish.QuadPart) * 1000000LL) / hz;
       const LONG64 tf = InterlockedAdd64(&flush_usec, f);
       const LONG64 ts = InterlockedAdd64(&shared_usec, s2);
       const LONG64 tp = InterlockedAdd64(&publish_usec, p2);
+      const LONG64 tfb = InterlockedAdd64(&frontbuffer_usec, fb);
       const LONG n = InterlockedIncrement(&present_samples);
-      if ((n % 64) == 0) {
+      const bool slow = f + s2 + p2 + fb >= 100000;
+      if ((n % 64) == 0 || slow) {
          HANDLE log = CreateFileA("C:\\Users\\Public\\umd_timing.log",
                                   FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                   NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
          if (log != INVALID_HANDLE_VALUE) {
-            char line[224];
-            int len = _snprintf_s(line, sizeof line, _TRUNCATE,
-                                  "present n=%ld flush=%lldus shared=%lldus publish=%lldus (means)\r\n",
-                                  n, tf / n, ts / n, tp / n);
+            char line[320];
+            int len = _snprintf_s(
+               line, sizeof line, _TRUNCATE,
+               "present tick=%llu pid=%lu tid=%lu n=%ld slow=%u last=%lld/%lld/%lld/%lldus "
+               "mean=%lld/%lld/%lld/%lldus\r\n",
+               GetTickCount64(), GetCurrentProcessId(), GetCurrentThreadId(), n, slow ? 1u : 0u,
+               f, s2, p2, fb, tf / n, ts / n, tp / n, tfb / n);
             DWORD written = 0;
             if (len > 0) WriteFile(log, line, (DWORD)len, &written, NULL);
             CloseHandle(log);
          }
       }
    }
-   device->pipe->screen->flush_frontbuffer(device->pipe->screen, device->pipe, 
-      pSrcResource->resource, 0, 0, pPresentData->pDXGIContext, 0, NULL);
 
    return S_OK;
 }
