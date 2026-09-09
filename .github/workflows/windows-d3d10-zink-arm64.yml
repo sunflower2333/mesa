@@ -200,6 +200,25 @@ jobs:
           }
           Write-Host 'D3D10 UMD target keeps swrast the default and zink selectable.'
 
+      - name: Assert Present readback cannot block the compositor
+        shell: pwsh
+        run: |
+          $source = Get-Content -LiteralPath 'src/gallium/frontends/d3d10umd/DxgiFns.cpp' -Raw
+          $map = [regex]::Match(
+            $source,
+            'void\s+\*map\s*=\s*pipe->texture_map\(.*?;\s*if\s*\(map\s*==\s*NULL\)\s*\{(?<busy>.*?)\}',
+            [System.Text.RegularExpressions.RegexOptions]::Singleline)
+          if (-not $map.Success) {
+            throw 'Present staging map and its failure branch were not found'
+          }
+          if ($map.Value -notmatch 'PIPE_MAP_READ\s*\|\s*PIPE_MAP_DONTBLOCK') {
+            throw 'Present staging readback can block DWM'
+          }
+          if ($map.Groups['busy'].Value -match 'present_publish_retry') {
+            throw 'Expected nonblocking busy result must not arm adapter backoff'
+          }
+          Write-Host 'Present staging readback is nonblocking and retries on the next Present.'
+
       - name: Install Windows flex and bison
         shell: pwsh
         run: |

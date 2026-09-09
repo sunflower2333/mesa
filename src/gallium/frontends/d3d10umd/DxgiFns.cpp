@@ -288,9 +288,13 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
 
    struct pipe_transfer *transfer = NULL;
    void *map = pipe->texture_map(pipe, device->present_staging[readSlot], 0,
-                                 PIPE_MAP_READ, &box, &transfer);
+                                 PIPE_MAP_READ | PIPE_MAP_DONTBLOCK, &box,
+                                 &transfer);
    if (map == NULL) {
-      device->present_publish_retry = 60;
+      /* This runs on the caller's Present path, including DWM's compositor
+       * thread. A previous-frame copy that is still busy is expected and must
+       * never turn one dropped publication into a frozen desktop. Try the next
+       * Present; reserve adapter backoff for an escape that actually failed. */
       return;
    }
 
