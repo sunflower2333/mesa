@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'src/gallium/targets/d3d10umd/tests/d3d11_shared_test.cpp'
+      - 'src/gallium/targets/d3d10umd/tests/d3d11_present_test.cpp'
       - '.github/workflows/windows-d3d11-probes-arm64.yml'
 
 permissions:
@@ -34,10 +35,26 @@ jobs:
           }
           Get-FileHash probes/d3d11_shared_test.exe | Format-List
           Write-Host 'Compile gate only; shared pixels and composition must run on the VIOGPU guest.'
+      - name: Build native ARM64 scanout timing probe
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++17 /EHsc /W3 /MT /Zi `
+            src/gallium/targets/d3d10umd/tests/d3d11_present_test.cpp `
+            /Fe:probes/d3d11_present_test.exe /Fo:probes/ /Fd:probes/present-compiler.pdb `
+            /link /DEBUG /PDB:probes/d3d11_present_test.pdb d3d11.lib dxgi.lib dcomp.lib user32.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Present probe compilation failed' }
+          $bytes = [IO.File]::ReadAllBytes('probes/d3d11_present_test.exe')
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0xaa64) {
+            throw 'Present probe is not ARM64'
+          }
+          Get-FileHash probes/d3d11_present_test.exe | Format-List
       - uses: actions/upload-artifact@v4
         with:
           name: d3d11-shared-probe-arm64
           path: |
             probes/d3d11_shared_test.exe
             probes/d3d11_shared_test.pdb
+            probes/d3d11_present_test.exe
+            probes/d3d11_present_test.pdb
           if-no-files-found: error

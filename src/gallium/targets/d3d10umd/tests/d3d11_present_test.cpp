@@ -48,12 +48,20 @@ int main(int argc, char **argv)
    /* A crash here loses buffered output entirely, which is how this test
     * previously exited with an empty file.  Report every step as it happens. */
    setvbuf(stdout, NULL, _IONBF, 0);
+   // --full must use physical scanout dimensions. DPI virtualization otherwise
+   // turns 1280x1024 into 853x683 and the miniport correctly rejects the blit.
+   if (!SetProcessDPIAware() && !IsProcessDPIAware()) {
+      printf("RESULT: FAIL - unable to select physical display coordinates\n");
+      return 2;
+   }
 
    int width = 640, height = 480, frames = (int)(sizeof kFrames / sizeof kFrames[0]);
    bool fullscreenSize = false;
+   bool sparse = false;
    int fpsSeconds = 0;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--full")) fullscreenSize = true;
+      else if (!strcmp(argv[i], "--sparse")) sparse = true;
       /* Sustained present rate, which is the number the display path is judged
        * on.  The staged frames below sleep between presents, so they measure
        * correctness and say nothing about throughput. */
@@ -278,14 +286,17 @@ int main(int argc, char **argv)
       }
       const double fps = elapsed > 0.0 ? (double)count / elapsed : 0.0;
       printf("FPS: frames=%lld seconds=%.2f fps=%.2f\n", count, elapsed, fps);
-      printf("RESULT: %s\n", (SUCCEEDED(presentHr) && fps > 60.0) ? "PASS" : "FAIL");
+      const bool passed = SUCCEEDED(presentHr) && fps > 60.0;
+      printf("RESULT: %s (submission rate; visible scanout requires independent validation)\n",
+             passed ? "PASS" : "FAIL");
       if (staging) staging->Release();
       if (rtv) rtv->Release();
       if (back) back->Release();
       if (swap) swap->Release();
       if (ctx) ctx->Release();
       if (dev) dev->Release();
-      return 0;
+      DestroyWindow(hwnd);
+      return passed ? 0 : 1;
    }
 
    int rendered = 0, presented = 0;
@@ -317,12 +328,17 @@ int main(int argc, char **argv)
       else printf("frame %d: Present hr=0x%08lX\n", f, (unsigned long)hr);
 
       PumpMessages();
-      Sleep(700);
+      const ULONGLONG until = GetTickCount64() + (sparse ? 6000 : 700);
+      while (GetTickCount64() < until) {
+         PumpMessages();
+         Sleep(10);
+      }
    }
 
    /* Leave the last colour on screen long enough to be captured. */
    const float last[4] = { kFrames[frames - 1].r, kFrames[frames - 1].g, kFrames[frames - 1].b, 1.0f };
-   for (int i = 0; i < 40; ++i) {
+   // Sparse mode must never hide a lost last frame by presenting it again.
+   for (int i = 0; !sparse && i < 40; ++i) {
       ctx->ClearRenderTargetView(rtv, last);
       swap->Present(0, 0);
       PumpMessages();
