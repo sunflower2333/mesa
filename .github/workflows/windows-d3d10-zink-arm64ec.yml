@@ -152,6 +152,24 @@ jobs:
           Write-Host "win_flex -> $($flex.Path)"
           Write-Host "win_bison -> $($bison.Path)"
 
+      - name: Write an ARM64EC archiver wrapper
+        shell: pwsh
+        run: |
+          # meson derives the archiver's /MACHINE flag from the cpu name and
+          # emits /MACHINE:arm here, which llvm-lib refuses against arm64ec
+          # objects ("file machine type arm64ec conflicts with library machine
+          # type arm"). Drop whatever machine flag it passes and force the
+          # right one.
+          $wrapper = Join-Path $env:RUNNER_TEMP 'ar-arm64ec.py'
+          $lines = @(
+            'import subprocess, sys'
+            'args = [a for a in sys.argv[1:] if not a.lower().startswith("/machine:")]'
+            'sys.exit(subprocess.call(["llvm-lib", "/MACHINE:ARM64EC"] + args))'
+          )
+          Set-Content -LiteralPath $wrapper -Value $lines -Encoding ASCII
+          "ARM64EC_AR=$wrapper" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-Content $wrapper
+
       - name: Configure D3D10 UMD on zink
         shell: pwsh
         run: |
@@ -204,7 +222,7 @@ jobs:
             '[binaries]'
             "c = ['clang-cl', '--target=arm64ec-pc-windows-msvc']"
             "cpp = ['clang-cl', '--target=arm64ec-pc-windows-msvc']"
-            "ar = 'llvm-lib'"
+            ("ar = ['python', '" + ($env:ARM64EC_AR -replace '\\', '/') + "']")
             ''
             '[host_machine]'
             "system = 'windows'"
