@@ -1130,7 +1130,11 @@ zink_get_query_result(struct pipe_context *pctx,
    struct zink_screen *screen = zink_screen(pctx->screen);
 
    if (query->type == PIPE_QUERY_TIMESTAMP_DISJOINT) {
-      result->timestamp_disjoint.frequency = screen->info.props.limits.timestampPeriod * 1000000.0;
+      /* Timestamp results are converted to nanoseconds by
+       * timestamp_to_nanoseconds(), including the nonblocking fast path.
+       * Report ticks per second in those returned units, not the Vulkan
+       * device's nanoseconds-per-tick period. */
+      result->timestamp_disjoint.frequency = UINT64_C(1000000000);
       result->timestamp_disjoint.disjoint = false;
       return true;
    }
