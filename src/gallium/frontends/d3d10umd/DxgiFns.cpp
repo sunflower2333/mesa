@@ -182,15 +182,13 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
       templat.last_level = 0;
       templat.nr_samples = 1;
       templat.usage = PIPE_USAGE_STAGING;
-      /* Ask for a surface the CPU can read where it lies.  A tiled staging
-       * image makes the driver stage the readback through a second buffer, so
-       * the frame crosses the bus twice before this ever maps it. */
-      templat.bind = PIPE_BIND_LINEAR;
+      /* Not PIPE_BIND_LINEAR.  Asking for a surface the CPU could read where it
+       * lies looked like it would save the driver staging the readback through
+       * a second buffer, but on a live desktop the map behind it waited out a
+       * full 20 second timeout on every frame -- measured, 20001428us -- and
+       * starved every other client of the queue behind it. */
+      templat.bind = PIPE_BIND_RENDER_TARGET;
       device->present_staging = screen->resource_create(screen, &templat);
-      if (device->present_staging == NULL) {
-         templat.bind = PIPE_BIND_RENDER_TARGET;
-         device->present_staging = screen->resource_create(screen, &templat);
-      }
       if (device->present_staging == NULL) {
          device->present_publish_failed = true;
          return;
