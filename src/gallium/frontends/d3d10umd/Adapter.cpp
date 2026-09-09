@@ -227,12 +227,16 @@ GetCaps(D3D10DDI_HADAPTER hAdapter,
     * level and fails device creation outright.
     *
     * Report what the D3D11 table below this actually implements.  The
-    * 11_0 is advertised because the compositor will not use an adapter below
-    * it: with 10_1 as the ceiling dwm.exe loads this driver, rejects it and
-    * composites on WARP instead, which is why nothing it draws ever reaches
-    * the scanout. Tessellation, compute, unordered access and indirect draw
-    * are still stubs; the trace shows which of them the compositor actually
-    * reaches, and that is a far smaller set than the level as a whole.
+    * tessellation, compute, unordered access and indirect draw entries are
+    * present but unimplemented, and the runtime does not reach them below
+    * 11_0, so 10_1 is the ceiling until they are written.
+    *
+    * Advertising 11_0 was tried and made things worse, not better. The
+    * compositor does not composite on this adapter either way -- the miniport
+    * is WDDM 1.2 and Windows 11 will not -- but at 10_1 dwm.exe at least loads
+    * this driver and publishes the desktop through it now and then, which is
+    * what puts a desktop on the scanout at all. At 11_0 it stopped loading the
+    * driver entirely and published nothing.
     */
    if (pData->Type == D3D11DDICAPS_3DPIPELINESUPPORT) {
       if (pData->DataSize != sizeof(D3D11DDI_3DPIPELINESUPPORT_CAPS)) {
@@ -241,7 +245,6 @@ GetCaps(D3D10DDI_HADAPTER hAdapter,
       D3D11DDI_3DPIPELINESUPPORT_CAPS *pCaps =
          (D3D11DDI_3DPIPELINESUPPORT_CAPS *)pData->pData;
       pCaps->Caps =
-         D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_11_0) |
          D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_0) |
          D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_1) |
          D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11_1DDI_3DPIPELINELEVEL_9_1) |
