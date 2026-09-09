@@ -163,14 +163,20 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
       return;
    }
 
-   if (device->present_staging != NULL &&
-       (device->present_staging->width0 != width ||
-        device->present_staging->height0 != height ||
-        device->present_staging->format != src->format)) {
-      pipe_resource_reference(&device->present_staging, NULL);
+   for (unsigned slot = 0; slot < 2; ++slot) {
+      if (device->present_staging[slot] != NULL &&
+          (device->present_staging[slot]->width0 != width ||
+           device->present_staging[slot]->height0 != height ||
+           device->present_staging[slot]->format != src->format)) {
+         pipe_resource_reference(&device->present_staging[slot], NULL);
+         device->present_staging_primed = false;
+      }
    }
 
-   if (device->present_staging == NULL) {
+   for (unsigned slot = 0; slot < 2; ++slot) {
+      if (device->present_staging[slot] != NULL) {
+         continue;
+      }
       struct pipe_resource templat;
       memset(&templat, 0, sizeof templat);
       templat.target = PIPE_TEXTURE_2D;
@@ -182,17 +188,19 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
       templat.last_level = 0;
       templat.nr_samples = 1;
       templat.usage = PIPE_USAGE_STAGING;
-      /* Not PIPE_BIND_LINEAR.  Asking for a surface the CPU could read where it
-       * lies looked like it would save the driver staging the readback through
-       * a second buffer, but on a live desktop the map behind it waited out a
-       * full 20 second timeout on every frame -- measured, 20001428us -- and
-       * starved every other client of the queue behind it. */
-      templat.bind = PIPE_BIND_RENDER_TARGET;
-      device->present_staging = screen->resource_create(screen, &templat);
-      if (device->present_staging == NULL) {
+      /* The readback has to land somewhere the host writes and the guest can
+       * read.  A tiled staging surface is not that: the driver resolves it
+       * through a buffer the host never fills, so every frame read back as
+       * zeroes and the miniport published a black desktop while reporting
+       * success on full-size frames.  A linear surface is host-visible, and
+       * its pixels are the real ones. */
+      templat.bind = PIPE_BIND_LINEAR;
+      device->present_staging[slot] = screen->resource_create(screen, &templat);
+      if (device->present_staging[slot] == NULL) {
          device->present_publish_failed = true;
          return;
       }
+      device->present_staging_primed = false;
    }
 
    const unsigned rowBytes = width * 4;
@@ -227,11 +235,29 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    box.width = width;
    box.height = height;
    box.depth = 1;
-   pipe->resource_copy_region(pipe, device->present_staging, 0, 0, 0, 0, src, 0, &box);
+
+   /* Copy this frame into one surface and publish the other, which holds the
+    * frame before it.  Mapping the copy just issued means waiting for the host
+    * to finish it, and that wait -- not the pixels -- was the frame time. The
+    * previous frame's copy has had a whole frame to land, so its map returns
+    * without stalling.  The screen is one frame behind; it is not a frame
+    * slower. */
+   const unsigned writeSlot = device->present_staging_slot;
+   const unsigned readSlot = writeSlot ^ 1u;
+   pipe->resource_copy_region(pipe, device->present_staging[writeSlot], 0, 0, 0, 0,
+                              src, 0, &box);
+   device->present_staging_slot = readSlot;
+
+   if (!device->present_staging_primed) {
+      /* Nothing has been copied into the other surface yet: publishing it now
+       * would put an uninitialised frame on the screen. */
+      device->present_staging_primed = true;
+      return;
+   }
 
    struct pipe_transfer *transfer = NULL;
-   void *map = pipe->texture_map(pipe, device->present_staging, 0, PIPE_MAP_READ,
-                                 &box, &transfer);
+   void *map = pipe->texture_map(pipe, device->present_staging[readSlot], 0,
+                                 PIPE_MAP_READ, &box, &transfer);
    if (map == NULL) {
       device->present_publish_failed = true;
       return;
