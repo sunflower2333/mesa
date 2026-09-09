@@ -1,0 +1,267 @@
+name: Windows D3D10 UMD on Zink (ARM64EC)
+
+# Emulated x64 processes -- FurMark and 3DMark among them -- cannot load the
+# ARM64 user-mode driver, so they get no D3D at all: a 32-bit dxdiag on the
+# guest reports this adapter with an empty feature level list. This builds the
+# same user-mode driver as ARM64EC, which is the form an emulated x64 process
+# can load, to be installed through the INF's UserModeDriverNameWoW entry.
+#
+# Kept separate from the driver package build on purpose: ARM64EC is a new
+# target for this tree and a failure here must not stop the ARM64 package.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  arm64ec-umd:
+    name: ARM64EC D3D10 UMD link (clang-cl, zink)
+    runs-on: windows-2025-vs2026
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC and WDK
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64_arm64
+
+      - name: Install the WDK matching the selected SDK
+        shell: pwsh
+        run: |
+          # d3d10umddi.h and d3dkmddi.h ship in the WDK, not the SDK.  They must
+          # come from the same kit as every other Windows header: DXGK_FEATURE_ID
+          # is declared in d3dukmdt.h on 10.0.26100.0 and in d3dkmddi.h on
+          # 10.0.22000.0, so a build spanning two kits redefines it.  The runner
+          # image carries a WDK-only 22000 kit that has no windows.h, so the fix
+          # is to install the WDK for the SDK msvc-dev-cmd already selected and
+          # leave INCLUDE alone.
+          $sdkVersion = ($env:WindowsSDKVersion -replace '\\+$', '')
+          if ([string]::IsNullOrWhiteSpace($sdkVersion)) {
+            throw 'msvc-dev-cmd did not report a Windows SDK version'
+          }
+          $roots = @(
+            'C:\Program Files (x86)\Windows Kits\10\Include',
+            'C:\Program Files\Windows Kits\10\Include'
+          ) | Where-Object { Test-Path $_ }
+
+          function Test-KitComplete($version) {
+            foreach ($root in $roots) {
+              $kit = Join-Path $root $version
+              if ((Test-Path (Join-Path $kit 'um\d3d10umddi.h')) -and
+                  (Test-Path (Join-Path $kit 'shared\d3dkmddi.h')) -and
+                  (Test-Path (Join-Path $kit 'um\windows.h'))) {
+                return $kit
+              }
+            }
+            return $null
+          }
+
+          $kit = Test-KitComplete $sdkVersion
+          if ($null -eq $kit) {
+            Write-Host "SDK $sdkVersion has no WDK headers; installing the WDK."
+            $installer = Join-Path $env:RUNNER_TEMP 'wdksetup.exe'
+            # fwlink 2272234 is the WDK for Windows 11, version 24H2 (10.0.26100).
+            Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/?linkid=2272234' -OutFile $installer
+            $proc = Start-Process -FilePath $installer -ArgumentList '/quiet', '/norestart', '/features', '+' -Wait -PassThru
+            Write-Host "WDK installer exit code: $($proc.ExitCode)"
+            $kit = Test-KitComplete $sdkVersion
+          }
+          if ($null -eq $kit) {
+            throw "no complete Windows kit for $sdkVersion after installing the WDK"
+          }
+          Write-Host "kit providing SDK and WDK headers: $kit"
+
+          foreach ($header in @('windows.h', 'd3dkmthk.h', 'd3dkmddi.h', 'd3d10umddi.h', 'd3dumddi.h')) {
+            $found = Get-ChildItem -Path ($env:INCLUDE -split ';' | Where-Object { $_ -and (Test-Path $_) }) `
+              -Filter $header -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -eq $found) {
+              throw "required SDK/WDK header not found on INCLUDE: $header"
+            }
+            if ($found.FullName -notmatch [regex]::Escape($sdkVersion)) {
+              throw "$header resolves outside kit ${sdkVersion}: $($found.FullName)"
+            }
+            Write-Host "$header -> $($found.FullName)"
+          }
+
+      - name: Verify LLVM toolchain
+        shell: pwsh
+        run: |
+          $clang = Get-Command clang-cl.exe -ErrorAction Stop
+          $archiver = Get-Command llvm-lib.exe -ErrorAction Stop
+          Write-Host "clang-cl -> $($clang.Path)"
+          Write-Host "llvm-lib -> $($archiver.Path)"
+          & $clang.Path --version
+
+      - name: Set up Python build tools
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson generators
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade `
+            "meson==1.9.1" mako packaging pyyaml
+
+      - name: Install Windows flex and bison
+        shell: pwsh
+        run: |
+          $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+          $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
+          if ($null -eq $flex -or $null -eq $bison) {
+            $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+            if ($null -ne $winget) {
+              & $winget.Source install --silent --accept-source-agreements --accept-package-agreements `
+                --source winget --exact --id WinFlexBison.win_flex_bison --version 2.5.24
+              if ($LASTEXITCODE -ne 0) {
+                throw "WinFlexBison installation failed with exit code $LASTEXITCODE"
+              }
+            } else {
+              $choco = Get-Command choco.exe -ErrorAction Stop
+              & $choco.Source install winflexbison3 --yes --no-progress
+              if ($LASTEXITCODE -ne 0) {
+                throw "Chocolatey WinFlexBison installation failed with exit code $LASTEXITCODE"
+              }
+            }
+            $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $env:Path = "$machinePath;$userPath;$env:Path"
+            $flex = Get-Command win_flex.exe -ErrorAction SilentlyContinue
+            $bison = Get-Command win_bison.exe -ErrorAction SilentlyContinue
+          }
+          if ($null -eq $flex -or $null -eq $bison) {
+            throw "WinFlexBison binaries were not found after installation"
+          }
+          $flexItem = Get-Item -LiteralPath $flex.Path -Force
+          $flexBin = Split-Path -Parent $flex.Path
+          if ($flexItem.Target) {
+            $flexBin = Split-Path -Parent ([string]$flexItem.Target)
+          }
+          $env:Path = "$flexBin;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $flexBin
+          Write-Host "win_flex -> $($flex.Path)"
+          Write-Host "win_bison -> $($bison.Path)"
+
+      - name: Configure D3D10 UMD on zink
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-arm64ec"
+          $installDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-install-arm64ec"
+          if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+          if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
+          $mesonOptions = @(
+            '--backend=ninja',
+            '--buildtype=release',
+            # meson does NOT imply NDEBUG from buildtype, so without this the
+            # shipped UMD keeps every assert() and unreachable() live.  A failed
+            # assert calls abort(), and abort() inside a D3D user-mode driver
+            # takes down whatever loaded it - on this guest that is dwm.exe,
+            # which then crash-loops (70 faults in the first 50 seconds of
+            # uptime, __fastfail(FAST_FAIL_FATAL_APP_EXIT) from the CRT abort).
+            # A user-mode driver must never abort its host process.
+            '-Db_ndebug=true',
+            # emit debug symbols even for the release build, so a crash in the
+            # shipped UMD can be symbolicated instead of hand-attributed
+            '-Ddebug=true',
+            '-Dplatforms=windows',
+            '-Dgallium-drivers=zink',
+            '-Dvulkan-drivers=[]',
+            '-Dgallium-d3d10umd=true',
+            '-Dgallium-d3d10umd-backend=zink',
+            '-Dgallium-d3d10-dll-name=viogpud3d_zink',
+            '-Dopengl=false',
+            '-Dgles1=disabled',
+            '-Dgles2=disabled',
+            '-Degl=disabled',
+            '-Dglx=disabled',
+            '-Dgbm=disabled',
+            '-Dllvm=disabled',
+            '-Dshader-cache=disabled',
+            '-Dzlib=enabled',
+            '-Dzstd=disabled',
+            '-Db_vscrt=static_from_buildtype',
+            '-Dtools=[]',
+            '-Dbuild-tests=false',
+            '-Dwerror=false',
+            "-Dprefix=$installDir"
+          )
+          $env:CC = 'clang-cl'
+          $env:CXX = 'clang-cl'
+          $env:AR = 'llvm-lib'
+          # Meson must not execute ARM64 sanity binaries on the x64 runner.
+          $crossFile = Join-Path $env:RUNNER_TEMP 'mesa-d3d10-zink-arm64ec-cross.ini'
+          $crossFileLines = @(
+            '[binaries]'
+            "c = ['clang-cl', '--target=arm64ec-pc-windows-msvc']"
+            "cpp = ['clang-cl', '--target=arm64ec-pc-windows-msvc']"
+            "ar = 'llvm-lib'"
+            ''
+            '[host_machine]'
+            "system = 'windows'"
+            "cpu_family = 'aarch64'"
+            "cpu = 'arm64ec'"
+            "endian = 'little'"
+            ''
+            '[properties]'
+            'needs_exe_wrapper = true'
+            ''
+            '[built-in options]'
+            # clang-cl needs /Zi to emit debug info and lld-link needs /DEBUG to
+            # write the PDB; meson's debug=true supplies the former but not the
+            # latter for this cross setup, so the link step produced no symbols
+            # at all.  Setting them here keeps the command line free for the
+            # normal options.
+            "c_args = ['/Zi']"
+            "cpp_args = ['/Zi']"
+            "c_link_args = ['/DEBUG']"
+            "cpp_link_args = ['/DEBUG']"
+          )
+          Set-Content -LiteralPath $crossFile -Value $crossFileLines -Encoding ascii
+          $setupArgs = @('setup', $buildDir, '.', '--cross-file', $crossFile) + $mesonOptions
+          & meson @setupArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compile and link the D3D10 UMD
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-arm64ec"
+          meson compile -C $buildDir --ninja-args=-k0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "viogpud3d_zink.dll" |
+            Select-Object -First 1
+          if ($null -eq $library) {
+            throw "the zink D3D10 target did not produce viogpud3d_zink.dll"
+          }
+          Write-Host "Linked target: $($library.FullName)"
+          $headers = & dumpbin /headers $library.FullName 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the linked target" }
+          if (-not ($headers -match "AA64 machine")) {
+            throw "linked target machine type does not match ARM64"
+          }
+          $exports = & dumpbin /exports $library.FullName 2>&1
+          foreach ($symbol in @('OpenAdapter10', 'OpenAdapter10_2')) {
+            if (-not ($exports -match $symbol)) {
+              throw "the D3D10 UMD must export $symbol"
+            }
+          }
+          Write-Host 'ARM64 D3D10 UMD links and exports its adapter entry points.'
+
+      - name: Stage the ARM64EC user-mode driver
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "mesa-d3d10-zink-arm64ec"
+          $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "viogpud3d_zink.dll" |
+            Select-Object -First 1
+          if ($null -eq $library) { throw "the zink D3D10 target did not produce viogpud3d_zink.dll" }
+          New-Item -ItemType Directory -Force arm64ec-umd | Out-Null
+          Copy-Item $library.FullName (Join-Path 'arm64ec-umd' 'viogpud3dec.dll') -Force
+          Get-FileHash (Join-Path 'arm64ec-umd' 'viogpud3dec.dll') -Algorithm SHA256 | Format-List
+          & dumpbin /headers (Join-Path 'arm64ec-umd' 'viogpud3dec.dll') | Select-String -Pattern 'machine' | ForEach-Object { $_.Line.Trim() }
+
+      - name: Upload the ARM64EC user-mode driver
+        uses: actions/upload-artifact@v4
+        with:
+          name: viogpud3d-zink-arm64ec
+          path: arm64ec-umd/viogpud3dec.dll
+          if-no-files-found: error
