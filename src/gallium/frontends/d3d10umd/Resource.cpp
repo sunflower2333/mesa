@@ -165,6 +165,12 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
 {
    static volatile LONG sequence;
    const LONG transfer_sequence = InterlockedIncrement(&sequence);
+   /* This sits on the present path, ahead of the scanout publication, and the
+    * two of them together set the frame rate.  Time it and report a running
+    * average so the frame budget can be split between them. */
+   LARGE_INTEGER transferFreq, transferStart;
+   QueryPerformanceFrequency(&transferFreq);
+   QueryPerformanceCounter(&transferStart);
    void *pixels = NULL;
    struct pipe_transfer *transfer = NULL;
    HRESULT lock_hr = E_UNEXPECTED;
@@ -254,6 +260,31 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    HRESULT hr = FAILED(lock_hr) ? lock_hr : unlock_hr;
    if (SUCCEEDED(lock_hr) && unlock_hr == E_UNEXPECTED)
       hr = E_FAIL;
+   {
+      LARGE_INTEGER transferEnd;
+      QueryPerformanceCounter(&transferEnd);
+      static volatile LONG64 total_usec;
+      static volatile LONG samples;
+      const LONG64 usec = transferFreq.QuadPart > 0
+         ? ((transferEnd.QuadPart - transferStart.QuadPart) * 1000000LL) / transferFreq.QuadPart
+         : 0;
+      const LONG64 running = InterlockedAdd64(&total_usec, usec);
+      const LONG n = InterlockedIncrement(&samples);
+      if ((n % 64) == 0) {
+         HANDLE log = CreateFileA("C:\\Users\\Public\\umd_timing.log",
+                                  FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+         if (log != INVALID_HANDLE_VALUE) {
+            char line[192];
+            int len = _snprintf_s(line, sizeof line, _TRUNCATE,
+                                  "shared op=%s samples=%ld last=%lldus mean=%lldus\r\n",
+                                  publish ? "publish" : "refresh", n, usec, running / n);
+            DWORD written = 0;
+            if (len > 0) WriteFile(log, line, (DWORD)len, &written, NULL);
+            CloseHandle(log);
+         }
+      }
+   }
    /* This opens, writes and closes a file on the present path, so it records
     * enough transfers to show the path working and then gets out of the way. */
    if (transfer_sequence <= 32 || FAILED(hr)) {
