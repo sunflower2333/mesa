@@ -552,7 +552,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) ||
        (pCreateResource->pPrimaryDesc &&
-        pCreateResource->pPrimaryDesc->DriverFlags & DXGI_DDI_PRIMARY_OPTIONAL)) {
+        pCreateResource->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_OPTIONAL)) {
 
       DebugPrintf("%s(%dx%dx%d hResource=%p)\n",
 	       __func__,
@@ -606,16 +606,37 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
    memset(pResource, 0, sizeof *pResource);
 
-#if 0
    if (pCreateResource->pPrimaryDesc) {
-      pCreateResource->pPrimaryDesc->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
-      if (!(pCreateResource->pPrimaryDesc->DriverFlags & DXGI_DDI_PRIMARY_OPTIONAL)) {
-         // http://msdn.microsoft.com/en-us/library/windows/hardware/ff568846.aspx
+      DXGI_DDI_PRIMARY_DESC *primary = pCreateResource->pPrimaryDesc;
+      // Gallium's host texture is a cache of a CPU-visible kernel surface,
+      // not a scanout-capable allocation. Tell DXGI to use the implemented
+      // Blt path; otherwise DWM issues Flip and PresentCb rejects the ordinary
+      // allocation, leaving presentation without completion history.
+      primary->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
+      const bool optional = (primary->Flags & DXGI_DDI_PRIMARY_OPTIONAL) != 0;
+      static volatile LONG primaryCount;
+      const LONG sample = InterlockedIncrement(&primaryCount);
+      if (sample <= 16) {
+         HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, NULL);
+         if (log != INVALID_HANDLE_VALUE) {
+            char line[192];
+            int len = _snprintf_s(line, sizeof line, _TRUNCATE,
+                                  "primary pid=%lu flags=0x%x driverFlags=0x%x optional=%u size=%ux%u\r\n",
+                                  GetCurrentProcessId(), primary->Flags, primary->DriverFlags,
+                                  optional ? 1u : 0u, primary->ModeDesc.Width, primary->ModeDesc.Height);
+            DWORD written;
+            if (len > 0)
+               WriteFile(log, line, (DWORD)len, &written, NULL);
+            CloseHandle(log);
+         }
+      }
+      if (!optional) {
          SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
          return;
       }
    }
-#endif
 
    pResource->Format = pCreateResource->Format;
    pResource->MipLevels = pCreateResource->MipLevels;

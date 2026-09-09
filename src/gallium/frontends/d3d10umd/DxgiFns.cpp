@@ -552,7 +552,9 @@ _SetDisplayMode( DXGI_DDI_ARG_SETDISPLAYMODE *SetDisplayMode )
 {
    LOG_UNSUPPORTED_ENTRYPOINT();
 
-   return S_OK;
+   // CreateResource marks our host-cache surfaces NO_SCANOUT. No resource
+   // produced by this UMD can be installed as a direct-flip primary yet.
+   return DXGI_DDI_ERR_UNSUPPORTED;
 }
 
 
