@@ -6,6 +6,7 @@
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <dcomp.h>
+#include <dwmapi.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <cstdio>
@@ -14,6 +15,8 @@
 #include <cerrno>
 #include <cstdint>
 #include <cwchar>
+
+#pragma comment(lib, "dwmapi.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -651,6 +654,36 @@ static void TimestampTest(IDXGIAdapter *adapter)
    CheckDevice(d, "timestamp test");
 }
 
+static void CompositionTimingSample()
+{
+   LARGE_INTEGER frequency;
+   QueryPerformanceFrequency(&frequency);
+   printf("DWM observation only; collected counters do not prove visible rendering or fps.\n");
+   printf("qpc-frequency=%lld timing-size=%zu\n", frequency.QuadPart, sizeof(DWM_TIMING_INFO));
+   const ULONGLONG start = GetTickCount64();
+   for (unsigned sample = 0; sample <= 20; ++sample) {
+      DWM_TIMING_INFO info = {};
+      info.cbSize = sizeof(info);
+      HRESULT hr = DwmGetCompositionTimingInfo(NULL, &info);
+      if (FAILED(hr))
+         Check(hr, "Get DWM timing");
+      printf("dwm elapsed=%llu refresh=%u/%u compose=%u/%u period=%.3fms "
+             "refresh-count=%llu frame=%llu submitted=%llu confirmed=%llu "
+             "displayed=%llu complete=%llu pending=%llu late=%llu outstanding=%u "
+             "dx-present=%u dx-confirmed=%u\n",
+             GetTickCount64() - start,
+             info.rateRefresh.uiNumerator, info.rateRefresh.uiDenominator,
+             info.rateCompose.uiNumerator, info.rateCompose.uiDenominator,
+             1000.0 * static_cast<double>(info.qpcRefreshPeriod) / static_cast<double>(frequency.QuadPart),
+             info.cRefresh, info.cFrame, info.cFrameSubmitted, info.cFrameConfirmed,
+             info.cFramesDisplayed, info.cFramesComplete, info.cFramesPending,
+             info.cFramesLate, info.cFramesOutstanding,
+             info.cDXPresent, info.cDXPresentConfirmed);
+      if (sample < 20)
+         Sleep(1000);
+   }
+}
+
 int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
@@ -661,8 +694,8 @@ int main(int argc, char **argv)
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
        strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
-       strcmp(mode, "--query-poll")))) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll]\n");
+       strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       return 2;
    }
    DWORD session;
@@ -703,6 +736,8 @@ int main(int argc, char **argv)
          TimestampTest(adapter.Get());
       else if (!strcmp(mode, "--query-poll"))
          QueryPollTest(adapter.Get());
+      else if (!strcmp(mode, "--dwm-timing"))
+         CompositionTimingSample();
       else
          SharedTest(adapter.Get(), mode);
       printf("RESULT: PASS mode=%s\n", mode);
