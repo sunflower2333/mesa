@@ -430,7 +430,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       }
       // An explicit destination belongs to the runtime's composition path.
       // Its pixels must never be sent straight to the global scanout escape.
-      if (SUCCEEDED(hr) && !pDstResource)
+      if (SUCCEEDED(hr) && !pDstResource && !pSrcResource->scanout_primary)
          hr = PublishPresentFrame(device, pSrcResource);
       return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                   "callback-and-publication", hr, started);
@@ -550,11 +550,34 @@ _GetGammaCaps( DXGI_DDI_ARG_GET_GAMMA_CONTROL_CAPS *GetCaps )
 HRESULT APIENTRY
 _SetDisplayMode( DXGI_DDI_ARG_SETDISPLAYMODE *SetDisplayMode )
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
-
-   // CreateResource marks our host-cache surfaces NO_SCANOUT. No resource
-   // produced by this UMD can be installed as a direct-flip primary yet.
-   return DXGI_DDI_ERR_UNSUPPORTED;
+   LOG_ENTRYPOINT();
+   if (!SetDisplayMode || SetDisplayMode->SubResourceIndex != 0)
+      return E_INVALIDARG;
+   Device *device = CastDevice(SetDisplayMode->hDevice);
+   Resource *resource = CastResource(SetDisplayMode->hResource);
+   if (!device || !resource || !resource->scanout_primary || !resource->hAllocation ||
+       !device->KTCallbacks.pfnSetDisplayModeCb)
+      return DXGI_DDI_ERR_UNSUPPORTED;
+   D3DDDICB_SETDISPLAYMODE mode = {};
+   mode.hPrimaryAllocation = resource->hAllocation;
+   HRESULT hr = device->KTCallbacks.pfnSetDisplayModeCb(device->hDevice, &mode);
+   static volatile LONG modeCount;
+   if (InterlockedIncrement(&modeCount) <= 16) {
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[160];
+         int len = _snprintf_s(line, sizeof line, _TRUNCATE,
+                               "set-mode pid=%lu allocation=0x%x hr=0x%08lx\r\n",
+                               GetCurrentProcessId(), resource->hAllocation, (unsigned long)hr);
+         DWORD written;
+         if (len > 0)
+            WriteFile(log, line, (DWORD)len, &written, NULL);
+         CloseHandle(log);
+      }
+   }
+   return hr;
 }
 
 
@@ -639,7 +662,8 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
            current->resource->array_size != 1 || current->Format != first->Format ||
            current->resource->width0 != first->resource->width0 ||
            current->resource->height0 != first->resource->height0 ||
-           current->shared_pitch != first->shared_pitch))
+           current->shared_pitch != first->shared_pitch ||
+           current->scanout_primary != first->scanout_primary))
          return DXGI_DDI_ERR_UNSUPPORTED;
    }
 

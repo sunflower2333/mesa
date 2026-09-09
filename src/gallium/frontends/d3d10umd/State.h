@@ -187,6 +187,7 @@ struct Resource
    UINT shared_pitch;
    D3DKMT_HANDLE shared_staging_allocation;
    bool shared_dirty;
+   bool scanout_primary;
 
    DXGI_FORMAT Format;
    UINT MipLevels;

@@ -608,12 +608,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
    if (pCreateResource->pPrimaryDesc) {
       DXGI_DDI_PRIMARY_DESC *primary = pCreateResource->pPrimaryDesc;
-      // Gallium's host texture is a cache of a CPU-visible kernel surface,
-      // not a scanout-capable allocation. Tell DXGI to use the implemented
-      // Blt path; otherwise DWM issues Flip and PresentCb rejects the ordinary
-      // allocation, leaving presentation without completion history.
-      primary->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
       const bool optional = (primary->Flags & DXGI_DDI_PRIMARY_OPTIONAL) != 0;
+      // Optional app buffers retain copy-style presentation. DWM requires a
+      // real primary: allocate the miniport's standard scanout backing below.
+      primary->DriverFlags = optional ? DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT : 0;
+      pResource->scanout_primary = !optional;
       static volatile LONG primaryCount;
       const LONG sample = InterlockedIncrement(&primaryCount);
       if (sample <= 16) {
@@ -632,7 +631,15 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
             CloseHandle(log);
          }
       }
-      if (!optional) {
+      if (!optional &&
+          (!CastDevice(hDevice)->runtime_present || primary->VidPnSourceId != 0 ||
+           (primary->Flags & ~DXGI_DDI_PRIMARY_NONPREROTATED) != 0 ||
+           primary->ModeDesc.Rotation != DXGI_DDI_MODE_ROTATION_IDENTITY ||
+           primary->ModeDesc.Width != pCreateResource->pMipInfoList[0].TexelWidth ||
+           primary->ModeDesc.Height != pCreateResource->pMipInfoList[0].TexelHeight ||
+           primary->ModeDesc.Format != pCreateResource->Format ||
+           primary->ModeDesc.RefreshRate.Numerator == 0 ||
+           primary->ModeDesc.RefreshRate.Denominator == 0)) {
          SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
          return;
       }
@@ -670,7 +677,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    const bool shared = (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) != 0;
    const bool present = CastDevice(hDevice)->runtime_present &&
                         (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT);
-   const bool kernelBacked = shared || present;
+   const bool kernelBacked = shared || present || pResource->scanout_primary;
    if (kernelBacked && (templat.target != PIPE_TEXTURE_2D ||
                   templat.format != PIPE_FORMAT_B8G8R8A8_UNORM ||
                   templat.width0 == 0 || templat.width0 > UINT_MAX / 4 ||
@@ -731,6 +738,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       privateData.Size = (VIOGPU_WDDM_UINT64)shared_pitch * shared_height;
       privateData.Alignment = 4096;
       privateData.Flags = VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+      if (pResource->scanout_primary) {
+         // Primary backing is scheduler-managed, not directly locked by the
+         // UMD. The scheduled staging copy fills it before PresentCb.
+         privateData.Flags = VIOGPU_WDDM_ALLOCATION_PRIMARY;
+         privateData.RefreshRateNumerator = pCreateResource->pPrimaryDesc->ModeDesc.RefreshRate.Numerator;
+         privateData.RefreshRateDenominator = pCreateResource->pPrimaryDesc->ModeDesc.RefreshRate.Denominator;
+      }
       privateData.Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
       privateData.Width = shared_width;
       privateData.Height = shared_height;
@@ -740,6 +754,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       memset(&allocationInfo, 0, sizeof allocationInfo);
       allocationInfo.pPrivateDriverData = &privateData;
       allocationInfo.PrivateDriverDataSize = sizeof privateData;
+      allocationInfo.Flags.Primary = pResource->scanout_primary;
+      if (pResource->scanout_primary)
+         allocationInfo.VidPnSourceId = pCreateResource->pPrimaryDesc->VidPnSourceId;
 
       D3DDDICB_ALLOCATE allocate;
       memset(&allocate, 0, sizeof allocate);
@@ -949,7 +966,10 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    if (info.Header.Magic != VIOGPU_WDDM_ABI_MAGIC ||
        info.Header.Version != VIOGPU_WDDM_ABI_VERSION ||
        info.Header.Size != sizeof info || info.Header.Reserved != 0 ||
-       info.Flags != VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE ||
+       (info.Flags != VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE &&
+        info.Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY) ||
+       (info.Flags == VIOGPU_WDDM_ALLOCATION_PRIMARY &&
+        (info.RefreshRateNumerator == 0 || info.RefreshRateDenominator == 0)) ||
        info.Format != VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM ||
        info.Width == 0 || info.Width > UINT_MAX / 4 || info.Height == 0 ||
        info.Pitch < info.Width * 4 ||
@@ -991,6 +1011,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
       return;
    }
    pResource->hAllocation = openInfo->hAllocation;
+   pResource->scanout_primary = info.Flags == VIOGPU_WDDM_ALLOCATION_PRIMARY;
    pResource->hKMResource = 0;
    /* The allocation belongs to whoever created it; this device only holds a
     * view, so destruction here must not deallocate it. */
