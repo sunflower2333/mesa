@@ -359,6 +359,37 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
 }
 
 
+static HRESULT
+RecordRuntimePresent(Device *device, const DXGI_DDI_ARG_PRESENT *present,
+                     Resource *src, Resource *dst, const char *stage, HRESULT hr,
+                     ULONGLONG started)
+{
+   const unsigned sample = device->runtime_present_count;
+   // Bounded startup/error sampling: DWM has no console for stderr, and a
+   // file write per frame would contaminate the responsiveness measurement.
+   if (sample <= 16 || (sample % 64) == 0) {
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[384];
+         int len = _snprintf_s(line, sizeof line, _TRUNCATE,
+                               "present tick=%llu pid=%lu n=%u stage=%s src=0x%x dst=0x%x "
+                               "size=%ux%u flags=0x%x hr=0x%08lx elapsed=%llums\r\n",
+                               GetTickCount64(), GetCurrentProcessId(), sample, stage,
+                               src ? src->hAllocation : 0, dst ? dst->hAllocation : 0,
+                               src && src->resource ? src->resource->width0 : 0,
+                               src && src->resource ? src->resource->height0 : 0,
+                               present->Flags.Value, (unsigned long)hr, GetTickCount64() - started);
+         DWORD written;
+         if (len > 0)
+            WriteFile(log, line, (DWORD)len, &written, NULL);
+         CloseHandle(log);
+      }
+   }
+   return hr;
+}
+
 HRESULT APIENTRY
 _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
 {
@@ -370,15 +401,19 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    Resource *pDstResource = CastResource(pPresentData->hDstResource);
 
    if (device->runtime_present) {
+      const ULONGLONG started = GetTickCount64();
+      ++device->runtime_present_count;
       if (!device->pDXGIBaseCallbacks || !device->pDXGIBaseCallbacks->pfnPresentCb ||
           !pSrcResource || pPresentData->SrcSubResourceIndex != 0 ||
           pPresentData->DstSubResourceIndex != 0 ||
           (pDstResource && !pDstResource->hAllocation))
-         return DXGI_DDI_ERR_UNSUPPORTED;
+         return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
+                                     "validate", DXGI_DDI_ERR_UNSUPPORTED, started);
       device->pipe->flush(device->pipe, NULL, 0);
       HRESULT hr = PreparePresentResource(device, pSrcResource);
       if (FAILED(hr))
-         return hr;
+         return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
+                                     "prepare", hr, started);
 
       DXGIDDICB_PRESENT present = {};
       present.hSrcAllocation = pSrcResource->hAllocation;
@@ -387,7 +422,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       // Use the same VidSch context that submitted the host-to-allocation copy.
       present.hContext = device->shared_copy_context.hContext;
       hr = device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice, &present);
-      const unsigned sample = ++device->runtime_present_count;
+      const unsigned sample = device->runtime_present_count;
       if (sample <= 16 || FAILED(hr)) {
          fprintf(stderr, "DXGI runtime Present n=%u src=0x%x dst=0x%x flags=0x%x hr=0x%08lx\n",
                  sample, present.hSrcAllocation, present.hDstAllocation,
@@ -396,8 +431,9 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       // An explicit destination belongs to the runtime's composition path.
       // Its pixels must never be sent straight to the global scanout escape.
       if (SUCCEEDED(hr) && !pDstResource)
-         return PublishPresentFrame(device, pSrcResource);
-      return hr;
+         hr = PublishPresentFrame(device, pSrcResource);
+      return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
+                                  "callback-and-publication", hr, started);
    }
 
    /* Split the present into its three parts and report a running average.

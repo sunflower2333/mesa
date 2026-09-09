@@ -169,9 +169,12 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
    pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
    char presentMode[8] = {};
-   pDevice->runtime_present = GetEnvironmentVariableA("VIOGPU_DXGI_PRESENT", presentMode,
-                                                     sizeof presentMode) > 0 &&
-                              presentMode[0] == '1';
+   // DWM must participate in DXGI submission/completion too. Testing this only
+   // in an application leaves the compositor on the legacy escape-only path.
+   // Keep an explicit process-local opt-out for controlled comparisons.
+   pDevice->runtime_present = !(GetEnvironmentVariableA("VIOGPU_DXGI_PRESENT", presentMode,
+                                                        sizeof presentMode) > 0 &&
+                                presentMode[0] == '0');
 
    pDevice->draw_so_target = NULL;
 
