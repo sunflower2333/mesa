@@ -11,6 +11,15 @@ name: Windows D3D10 UMD on Zink (ARM64EC)
 
 on:
   workflow_dispatch:
+  # workflow_dispatch cannot reach a workflow that is not on the default
+  # branch, and this one is developed on a topic branch.
+  push:
+    branches:
+      - 'wip/turnip-wddm-assumenotinuse'
+    paths:
+      - '.github/workflows/windows-d3d10-zink-arm64ec.yml'
+      - 'src/gallium/frontends/d3d10umd/**'
+      - 'src/gallium/targets/d3d10umd/**'
 
 jobs:
   arm64ec-umd:
