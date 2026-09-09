@@ -164,7 +164,8 @@ static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[
    d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
    D3D11_VIEWPORT viewport = {0, 0, (float)desc.Width, (float)desc.Height, 0, 1};
    d.context->RSSetViewports(1, &viewport);
-   d.context->Draw(3, 0);
+   // A nonzero start also checks the frontend's zero-based SV_VertexID.
+   d.context->Draw(3, releaseBeforeReadback ? 1 : 0);
    if (releaseBeforeReadback) {
       // The D3D frontend substitutes its empty shaders for these NULL binds.
       // Delete the old pair without drawing with the replacements, then let

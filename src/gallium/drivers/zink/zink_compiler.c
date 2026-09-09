@@ -117,6 +117,21 @@ fields[member_idx].offset = offsetof(struct zink_gfx_push_constant, field);
 }
 
 static bool
+lower_vertex_id_zero_base(nir_builder *b, nir_intrinsic_instr *instr, void *data)
+{
+   if (instr->intrinsic != nir_intrinsic_load_vertex_id_zero_base)
+      return false;
+
+   /* TGSI/D3D vertex IDs exclude the draw's start/base vertex. Vulkan's
+    * VertexIndex includes it for both indexed and non-indexed draws. Use
+    * first_vertex here: lower_basevertex implements GL's indexed-only value. */
+   b->cursor = nir_before_instr(&instr->instr);
+   nir_def_replace(&instr->def,
+                   nir_isub(b, nir_load_vertex_id(b), nir_load_first_vertex(b)));
+   return true;
+}
+
+static bool
 lower_basevertex_instr(nir_builder *b, nir_intrinsic_instr *instr, void *data)
 {
    if (instr->intrinsic != nir_intrinsic_load_base_vertex)
@@ -5696,6 +5711,8 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
    if (nir->info.stage < MESA_SHADER_FRAGMENT)
       nir_gather_xfb_info_from_intrinsics(nir);
    NIR_PASS(_, nir, fix_vertex_input_locations);
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_vertex_id_zero_base,
+            nir_metadata_control_flow, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    scan_nir(screen, nir, zs);
 
