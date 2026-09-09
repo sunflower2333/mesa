@@ -44,6 +44,23 @@
 #include "util/u_rect.h"
 #include "util/u_surface.h"
 
+static struct pipe_resource *
+CreateSharedTextureCache(struct pipe_screen *screen, const struct pipe_resource *templat)
+{
+   // These caches cross the CPU-visible WDDM backing on every ownership
+   // transition. On UMA a linear image can be mapped after its GPU usage
+   // retires, avoiding the extra tiled-image-to-staging copy. The normal
+   // synchronized map and kernel LockCb still govern visibility and access.
+   struct pipe_resource linear = *templat;
+   linear.bind |= PIPE_BIND_LINEAR;
+   struct pipe_resource *resource = screen->resource_create(screen, &linear);
+   if (resource)
+      return resource;
+   // A backend may not support the requested render/sample usage with linear
+   // tiling. Its existing tiled cache remains a valid, synchronized fallback.
+   return screen->resource_create(screen, templat);
+}
+
 static void
 LogSharedCopyFailure(const char *stage, HRESULT hr)
 {
@@ -308,11 +325,12 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
             char line[512];
             int len = _snprintf_s(line, sizeof line, _TRUNCATE,
                                   "shared op=%s samples=%ld last=%lldus mean=%lldus "
-                                  "pid=%lu tick=%llu size=%ux%u allocation=0x%x direct=%u hr=0x%08lx "
+                                  "pid=%lu tick=%llu size=%ux%u allocation=0x%x linear=%u direct=%u hr=0x%08lx "
                                   "prepare_map=%lld lock=%lld copy=%lld unlock=%lld publish=%lld unmap=%lldus\r\n",
                                   publish ? "publish" : "refresh", n, usec, running / n,
                                   GetCurrentProcessId(), GetTickCount64(),
                                   texture->width0, texture->height0, resource->hAllocation,
+                                  (texture->bind & PIPE_BIND_LINEAR) ? 1u : 0u,
                                   resource->allocation_lockable ? 1u : 0u,
                                   (unsigned long)hr, phaseUsec[0], phaseUsec[1], phaseUsec[2],
                                   phaseUsec[3], phaseUsec[4], phaseUsec[5]);
@@ -743,7 +761,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       }
    }
 
-   pResource->resource = screen->resource_create(screen, &templat);
+   pResource->resource = kernelBacked ? CreateSharedTextureCache(screen, &templat)
+                                     : screen->resource_create(screen, &templat);
    if (!pResource->resource) {
       DebugPrintf("%s: failed to create resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);
@@ -1035,7 +1054,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    templat.usage = PIPE_USAGE_DEFAULT;
    templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
 
-   pResource->resource = screen->resource_create(screen, &templat);
+   pResource->resource = CreateSharedTextureCache(screen, &templat);
    if (pResource->resource == NULL) {
       DebugPrintf("%s: could not create the backing resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);
