@@ -113,6 +113,8 @@ struct Device
     * hand the pixels to the miniport. */
    struct pipe_resource *present_staging;
    bool present_publish_failed;
+   uint8_t *present_request;
+   size_t present_request_size;
    Resource *shared_resources;
    D3DDDICB_CREATECONTEXT shared_copy_context;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;

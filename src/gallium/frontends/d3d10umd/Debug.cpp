@@ -26,6 +26,26 @@ st_debug_parse(void)
 void
 DebugPrintf(const char *format, ...)
 {
+    /* Every DDI entry point calls this, and the hot ones run hundreds of times
+     * a frame.  OutputDebugString raises a debug exception and takes a
+     * machine-wide mutex on each call whether or not anyone is listening, so
+     * leaving it on cost far more than the frame it was tracing.  Decide once,
+     * and format nothing at all unless tracing was asked for.
+     *
+     * OutputDebugString buffers are session scoped, so a capture started from a
+     * remote shell never sees output from dwm.exe, which runs as SYSTEM. Append
+     * to a file as well, so the last entry point before a crash can be read
+     * back. */
+    static int trace = -1;
+    if (trace < 0) {
+        char enabled[8];
+        trace = GetEnvironmentVariableA("VIOGPU_UMD_TRACE", enabled, sizeof enabled) > 0 &&
+                enabled[0] == '1';
+    }
+    if (!trace) {
+        return;
+    }
+
     char buf[4096];
 
     va_list ap;
@@ -35,17 +55,7 @@ DebugPrintf(const char *format, ...)
 
     OutputDebugStringA(buf);
 
-    /* OutputDebugString buffers are session scoped, so a capture started from a
-     * remote shell never sees output from dwm.exe, which runs as SYSTEM. Append
-     * to a file as well when asked, so the last entry point before a crash can
-     * be read back. */
-    static int trace = -1;
-    if (trace < 0) {
-        char enabled[8];
-        trace = GetEnvironmentVariableA("VIOGPU_UMD_TRACE", enabled, sizeof enabled) > 0 &&
-                enabled[0] == '1';
-    }
-    if (trace) {
+    {
         HANDLE log = CreateFileA("C:\\Users\\Public\\umd_trace.log",
                                  FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                  NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);

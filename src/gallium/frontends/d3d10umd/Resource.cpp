@@ -254,7 +254,9 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    HRESULT hr = FAILED(lock_hr) ? lock_hr : unlock_hr;
    if (SUCCEEDED(lock_hr) && unlock_hr == E_UNEXPECTED)
       hr = E_FAIL;
-   if (transfer_sequence <= 512 || FAILED(hr)) {
+   /* This opens, writes and closes a file on the present path, so it records
+    * enough transfers to show the path working and then gets out of the way. */
+   if (transfer_sequence <= 32 || FAILED(hr)) {
       HANDLE log = CreateFileA("C:\\Users\\Public\\umd_shared.log",
                                FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -688,9 +690,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          ++attempts;
          if (FAILED(ahr) || allocationInfo.hAllocation == 0)
             ++failures;
-         HANDLE log = CreateFileA("C:\\Users\\Public\\umd_alloc.log",
-                                  FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                  NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+         HANDLE log = attempts <= 32 || FAILED(ahr) || allocationInfo.hAllocation == 0
+                         ? CreateFileA("C:\\Users\\Public\\umd_alloc.log",
+                                       FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+                         : INVALID_HANDLE_VALUE;
          if (log != INVALID_HANDLE_VALUE) {
             char line[256];
             int n = _snprintf_s(line, sizeof line, _TRUNCATE,

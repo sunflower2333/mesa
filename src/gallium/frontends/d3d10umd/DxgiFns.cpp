@@ -182,13 +182,47 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
       templat.last_level = 0;
       templat.nr_samples = 1;
       templat.usage = PIPE_USAGE_STAGING;
-      templat.bind = PIPE_BIND_RENDER_TARGET;
+      /* Ask for a surface the CPU can read where it lies.  A tiled staging
+       * image makes the driver stage the readback through a second buffer, so
+       * the frame crosses the bus twice before this ever maps it. */
+      templat.bind = PIPE_BIND_LINEAR;
       device->present_staging = screen->resource_create(screen, &templat);
+      if (device->present_staging == NULL) {
+         templat.bind = PIPE_BIND_RENDER_TARGET;
+         device->present_staging = screen->resource_create(screen, &templat);
+      }
       if (device->present_staging == NULL) {
          device->present_publish_failed = true;
          return;
       }
    }
+
+   const unsigned rowBytes = width * 4;
+   const unsigned payloadSize = rowBytes * height;
+   const unsigned requestSize = sizeof(VIOGPU_WDDM_PRESENT_BLIT) + payloadSize;
+
+   /* Keep the request buffer for the life of the device.  A frame is several
+    * megabytes, and taking it from the heap and giving it back on every
+    * present cost more than the blit it carries. */
+   if (device->present_request != NULL &&
+       device->present_request_size != requestSize) {
+      FREE(device->present_request);
+      device->present_request = NULL;
+      device->present_request_size = 0;
+   }
+
+   if (device->present_request == NULL) {
+      device->present_request = (uint8_t *)MALLOC(requestSize);
+      if (device->present_request == NULL) {
+         return;
+      }
+      device->present_request_size = requestSize;
+   }
+
+   LARGE_INTEGER readbackFrequency;
+   LARGE_INTEGER readbackStart;
+   QueryPerformanceFrequency(&readbackFrequency);
+   QueryPerformanceCounter(&readbackStart);
 
    struct pipe_box box;
    memset(&box, 0, sizeof box);
@@ -205,56 +239,66 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
       return;
    }
 
-   const unsigned rowBytes = width * 4;
-   const unsigned payloadSize = rowBytes * height;
-   const unsigned requestSize = sizeof(VIOGPU_WDDM_PRESENT_BLIT) + payloadSize;
-   uint8_t *request = (uint8_t *)MALLOC(requestSize);
+   uint8_t *request = device->present_request;
+   VIOGPU_WDDM_PRESENT_BLIT *blit = (VIOGPU_WDDM_PRESENT_BLIT *)request;
+   memset(blit, 0, sizeof *blit);
+   blit->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   blit->Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   blit->Header.Size = sizeof *blit;
+   blit->Opcode = VIOGPU_WDDM_ESCAPE_PRESENT_BLIT;
+   blit->Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+   blit->Width = width;
+   blit->Height = height;
+   blit->SourcePitch = rowBytes;
+   blit->Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
+   blit->PayloadSize = payloadSize;
 
-   if (request != NULL) {
-      VIOGPU_WDDM_PRESENT_BLIT *blit = (VIOGPU_WDDM_PRESENT_BLIT *)request;
-      memset(blit, 0, sizeof *blit);
-      blit->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
-      blit->Header.Version = VIOGPU_WDDM_ABI_VERSION;
-      blit->Header.Size = sizeof *blit;
-      blit->Opcode = VIOGPU_WDDM_ESCAPE_PRESENT_BLIT;
-      blit->Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
-      blit->Width = width;
-      blit->Height = height;
-      blit->SourcePitch = rowBytes;
-      blit->Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
-      blit->PayloadSize = payloadSize;
-
-      uint8_t *payload = request + sizeof(VIOGPU_WDDM_PRESENT_BLIT);
+   uint8_t *payload = request + sizeof(VIOGPU_WDDM_PRESENT_BLIT);
+   if (transfer->stride == rowBytes) {
+      memcpy(payload, map, payloadSize);
+   } else {
       for (unsigned row = 0; row < height; ++row) {
          memcpy(payload + (size_t)row * rowBytes,
                 (const uint8_t *)map + (size_t)row * transfer->stride,
                 rowBytes);
       }
-
-      /* Send this through the runtime's D3DKMTEscape rather than
-       * KTCallbacks.pfnEscapeCb: calling that table entry faults inside
-       * NDXGI::CDevice::SetPriorityCB -- a neighbouring callback -- and kills
-       * the caller before the request ever reaches the miniport. */
-      D3DKMT_ESCAPE escape;
-      memset(&escape, 0, sizeof escape);
-      escape.hAdapter = PresentAdapter();
-      escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
-      escape.pPrivateDriverData = request;
-      escape.PrivateDriverDataSize = requestSize;
-
-      NTSTATUS status = escape.hAdapter != 0 && KmtEscape() != NULL
-                           ? KmtEscape()(&escape)
-                           : STATUS_UNSUCCESSFUL;
-      if (!NT_SUCCESS(status)) {
-         /* One refusal is enough: the miniport either speaks this endpoint or
-          * it does not, and retrying every frame would only add a readback. */
-         device->present_publish_failed = true;
-      }
-
-      FREE(request);
    }
 
+   /* Release the mapping before the escape: the miniport copies the whole
+    * frame twice more on the other side of it, and nothing there needs the
+    * resource to stay mapped. */
    pipe_texture_unmap(pipe, transfer);
+
+   LARGE_INTEGER readbackEnd;
+   QueryPerformanceCounter(&readbackEnd);
+   /* Tell the miniport how long the host took to hand this frame back.  It
+    * publishes the value next to its own timing, which is the only way to say
+    * which side of the escape a slow frame was spent on. */
+   blit->ReadbackUsec =
+      readbackFrequency.QuadPart > 0
+         ? (uint32_t)(((readbackEnd.QuadPart - readbackStart.QuadPart) * 1000000LL) /
+                      readbackFrequency.QuadPart)
+         : 0;
+
+   /* Send this through the runtime's D3DKMTEscape rather than
+    * KTCallbacks.pfnEscapeCb: calling that table entry faults inside
+    * NDXGI::CDevice::SetPriorityCB -- a neighbouring callback -- and kills
+    * the caller before the request ever reaches the miniport. */
+   D3DKMT_ESCAPE escape;
+   memset(&escape, 0, sizeof escape);
+   escape.hAdapter = PresentAdapter();
+   escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+   escape.pPrivateDriverData = request;
+   escape.PrivateDriverDataSize = requestSize;
+
+   NTSTATUS status = escape.hAdapter != 0 && KmtEscape() != NULL
+                        ? KmtEscape()(&escape)
+                        : STATUS_UNSUCCESSFUL;
+   if (!NT_SUCCESS(status)) {
+      /* One refusal is enough: the miniport either speaks this endpoint or
+       * it does not, and retrying every frame would only add a readback. */
+      device->present_publish_failed = true;
+   }
 }
 
 
