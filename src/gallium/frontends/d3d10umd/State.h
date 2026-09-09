@@ -116,6 +116,8 @@ struct Device
    unsigned present_publish_backoff;
    uint8_t *present_request;
    size_t present_request_size;
+   bool runtime_present;
+   unsigned runtime_present_count;
    Resource *shared_resources;
    D3DDDICB_CREATECONTEXT shared_copy_context;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;

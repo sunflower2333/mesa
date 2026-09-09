@@ -168,6 +168,10 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
    pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
    pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
+   char presentMode[8] = {};
+   pDevice->runtime_present = GetEnvironmentVariableA("VIOGPU_DXGI_PRESENT", presentMode,
+                                                     sizeof presentMode) > 0 &&
+                              presentMode[0] == '1';
 
    pDevice->draw_so_target = NULL;
 

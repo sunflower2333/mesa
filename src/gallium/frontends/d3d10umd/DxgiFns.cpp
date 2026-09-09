@@ -367,6 +367,38 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
 
    struct Device *device = CastDevice(pPresentData->hDevice);
    Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
+   Resource *pDstResource = CastResource(pPresentData->hDstResource);
+
+   if (device->runtime_present) {
+      if (!device->pDXGIBaseCallbacks || !device->pDXGIBaseCallbacks->pfnPresentCb ||
+          !pSrcResource || pPresentData->SrcSubResourceIndex != 0 ||
+          pPresentData->DstSubResourceIndex != 0 ||
+          (pDstResource && !pDstResource->hAllocation))
+         return DXGI_DDI_ERR_UNSUPPORTED;
+      device->pipe->flush(device->pipe, NULL, 0);
+      HRESULT hr = PreparePresentResource(device, pSrcResource);
+      if (FAILED(hr))
+         return hr;
+
+      DXGIDDICB_PRESENT present = {};
+      present.hSrcAllocation = pSrcResource->hAllocation;
+      present.hDstAllocation = pDstResource ? pDstResource->hAllocation : 0;
+      present.pDXGIContext = pPresentData->pDXGIContext;
+      // Use the same VidSch context that submitted the host-to-allocation copy.
+      present.hContext = device->shared_copy_context.hContext;
+      hr = device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice, &present);
+      const unsigned sample = ++device->runtime_present_count;
+      if (sample <= 16 || FAILED(hr)) {
+         fprintf(stderr, "DXGI runtime Present n=%u src=0x%x dst=0x%x flags=0x%x hr=0x%08lx\n",
+                 sample, present.hSrcAllocation, present.hDstAllocation,
+                 pPresentData->Flags.Value, (unsigned long)hr);
+      }
+      // An explicit destination belongs to the runtime's composition path.
+      // Its pixels must never be sent straight to the global scanout escape.
+      if (SUCCEEDED(hr) && !pDstResource)
+         return PublishPresentFrame(device, pSrcResource);
+      return hr;
+   }
 
    /* Split the present into its three parts and report a running average.
     * The scanout publication and the shared transfer together account for
@@ -548,8 +580,16 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
       return S_OK;
    }
 
-   struct pipe_context *pipe = CastPipeDevice(RotateResourceIdentities->hDevice);
+   Device *device = CastDevice(RotateResourceIdentities->hDevice);
+   struct pipe_context *pipe = device->pipe;
    struct pipe_screen *screen = pipe->screen;
+
+   for (UINT i = 0; i < RotateResourceIdentities->Resources; ++i) {
+      HRESULT hr = RefreshSharedResource(device,
+                                        CastResource(RotateResourceIdentities->pResources[i]));
+      if (FAILED(hr))
+         return hr;
+   }
 
    struct pipe_resource *resource0 = CastPipeResource(RotateResourceIdentities->pResources[0]);
 
@@ -602,6 +642,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
                                  src_resource,
                                  0, // src_level
                                  &src_box);
+      MarkSharedResourceWritten(device, dst_resource);
    }
 
    pipe_resource_reference(&temp_resource, NULL);
@@ -624,7 +665,86 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
 HRESULT APIENTRY
 _Blt(DXGI_DDI_ARG_BLT *Blt)
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
+   LOG_ENTRYPOINT();
 
-   return S_OK;
+   if (!Blt)
+      return E_INVALIDARG;
+   Device *device = CastDevice(Blt->hDevice);
+   Resource *src = CastResource(Blt->hSrcResource);
+   Resource *dst = CastResource(Blt->hDstResource);
+   if (!device || !src || !dst || !src->resource || !dst->resource ||
+       src->resource == dst->resource ||
+       Blt->SrcSubresource >= src->NumSubResources ||
+       Blt->DstSubresource >= dst->NumSubResources)
+      return E_INVALIDARG;
+   if ((src->resource->target != PIPE_TEXTURE_2D && src->resource->target != PIPE_TEXTURE_2D_ARRAY) ||
+       (dst->resource->target != PIPE_TEXTURE_2D && dst->resource->target != PIPE_TEXTURE_2D_ARRAY) ||
+       (Blt->Flags.Value & ~0xfu) ||
+       (Blt->Rotate != DXGI_DDI_MODE_ROTATION_IDENTITY &&
+        Blt->Rotate != DXGI_DDI_MODE_ROTATION_ROTATE180))
+      return DXGI_DDI_ERR_UNSUPPORTED;
+
+   const unsigned srcLevel = Blt->SrcSubresource % src->MipLevels;
+   const unsigned dstLevel = Blt->DstSubresource % dst->MipLevels;
+   const unsigned srcWidth = u_minify(src->resource->width0, srcLevel);
+   const unsigned srcHeight = u_minify(src->resource->height0, srcLevel);
+   const unsigned dstWidth = u_minify(dst->resource->width0, dstLevel);
+   const unsigned dstHeight = u_minify(dst->resource->height0, dstLevel);
+   if (Blt->DstLeft >= Blt->DstRight || Blt->DstTop >= Blt->DstBottom ||
+       Blt->DstRight > dstWidth || Blt->DstBottom > dstHeight ||
+       (uint64_t)Blt->DstLeft > dstWidth || (uint64_t)Blt->DstTop > dstHeight)
+      return E_INVALIDARG;
+
+   HRESULT hr = RefreshSharedResource(device, src);
+   // Preserve pixels outside a partial destination rectangle. A full overwrite
+   // has no dependency on the old destination contents.
+   if (SUCCEEDED(hr) && (Blt->DstLeft || Blt->DstTop ||
+                        Blt->DstRight != dstWidth || Blt->DstBottom != dstHeight))
+      hr = RefreshSharedResource(device, dst);
+   if (FAILED(hr))
+      return hr;
+
+   struct pipe_blit_info info = {};
+   info.src.resource = src->resource;
+   info.src.level = srcLevel;
+   info.src.format = util_format_linear(src->resource->format);
+   info.src.box.z = Blt->SrcSubresource / src->MipLevels;
+   info.src.box.width = srcWidth;
+   info.src.box.height = srcHeight;
+   info.src.box.depth = 1;
+   if (Blt->Rotate == DXGI_DDI_MODE_ROTATION_ROTATE180) {
+      info.src.box.x = srcWidth;
+      info.src.box.y = srcHeight;
+      info.src.box.width = -(int)srcWidth;
+      info.src.box.height = -(int)srcHeight;
+   }
+   info.dst.resource = dst->resource;
+   info.dst.level = dstLevel;
+   info.dst.format = util_format_linear(dst->resource->format);
+   info.dst.box.x = Blt->DstLeft;
+   info.dst.box.y = Blt->DstTop;
+   info.dst.box.z = Blt->DstSubresource / dst->MipLevels;
+   info.dst.box.width = Blt->DstRight - Blt->DstLeft;
+   info.dst.box.height = Blt->DstBottom - Blt->DstTop;
+   info.dst.box.depth = 1;
+   info.mask = PIPE_MASK_RGBA;
+   info.filter = PIPE_TEX_FILTER_LINEAR;
+   // DXGI requires a single resolve/convert/stretch pass for presentation.
+   // sRGB source bits are preserved rather than decoded into a linear target.
+   device->pipe->blit(device->pipe, &info);
+   MarkSharedResourceWritten(device, dst->resource);
+
+   // The destination can be DWM's shared composition surface, not scanout.
+   // Publish its allocation contents without invoking the display bridge.
+   if (Blt->Flags.Present)
+      hr = PublishSharedResource(device, dst);
+
+   static volatile LONG count;
+   const LONG sample = InterlockedIncrement(&count);
+   if (sample <= 16 || (sample % 64) == 0) {
+      fprintf(stderr, "DXGI Blt pid=%lu n=%ld src=%p dst=%p %ux%u->%ux%u flags=0x%x hr=0x%08lx\n",
+              GetCurrentProcessId(), sample, src, dst, srcWidth, srcHeight,
+              info.dst.box.width, info.dst.box.height, Blt->Flags.Value, (unsigned long)hr);
+   }
+   return hr;
 }

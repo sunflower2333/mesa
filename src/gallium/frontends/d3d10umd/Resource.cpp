@@ -344,6 +344,18 @@ PublishSharedResources(Device *device)
    return S_OK;
 }
 
+HRESULT
+PreparePresentResource(Device *device, Resource *resource)
+{
+   if (!resource || !resource->hAllocation)
+      return DXGI_DDI_ERR_UNSUPPORTED;
+   HRESULT hr = EnsureSharedCopy(device, resource);
+   if (FAILED(hr))
+      return hr;
+   return resource->shared_dirty ? PublishSharedResource(device, resource)
+                                 : RefreshSharedResource(device, resource);
+}
+
 void
 MarkSharedResourceWritten(Device *device, struct pipe_resource *texture)
 {
@@ -635,7 +647,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    templat.usage      = translate_resource_usage(pCreateResource->Usage);
 
    const bool shared = (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) != 0;
-   if (shared && (templat.target != PIPE_TEXTURE_2D ||
+   const bool present = CastDevice(hDevice)->runtime_present &&
+                        (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT);
+   const bool kernelBacked = shared || present;
+   if (kernelBacked && (templat.target != PIPE_TEXTURE_2D ||
                   templat.format != PIPE_FORMAT_B8G8R8A8_UNORM ||
                   templat.width0 == 0 || templat.width0 > UINT_MAX / 4 ||
                   templat.height0 == 0 || templat.array_size != 1 ||
@@ -675,13 +690,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       return;
    }
 
-   /* A shared resource must have a real kernel allocation behind it. Without
+   /* A shared/present resource must have a real kernel allocation behind it. Without
     * one the runtime still reports success from GetSharedHandle and hands back
     * a NULL handle, which DirectComposition trusts and then faults on -- that
     * is what crash-loops LogonUI.exe and dwm.exe on this driver. If the
     * allocation cannot be made, refuse the resource rather than return a
     * handle that was never real. */
-   if (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) {
+   if (kernelBacked) {
       Device *pDevice = CastDevice(hDevice);
       const unsigned shared_width = pCreateResource->pMipInfoList[0].TexelWidth;
       const unsigned shared_height = pCreateResource->pMipInfoList[0].TexelHeight;
