@@ -19,6 +19,7 @@ on:
     paths:
       - '.github/workflows/windows-d3d10-zink-arm64ec.yml'
       - 'bin/verify-arm64ec-pe.py'
+      - 'src/util/detect_arch.h'
       - 'src/gallium/frontends/d3d10umd/**'
       - 'src/gallium/targets/d3d10umd/**'
 

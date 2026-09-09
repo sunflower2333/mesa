@@ -58,9 +58,11 @@
 #define DETECT_ARCH_X86 1
 #endif
 
-#if defined(__x86_64__) /* gcc */ || \
-    ((defined(_M_X64) || defined(_M_AMD64)) && !defined(_M_ARM64EC)) /* msvc */ || \
-    defined(__x86_64) /* Sun cc */
+/* ARM64EC also defines x64 compatibility macros with clang-cl. Its code is
+ * AArch64; excluding only the MSVC spelling still selected x86 intrinsics. */
+#if (defined(__x86_64__) /* gcc */ || \
+     defined(_M_X64) || defined(_M_AMD64) /* msvc */ || \
+     defined(__x86_64) /* Sun cc */) && !defined(_M_ARM64EC)
 #define DETECT_ARCH_X86_64 1
 #endif
 
