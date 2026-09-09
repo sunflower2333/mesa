@@ -97,6 +97,9 @@ tc_fence_finish(struct zink_context *ctx, struct zink_tc_fence *mfence, uint64_t
    if (!util_queue_fence_is_signalled(&mfence->ready)) {
       int64_t abs_timeout = os_time_get_absolute_timeout(*timeout_ns);
       if (mfence->tc_token) {
+         // A context-free poll cannot submit another context's deferred work.
+         if (!ctx)
+            return false;
          /* Ensure that zink_flush will be called for
           * this mfence, but only if we're in the API thread
           * where the context is current.
@@ -199,6 +202,11 @@ zink_fence_finish(struct zink_screen *screen, struct pipe_context *pctx, struct 
    if ((fence->submitted && zink_screen_check_last_finished(screen, fence->batch_id)) ||
        (!fence->submitted && submit_diff))
       return true;
+
+   // A deferred fence may still refer to an unsubmitted batch. There is no
+   // timeline value to wait for until its owning context flushes that batch.
+   if (!fence->submitted)
+      return false;
 
    return fence_wait(screen, fence, timeout_ns);
 }

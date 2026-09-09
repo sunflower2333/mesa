@@ -422,6 +422,7 @@ struct Query
 
    unsigned pipe_type;
    struct pipe_query *handle;
+   struct pipe_fence_handle *completion_fence;
    INT SeqNo;
    UINT GetDataCount;
 

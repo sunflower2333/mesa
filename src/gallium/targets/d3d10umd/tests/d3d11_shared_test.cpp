@@ -526,6 +526,78 @@ static void ReadQuery(Device &d, ID3D11Query *query, void *data, UINT size)
    Check(E_FAIL, "Query completion timed out");
 }
 
+static void QueryPollTest(IDXGIAdapter *adapter)
+{
+   Device d = CreateDevice(adapter);
+   D3D11_TEXTURE2D_DESC texture = {};
+   texture.Width = texture.Height = 64;
+   texture.MipLevels = texture.ArraySize = texture.SampleDesc.Count = 1;
+   texture.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+   texture.BindFlags = D3D11_BIND_RENDER_TARGET;
+   ComPtr<ID3D11Texture2D> source, destination;
+   ComPtr<ID3D11RenderTargetView> view;
+   Check(d.device->CreateTexture2D(&texture, NULL, &source), "Create query source");
+   Check(d.device->CreateTexture2D(&texture, NULL, &destination), "Create query destination");
+   Check(d.device->CreateRenderTargetView(source.Get(), NULL, &view), "Create query RTV");
+   D3D11_QUERY_DESC desc = {D3D11_QUERY_EVENT, 0};
+   ComPtr<ID3D11Query> query;
+   Check(d.device->CreateQuery(&desc, &query), "Create polling event");
+   unsigned pending = 0, completedEarly = 0;
+   LARGE_INTEGER hz;
+   QueryPerformanceFrequency(&hz);
+   double maxPollMs = 0;
+   for (unsigned iteration = 0; iteration < 8; ++iteration) {
+      d.context->ClearRenderTargetView(view.Get(), colors[iteration % ARRAYSIZE(colors)]);
+      d.context->CopyResource(destination.Get(), source.Get());
+      d.context->End(query.Get());
+      for (unsigned poll = 0; poll < 8; ++poll) {
+         BOOL completed = 0x5a5a5a5a;
+         LARGE_INTEGER begin, end;
+         QueryPerformanceCounter(&begin);
+         HRESULT hr = d.context->GetData(query.Get(), &completed, sizeof completed,
+                                         D3D11_ASYNC_GETDATA_DONOTFLUSH);
+         QueryPerformanceCounter(&end);
+         double ms = double(end.QuadPart - begin.QuadPart) * 1000 / double(hz.QuadPart);
+         if (ms > maxPollMs)
+            maxPollMs = ms;
+         if (hr == S_FALSE) {
+            ++pending;
+            if (completed != 0x5a5a5a5a)
+               Check(E_FAIL, "Pending query modified output data");
+         } else {
+            CheckDeviceCall(d, hr, "No-flush query");
+            if (hr != S_OK || !completed)
+               Check(E_FAIL, "Invalid completed event result");
+            ++completedEarly;
+            break;
+         }
+      }
+      d.context->Flush();
+      BOOL completed = FALSE;
+      ReadQuery(d, query.Get(), &completed, sizeof completed);
+      if (!completed)
+         Check(E_FAIL, "Flushed event must complete");
+
+      d.context->CopyResource(destination.Get(), source.Get());
+      d.context->End(query.Get());
+      const ULONGLONG deadline = GetTickCount64() + 5000;
+      HRESULT hr;
+      do {
+         hr = d.context->GetData(query.Get(), &completed, sizeof completed, 0);
+         if (hr != S_FALSE)
+            break;
+         Sleep(1);
+      } while (GetTickCount64() < deadline);
+      if (hr != S_OK || !completed)
+         Check(E_FAIL, "Default GetData must submit and complete pending work");
+   }
+   printf("query-poll pending=%u early-complete=%u max-poll=%.3fms\n",
+          pending, completedEarly, maxPollMs);
+   if (!pending || maxPollMs >= 100)
+      Check(E_FAIL, "Controlled pre-flush query polls did not stay pending and bounded");
+   CheckDevice(d, "query polling test");
+}
+
 static void TimestampTest(IDXGIAdapter *adapter)
 {
    Device d = CreateDevice(adapter);
@@ -588,8 +660,9 @@ int main(int argc, char **argv)
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
        strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
-       strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp")))) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp]\n");
+       strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
+       strcmp(mode, "--query-poll")))) {
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll]\n");
       return 2;
    }
    DWORD session;
@@ -628,6 +701,8 @@ int main(int argc, char **argv)
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--timestamp"))
          TimestampTest(adapter.Get());
+      else if (!strcmp(mode, "--query-poll"))
+         QueryPollTest(adapter.Get());
       else
          SharedTest(adapter.Get(), mode);
       printf("RESULT: PASS mode=%s\n", mode);

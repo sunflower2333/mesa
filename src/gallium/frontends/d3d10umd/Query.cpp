@@ -140,6 +140,7 @@ DestroyQuery(D3D10DDI_HDEVICE hDevice, // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Query *pQuery = CastQuery(hQuery);
 
+   pipe->screen->fence_reference(pipe->screen, &pQuery->completion_fence, NULL);
    if (pQuery->handle) {
       pipe->destroy_query(pipe, pQuery->handle);
    }
@@ -205,6 +206,12 @@ QueryEnd(D3D10DDI_HDEVICE hDevice,  // IN
 
    if (state) {
       pipe->end_query(pipe, state);
+      // Preserve a completion point without submitting the partial batch.
+      // GetData(DO_NOT_FLUSH) must be able to poll it without a GPU wait.
+      pipe->screen->fence_reference(pipe->screen, &pQuery->completion_fence, NULL);
+      pipe->flush(pipe, &pQuery->completion_fence, PIPE_FLUSH_DEFERRED);
+      if (!pQuery->completion_fence)
+         SetError(hDevice, E_OUTOFMEMORY);
    }
 }
 
@@ -233,18 +240,18 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
    Query *pQuery = CastQuery(hQuery);
    struct pipe_query *state = pQuery->handle;
 
-   /*
-    * Never return data for recently emitted queries immediately, to make
-    * wgfasync happy.
-    */
-   if (DataSize == 0 &&
-       (pQuery->SeqNo - pDevice->LastFinishedQuerySeqNo) > 0 &&
-       (pQuery->GetDataCount++) == 0) {
+   // Gallium's nonblocking get_query_result may itself flush a pending batch.
+   // First check the completion fence with no context for DO_NOT_FLUSH; with
+   // a context the backend may submit that batch, but the timeout stays zero.
+   struct pipe_screen *screen = pipe->screen;
+   const bool noFlush = (Flags & D3D10_DDI_GET_DATA_DO_NOT_FLUSH) != 0;
+   if (!pQuery->completion_fence ||
+       !screen->fence_finish(screen, noFlush ? NULL : pipe,
+                             pQuery->completion_fence, 0)) {
       SetError(hDevice, DXGI_DDI_ERR_WASSTILLDRAWING);
       return;
    }
 
-   bool wait = !!(Flags & D3D10_DDI_GET_DATA_DO_NOT_FLUSH);
    union pipe_query_result result;
 
    memset(&result, 0, sizeof result);
@@ -252,7 +259,7 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
    bool ret;
 
    if (state) {
-      ret = pipe->get_query_result(pipe, state, wait, &result);
+      ret = pipe->get_query_result(pipe, state, false, &result);
    } else {
       LOG_UNSUPPORTED(true);
       ret = true;
