@@ -83,10 +83,30 @@ KmtEscape(void)
 }
 
 static D3DKMT_HANDLE
-PresentAdapter(void)
+PresentAdapter(bool reopen)
 {
    static D3DKMT_HANDLE adapter = 0;
    static bool resolved = false;
+   if (reopen) {
+      /* Restarting the display device invalidates this handle. Holding the
+       * first one for the life of the process turns a driver reinstall into a
+       * desktop that never publishes another frame. */
+      if (adapter != 0) {
+         HMODULE gdiClose = LoadLibraryExW(L"gdi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+         if (gdiClose != NULL) {
+            PFND3DKMT_CLOSEADAPTER close_adapter =
+               (PFND3DKMT_CLOSEADAPTER)GetProcAddress(gdiClose, "D3DKMTCloseAdapter");
+            if (close_adapter != NULL) {
+               D3DKMT_CLOSEADAPTER closeArgs;
+               memset(&closeArgs, 0, sizeof closeArgs);
+               closeArgs.hAdapter = adapter;
+               close_adapter(&closeArgs);
+            }
+         }
+      }
+      adapter = 0;
+      resolved = false;
+   }
    if (resolved)
       return adapter;
    resolved = true;
@@ -143,7 +163,18 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
                 buf[0] == '1';
    }
 
-   if (!enabled || device->present_publish_failed || src == NULL) {
+   if (!enabled || src == NULL) {
+      return;
+   }
+
+   /* A failed publication used to disable this path for the life of the
+    * device. The commonest cause -- a stale adapter handle after the display
+    * device restarts -- is recoverable, and latching on it leaves the desktop
+    * frozen on whatever was last published. Back off and try again instead,
+    * re-opening the handle each time, so a transient failure costs frames
+    * rather than the display. */
+   if (device->present_publish_retry > 0) {
+      --device->present_publish_retry;
       return;
    }
 
@@ -197,7 +228,7 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
       templat.bind = PIPE_BIND_LINEAR;
       device->present_staging[slot] = screen->resource_create(screen, &templat);
       if (device->present_staging[slot] == NULL) {
-         device->present_publish_failed = true;
+         device->present_publish_retry = 60;
          return;
       }
       device->present_staging_primed = false;
@@ -259,7 +290,7 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    void *map = pipe->texture_map(pipe, device->present_staging[readSlot], 0,
                                  PIPE_MAP_READ, &box, &transfer);
    if (map == NULL) {
-      device->present_publish_failed = true;
+      device->present_publish_retry = 60;
       return;
    }
 
@@ -310,7 +341,7 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
     * the caller before the request ever reaches the miniport. */
    D3DKMT_ESCAPE escape;
    memset(&escape, 0, sizeof escape);
-   escape.hAdapter = PresentAdapter();
+   escape.hAdapter = PresentAdapter(false);
    escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
    escape.pPrivateDriverData = request;
    escape.PrivateDriverDataSize = requestSize;
@@ -319,9 +350,17 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
                         ? KmtEscape()(&escape)
                         : STATUS_UNSUCCESSFUL;
    if (!NT_SUCCESS(status)) {
-      /* One refusal is enough: the miniport either speaks this endpoint or
-       * it does not, and retrying every frame would only add a readback. */
-      device->present_publish_failed = true;
+      /* Re-open the adapter: the likeliest reason the escape never reached the
+       * miniport is that the device restarted under us. Back off so a miniport
+       * that genuinely does not speak this endpoint costs one readback per
+       * backoff period rather than one per frame. */
+      PresentAdapter(true);
+      const unsigned doubled = device->present_publish_backoff * 2u;
+      device->present_publish_backoff = device->present_publish_backoff == 0u ? 8u
+                                        : (doubled > 240u ? 240u : doubled);
+      device->present_publish_retry = device->present_publish_backoff;
+   } else {
+      device->present_publish_backoff = 0;
    }
 }
 

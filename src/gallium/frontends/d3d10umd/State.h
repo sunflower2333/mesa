@@ -114,7 +114,8 @@ struct Device
    struct pipe_resource *present_staging[2];
    unsigned present_staging_slot;
    bool present_staging_primed;
-   bool present_publish_failed;
+   unsigned present_publish_retry;
+   unsigned present_publish_backoff;
    uint8_t *present_request;
    size_t present_request_size;
    Resource *shared_resources;
