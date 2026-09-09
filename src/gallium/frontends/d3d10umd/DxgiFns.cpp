@@ -650,6 +650,8 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    Resource *first = CastResource(RotateResourceIdentities->pResources[0]);
    if (!first || !first->resource)
       return E_INVALIDARG;
+   const ULONGLONG started = GetTickCount64();
+   unsigned dirtyBefore = 0;
    // Kernel-backed back buffers must rotate as a homogeneous set. Validate
    // before copying pixels or changing any allocation identity.
    for (UINT i = 0; i < RotateResourceIdentities->Resources; ++i) {
@@ -657,6 +659,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
       if (!current || !current->resource ||
           bool(current->hAllocation) != bool(first->hAllocation))
          return E_INVALIDARG;
+      dirtyBefore += current->shared_dirty;
       if (first->hAllocation &&
           (current->resource->target != PIPE_TEXTURE_2D || current->MipLevels != 1 ||
            current->resource->array_size != 1 || current->Format != first->Format ||
@@ -725,7 +728,6 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
                                  src_resource,
                                  0, // src_level
                                  &src_box);
-      MarkSharedResourceWritten(device, dst_resource);
    }
 
    pipe_resource_reference(&temp_resource, NULL);
@@ -734,15 +736,42 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    // to their Resource objects. Pixel copies above preserve existing views.
    const D3DKMT_HANDLE firstAllocation = first->hAllocation;
    const D3DKMT_HANDLE firstKMResource = first->hKMResource;
+   const bool firstDirty = first->shared_dirty;
+   // The copied GPU contents and the kernel allocation rotate together. A
+   // clean source already matches that allocation; copying it into another
+   // cache is not a new write to publish back through VidSch. Pending writes
+   // must follow their original allocation instead of making every buffer
+   // dirty and forcing redundant full-frame GPU readbacks on the next Flush.
    for (UINT i = 0; i + 1 < RotateResourceIdentities->Resources; ++i) {
       Resource *current = CastResource(RotateResourceIdentities->pResources[i]);
       Resource *next = CastResource(RotateResourceIdentities->pResources[i + 1]);
       current->hAllocation = next->hAllocation;
       current->hKMResource = next->hKMResource;
+      current->shared_dirty = next->shared_dirty;
    }
    Resource *last = CastResource(RotateResourceIdentities->pResources[RotateResourceIdentities->Resources - 1]);
    last->hAllocation = firstAllocation;
    last->hKMResource = firstKMResource;
+   last->shared_dirty = firstDirty;
+
+   static volatile LONG rotations;
+   const LONG rotation = InterlockedIncrement(&rotations);
+   if (rotation <= 8 || (rotation % 64) == 0) {
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[192];
+         int len = _snprintf_s(line, sizeof line, _TRUNCATE,
+                              "rotate tick=%llu pid=%lu n=%ld buffers=%u dirty=%u elapsed=%llums\r\n",
+                              GetTickCount64(), GetCurrentProcessId(), rotation,
+                              RotateResourceIdentities->Resources, dirtyBefore,
+                              GetTickCount64() - started);
+         DWORD written;
+         if (len > 0) WriteFile(log, line, (DWORD)len, &written, NULL);
+         CloseHandle(log);
+      }
+   }
 
    return S_OK;
 }

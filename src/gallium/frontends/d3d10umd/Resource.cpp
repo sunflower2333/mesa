@@ -174,7 +174,11 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    // Sample the existing timing log without adding per-draw file traffic.
    // Separate GPU mapping, VidSch/LockCb waits and CPU copy costs before
    // changing any of the shared-resource ownership or completion rules.
-   const bool timing_sample = (transfer_sequence % 64) == 0;
+   // Mixed refresh/publish cycles can alias a single global modulo counter
+   // and almost never sample publish. Keep the same cadence per operation.
+   static volatile LONG operation_sequence[2];
+   const unsigned operation = publish ? 1 : 0;
+   const bool timing_sample = (InterlockedIncrement(&operation_sequence[operation]) % 64) == 0;
    LARGE_INTEGER phaseStart = transferStart;
    LONGLONG phaseUsec[6] = {};
    const auto recordPhase = [&](unsigned phase) {
@@ -285,13 +289,13 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    {
       LARGE_INTEGER transferEnd;
       QueryPerformanceCounter(&transferEnd);
-      static volatile LONG64 total_usec;
-      static volatile LONG samples;
+      static volatile LONG64 total_usec[2];
+      static volatile LONG samples[2];
       const LONG64 usec = transferFreq.QuadPart > 0
          ? ((transferEnd.QuadPart - transferStart.QuadPart) * 1000000LL) / transferFreq.QuadPart
          : 0;
-      const LONG64 running = InterlockedAdd64(&total_usec, usec);
-      const LONG n = InterlockedIncrement(&samples);
+      const LONG64 running = InterlockedAdd64(&total_usec[operation], usec);
+      const LONG n = InterlockedIncrement(&samples[operation]);
       if (timing_sample) {
          HANDLE log = CreateFileA("C:\\Users\\Public\\umd_timing.log",
                                   FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
