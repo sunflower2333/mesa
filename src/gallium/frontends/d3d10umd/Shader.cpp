@@ -44,6 +44,19 @@
 #include "util/u_sampler.h"
 #include "util/format/u_format.h"
 
+static bool
+TranslateShader(D3D10DDI_HDEVICE hDevice, Shader *shader, const UINT *code)
+{
+   shader->handle = NULL;
+   shader->state.tokens = Shader_tgsi_translate(code, shader->output_mapping);
+   if (!shader->state.tokens) {
+      Device *device = CastDevice(hDevice);
+      device->UMCallbacks.pfnSetErrorCb(device->hRTCoreLayer, E_OUTOFMEMORY);
+      return false;
+   }
+   return true;
+}
+
 
 /*
  * ----------------------------------------------------------------------
@@ -547,7 +560,8 @@ CreateVertexShader(D3D10DDI_HDEVICE hDevice,                                  //
    pShader->output_resolved = true;
 
    memset(&pShader->state, 0, sizeof pShader->state);
-   pShader->state.tokens = Shader_tgsi_translate(pCode, pShader->output_mapping);
+   if (!TranslateShader(hDevice, pShader, pCode))
+      return;
 
    pShader->handle = pipe->create_vs_state(pipe, &pShader->state);
 
@@ -683,7 +697,8 @@ CreateGeometryShader(D3D10DDI_HDEVICE hDevice,                                //
    pShader->output_resolved = true;
 
    memset(&pShader->state, 0, sizeof pShader->state);
-   pShader->state.tokens = Shader_tgsi_translate(pShaderCode, pShader->output_mapping);
+   if (!TranslateShader(hDevice, pShader, pShaderCode))
+      return;
 
    pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
 }
@@ -846,10 +861,9 @@ CreateGeometryShaderWithStreamOutput(
    pShader->type = MESA_SHADER_GEOMETRY;
 
    memset(&pShader->state, 0, sizeof pShader->state);
-   if (pData->pShaderCode) {
-      pShader->state.tokens = Shader_tgsi_translate(pData->pShaderCode,
-                                                    pShader->output_mapping);
-   }
+   pShader->handle = NULL;
+   if (pData->pShaderCode && !TranslateShader(hDevice, pShader, pData->pShaderCode))
+      return;
    pShader->output_resolved = (pShader->state.tokens != NULL);
 
    for (unsigned i = 0; i < pData->NumEntries; ++i) {
@@ -999,8 +1013,8 @@ CreatePixelShader(D3D10DDI_HDEVICE hDevice,                                // IN
    pShader->output_resolved = true;
 
    memset(&pShader->state, 0, sizeof pShader->state);
-   pShader->state.tokens = Shader_tgsi_translate(pShaderCode,
-                                                 pShader->output_mapping);
+   if (!TranslateShader(hDevice, pShader, pShaderCode))
+      return;
 
    pShader->handle = pipe->create_fs_state(pipe, &pShader->state);
 

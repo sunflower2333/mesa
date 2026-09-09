@@ -5,6 +5,15 @@ if cc.get_argument_syntax() == 'gcc'
   _c_args_d3d10umd += '-Wno-unknown-pragmas'
 endif
 
+# These entrypoints run on application/runtime threads, including DWM workers
+# with little stack remaining. Catch large frames in the Windows ARM64 builds.
+if cc.get_id() == 'clang-cl'
+  _c_args_d3d10umd += [
+    '/clang:-Wframe-larger-than=16384',
+    '/clang:-Werror=frame-larger-than',
+  ]
+endif
+
 libd3d10umd = static_library(
   'd3d10umd',
   files(
