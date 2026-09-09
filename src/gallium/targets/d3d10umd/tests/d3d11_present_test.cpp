@@ -51,8 +51,13 @@ int main(int argc, char **argv)
 
    int width = 640, height = 480, frames = (int)(sizeof kFrames / sizeof kFrames[0]);
    bool fullscreenSize = false;
+   int fpsSeconds = 0;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--full")) fullscreenSize = true;
+      /* Sustained present rate, which is the number the display path is judged
+       * on.  The staged frames below sleep between presents, so they measure
+       * correctness and say nothing about throughput. */
+      else if (!strcmp(argv[i], "--fps") && i + 1 < argc) fpsSeconds = atoi(argv[++i]);
    }
 
    if (fullscreenSize) {
@@ -246,6 +251,42 @@ int main(int argc, char **argv)
    ID3D11Texture2D *staging = NULL;
    hr = dev->CreateTexture2D(&sd, NULL, &staging);
    if (FAILED(hr)) { printf("RESULT: FAIL - staging CreateTexture2D hr=0x%08lX\n", (unsigned long)hr); return 6; }
+
+   if (fpsSeconds > 0) {
+      /* Render and present as fast as the path allows, with a colour that
+       * changes every frame so nothing downstream can treat the surface as
+       * unchanged and skip it. */
+      LARGE_INTEGER freq, start, now;
+      QueryPerformanceFrequency(&freq);
+      QueryPerformanceCounter(&start);
+      long long count = 0;
+      double elapsed = 0.0;
+      HRESULT presentHr = S_OK;
+      for (;;) {
+         const float sweep[4] = { (float)((count % 90) / 90.0), 0.25f, 0.65f, 1.0f };
+         ctx->ClearRenderTargetView(rtv, sweep);
+         presentHr = swap->Present(0, 0);
+         if (FAILED(presentHr)) {
+            printf("present failed at frame %lld hr=0x%08lX\n", count, (unsigned long)presentHr);
+            break;
+         }
+         ++count;
+         PumpMessages();
+         QueryPerformanceCounter(&now);
+         elapsed = (double)(now.QuadPart - start.QuadPart) / (double)freq.QuadPart;
+         if (elapsed >= (double)fpsSeconds) break;
+      }
+      const double fps = elapsed > 0.0 ? (double)count / elapsed : 0.0;
+      printf("FPS: frames=%lld seconds=%.2f fps=%.2f\n", count, elapsed, fps);
+      printf("RESULT: %s\n", (SUCCEEDED(presentHr) && fps > 60.0) ? "PASS" : "FAIL");
+      if (staging) staging->Release();
+      if (rtv) rtv->Release();
+      if (back) back->Release();
+      if (swap) swap->Release();
+      if (ctx) ctx->Release();
+      if (dev) dev->Release();
+      return 0;
+   }
 
    int rendered = 0, presented = 0;
    for (int f = 0; f < frames; ++f) {
