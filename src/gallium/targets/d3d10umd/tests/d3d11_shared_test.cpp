@@ -511,6 +511,74 @@ static void CompositionTest(IDXGIAdapter *adapter)
    printf("Composition API sequence completed; visible output needs independent scanout verification.\n");
 }
 
+static void ReadQuery(Device &d, ID3D11Query *query, void *data, UINT size)
+{
+   const ULONGLONG deadline = GetTickCount64() + 5000;
+   HRESULT hr;
+   do {
+      hr = d.context->GetData(query, data, size, D3D11_ASYNC_GETDATA_DONOTFLUSH);
+      if (hr == S_OK)
+         return;
+      if (FAILED(hr))
+         CheckDeviceCall(d, hr, "Query GetData");
+      Sleep(1);
+   } while (GetTickCount64() < deadline);
+   Check(E_FAIL, "Query completion timed out");
+}
+
+static void TimestampTest(IDXGIAdapter *adapter)
+{
+   Device d = CreateDevice(adapter);
+   ComPtr<ID3D11Query> disjoint, first, last, event;
+   D3D11_QUERY_DESC desc = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+   Check(d.device->CreateQuery(&desc, &disjoint), "Create timestamp disjoint");
+   desc.Query = D3D11_QUERY_TIMESTAMP;
+   Check(d.device->CreateQuery(&desc, &first), "Create first timestamp");
+   Check(d.device->CreateQuery(&desc, &last), "Create last timestamp");
+   desc.Query = D3D11_QUERY_EVENT;
+   Check(d.device->CreateQuery(&desc, &event), "Create completion event");
+
+   LARGE_INTEGER hz, begin, end;
+   QueryPerformanceFrequency(&hz);
+   for (unsigned iteration = 0; iteration < 3; ++iteration) {
+      d.context->Begin(disjoint.Get());
+      QueryPerformanceCounter(&begin);
+      d.context->End(first.Get());
+      d.context->End(event.Get());
+      d.context->Flush();
+      BOOL completed = FALSE;
+      ReadQuery(d, event.Get(), &completed, sizeof completed);
+      if (!completed)
+         Check(E_FAIL, "Event returned false after S_OK");
+      // Ensure the GPU interval includes a known wall-clock interval, not just
+      // command execution time. The first timestamp has completed before sleep.
+      Sleep(200);
+      d.context->End(last.Get());
+      d.context->End(disjoint.Get());
+      d.context->End(event.Get());
+      d.context->Flush();
+      ReadQuery(d, event.Get(), &completed, sizeof completed);
+      QueryPerformanceCounter(&end);
+      UINT64 startTicks = 0, endTicks = 0;
+      D3D11_QUERY_DATA_TIMESTAMP_DISJOINT result = {};
+      ReadQuery(d, first.Get(), &startTicks, sizeof startTicks);
+      ReadQuery(d, last.Get(), &endTicks, sizeof endTicks);
+      ReadQuery(d, disjoint.Get(), &result, sizeof result);
+      if (result.Disjoint || !result.Frequency || endTicks <= startTicks)
+         Check(E_FAIL, "Invalid/disjoint timestamp interval");
+      const double gpuSeconds = double(endTicks - startTicks) / double(result.Frequency);
+      const double wallSeconds = double(end.QuadPart - begin.QuadPart) / double(hz.QuadPart);
+      printf("timestamp iteration=%u frequency=%llu delta=%llu gpu=%.6fs wall=%.6fs ratio=%.3f\n",
+             iteration, (unsigned long long)result.Frequency,
+             (unsigned long long)(endTicks - startTicks), gpuSeconds, wallSeconds,
+             gpuSeconds / wallSeconds);
+      if (gpuSeconds < 0.15 || gpuSeconds > wallSeconds * 1.5 ||
+          gpuSeconds < wallSeconds * 0.5)
+         Check(E_FAIL, "GPU timestamp seconds disagree with wall clock");
+   }
+   CheckDevice(d, "timestamp test");
+}
+
 int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
@@ -520,8 +588,8 @@ int main(int argc, char **argv)
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
        strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
-       strcmp(mode, "--shader-lifetime")))) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp]\n");
+       strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp")))) {
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp]\n");
       return 2;
    }
    DWORD session;
@@ -558,6 +626,8 @@ int main(int argc, char **argv)
          CompositionTest(adapter.Get());
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
+      else if (!strcmp(mode, "--timestamp"))
+         TimestampTest(adapter.Get());
       else
          SharedTest(adapter.Get(), mode);
       printf("RESULT: PASS mode=%s\n", mode);
