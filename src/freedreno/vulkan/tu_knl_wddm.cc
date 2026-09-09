@@ -34,6 +34,54 @@ static constexpr uint32_t TU_WDDM_DESTROY_BUSY_RETRIES = 1000;
  * forever.  The busy-retry loop below absorbs the rest. */
 static constexpr uint64_t TU_WDDM_DESTROY_WAIT_TIMEOUT_NS = UINT64_C(250000000);
 
+/* Sleep(1) may defer every fence poll by a full ~15.6 ms scheduler tick.
+ * Use a per-wait one-shot timer without changing the process/global timer
+ * resolution. Create it only after observing pending work and checking the
+ * deadline, so completed fences and nonblocking queries need no handle.
+ * Waking up is only a reason to query again, never evidence of completion. */
+class tu_wddm_fence_poll_wait {
+public:
+   tu_wddm_fence_poll_wait() = default;
+   tu_wddm_fence_poll_wait(const tu_wddm_fence_poll_wait &) = delete;
+   tu_wddm_fence_poll_wait &operator=(const tu_wddm_fence_poll_wait &) = delete;
+
+   ~tu_wddm_fence_poll_wait()
+   {
+      if (timer != NULL)
+         CloseHandle(timer);
+   }
+
+   void wait(uint64_t remaining_ns = UINT64_MAX)
+   {
+      if (remaining_ns == 0)
+         return;
+      if (!initialized) {
+         initialized = true;
+         timer = CreateWaitableTimerExW(NULL, NULL,
+                                       CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                       TIMER_MODIFY_STATE | SYNCHRONIZE);
+      }
+      if (timer != NULL) {
+         const uint64_t interval_ns = remaining_ns < UINT64_C(1000000)
+                                        ? remaining_ns : UINT64_C(1000000);
+         LARGE_INTEGER due;
+         /* Relative time is negative, in 100ns units; round up, never to 0. */
+         due.QuadPart = -static_cast<LONGLONG>((interval_ns + 99) / 100);
+         if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE) &&
+             WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0)
+            return;
+         CloseHandle(timer);
+         timer = NULL;
+      }
+      /* Older Windows or resource pressure retain the existing sleep path. */
+      Sleep(1);
+   }
+
+private:
+   HANDLE timer = NULL;
+   bool initialized = false;
+};
+
 void
 tu_wddm_diag(const char *format, ...)
 {
@@ -701,6 +749,7 @@ tu_wddm_context_wait_fence(struct tu_wddm_context *context,
                                   ? UINT64_MAX
                                   : timeout_ns / UINT64_C(1000000) +
                                        (timeout_ns % UINT64_C(1000000) != 0);
+   tu_wddm_fence_poll_wait poll_wait;
 
    for (;;) {
       uint32_t completed = 0;
@@ -715,7 +764,7 @@ tu_wddm_context_wait_fence(struct tu_wddm_context *context,
       if (timeout_ms != UINT64_MAX && elapsed_ms >= timeout_ms)
          return false;
 
-      Sleep(1);
+      poll_wait.wait();
    }
 }
 
@@ -1563,6 +1612,7 @@ tu_wddm_sync_wait(struct vk_device *_device, struct vk_sync *base,
    (void)wait_value;
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
 
+   tu_wddm_fence_poll_wait poll_wait;
    for (;;) {
       if (!tu_wddm_sync_belongs_to_device(sync, _device))
          return vk_device_set_lost(_device,
@@ -1600,7 +1650,8 @@ tu_wddm_sync_wait(struct vk_device *_device, struct vk_sync *base,
       const uint64_t now = static_cast<uint64_t>(os_time_get_nano());
       if (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns)
          return VK_TIMEOUT;
-      os_time_sleep(1000);
+      poll_wait.wait(abs_timeout_ns == OS_TIMEOUT_INFINITE
+                        ? UINT64_MAX : abs_timeout_ns - now);
    }
 }
 
@@ -1614,6 +1665,7 @@ tu_wddm_sync_wait_many(struct vk_device *device, uint32_t wait_count,
       return VK_SUCCESS;
 
    if (wait_flags & VK_SYNC_WAIT_ANY) {
+      tu_wddm_fence_poll_wait poll_wait;
       for (;;) {
          for (uint32_t i = 0; i < wait_count; i++) {
             if (waits[i].sync == NULL)
@@ -1626,10 +1678,11 @@ tu_wddm_sync_wait_many(struct vk_device *device, uint32_t wait_count,
             if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST)
                return result;
          }
-         if (abs_timeout_ns != OS_TIMEOUT_INFINITE &&
-             static_cast<uint64_t>(os_time_get_nano()) >= abs_timeout_ns)
+         const uint64_t now = static_cast<uint64_t>(os_time_get_nano());
+         if (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns)
             return VK_TIMEOUT;
-         os_time_sleep(1000);
+         poll_wait.wait(abs_timeout_ns == OS_TIMEOUT_INFINITE
+                           ? UINT64_MAX : abs_timeout_ns - now);
       }
    }
 
@@ -2559,6 +2612,7 @@ tu_wddm_pending_fence_count(uint32_t submitted, uint32_t completed,
 static VkResult
 tu_wddm_wait_submission_slot(struct tu_device *device)
 {
+   tu_wddm_fence_poll_wait poll_wait;
    while (device->wddm_pending_submission_upper_bound >=
           TU_WDDM_MAX_PENDING_SUBMISSIONS) {
       uint32_t completed = 0;
@@ -2578,7 +2632,7 @@ tu_wddm_wait_submission_slot(struct tu_device *device)
 
       device->wddm_pending_submission_upper_bound = pending;
       if (pending >= TU_WDDM_MAX_PENDING_SUBMISSIONS)
-         os_time_sleep(1000);
+         poll_wait.wait();
    }
 
    return VK_SUCCESS;
@@ -2701,6 +2755,7 @@ tu_wddm_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
          &queue->device->vk, "WDDM queue wait targeted an unsubmitted fence");
 
    const uint64_t start = (uint64_t)os_time_get_nano();
+   tu_wddm_fence_poll_wait poll_wait;
    for (;;) {
       uint32_t completed = 0;
       if (!tu_wddm_context_get_completed_fence(&queue->device->wddm_context,
@@ -2716,7 +2771,7 @@ tu_wddm_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
       uint64_t elapsed = (uint64_t)os_time_get_nano() - start;
       if (timeout_ns != UINT64_MAX && elapsed >= timeout_ns)
          return VK_TIMEOUT;
-      os_time_sleep(1000);
+      poll_wait.wait(timeout_ns == UINT64_MAX ? UINT64_MAX : timeout_ns - elapsed);
    }
 }
 

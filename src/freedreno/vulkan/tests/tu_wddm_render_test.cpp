@@ -424,6 +424,8 @@ struct test_fixture {
    unsigned get_device_state_calls;
    UINT execution_state;
    uint32_t completed_fence;
+   unsigned complete_after_escape;
+   unsigned reset_after_escape;
    uint32_t returned_context_id;
    uint32_t expected_reference_flags;
    uint32_t expected_submit_bo_flags;
@@ -867,6 +869,12 @@ fake_escape(const D3DKMT_ESCAPE *escape)
    response.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
    response.ExpectedResetGeneration = kResetGeneration;
    response.CompletedFence = fixture->completed_fence;
+   if (fixture->complete_after_escape != 0 &&
+       fixture->escape_calls >= fixture->complete_after_escape)
+      response.CompletedFence = fixture->context.last_submitted_fence;
+   if (fixture->reset_after_escape != 0 &&
+       fixture->escape_calls >= fixture->reset_after_escape)
+      fixture->execution_state = D3DKMT_DEVICEEXECUTION_RESET;
    response.ResetGeneration = kResetGeneration;
    response.ContextId = fixture->returned_context_id;
    *info = response;
@@ -1907,6 +1915,42 @@ test_completed_fence_query_and_wait()
 }
 
 void
+test_pending_fence_wait_requeries_completion()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.completed_fence = 6;
+   fixture.context.last_submitted_fence = 7;
+   fixture.complete_after_escape = 3;
+
+   CHECK(tu_wddm_context_wait_fence(&fixture.context, 7, UINT64_C(1000000000)));
+   CHECK(fixture.escape_calls == 3);
+   CHECK(fixture.get_device_state_calls == 3);
+}
+
+void
+test_pending_fence_wait_timeout_and_reset()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.completed_fence = 6;
+   fixture.context.last_submitted_fence = 7;
+   CHECK(!tu_wddm_context_wait_fence(&fixture.context, 7, 0));
+   CHECK(fixture.escape_calls == 1);
+
+   fixture.escape_calls = 0;
+   const ULONGLONG start = GetTickCount64();
+   CHECK(!tu_wddm_context_wait_fence(&fixture.context, 7, UINT64_C(2000000)));
+   CHECK(GetTickCount64() - start < 1000);
+   CHECK(fixture.escape_calls >= 1);
+
+   fixture.escape_calls = 0;
+   fixture.reset_after_escape = 2;
+   CHECK(!tu_wddm_context_wait_fence(&fixture.context, 7, UINT64_MAX));
+   CHECK(fixture.escape_calls == 2);
+}
+
+void
 test_wait_rejects_unsubmitted_fence()
 {
    test_fixture fixture;
@@ -2013,6 +2057,8 @@ main()
    test_successful_render_with_partial_replacements_fails_closed();
    test_successful_render_with_oversized_replacements_fails_closed();
    test_completed_fence_query_and_wait();
+   test_pending_fence_wait_requeries_completion();
+   test_pending_fence_wait_timeout_and_reset();
    test_wait_rejects_unsubmitted_fence();
    test_completed_fence_wait_rejects_inactive_device();
    test_completed_fence_identity_rejected();
