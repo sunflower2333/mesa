@@ -377,15 +377,19 @@ PublishSharedResources(Device *device)
 }
 
 HRESULT
-PreparePresentResource(Device *device, Resource *resource)
+PreparePresentResource(Device *device, Resource *resource, bool refreshCache)
 {
    if (!resource || !resource->hAllocation)
       return DXGI_DDI_ERR_UNSUPPORTED;
    HRESULT hr = EnsureSharedCopy(device, resource);
    if (FAILED(hr))
       return hr;
-   return resource->shared_dirty ? PublishSharedResource(device, resource)
-                                 : RefreshSharedResource(device, resource);
+   // PresentCb consumes the kernel allocation. Clean allocation contents are
+   // already authoritative, so only a subsequent UMD readback needs its GPU
+   // cache refreshed. Dirty writes still publish and wait before PresentCb.
+   if (resource->shared_dirty)
+      return PublishSharedResource(device, resource);
+   return refreshCache ? RefreshSharedResource(device, resource) : S_OK;
 }
 
 void

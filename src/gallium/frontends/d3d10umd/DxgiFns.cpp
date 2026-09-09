@@ -410,7 +410,8 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "validate", DXGI_DDI_ERR_UNSUPPORTED, started);
       device->pipe->flush(device->pipe, NULL, 0);
-      HRESULT hr = PreparePresentResource(device, pSrcResource);
+      const bool readback = !pDstResource && !pSrcResource->scanout_primary;
+      HRESULT hr = PreparePresentResource(device, pSrcResource, readback);
       if (FAILED(hr))
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "prepare", hr, started);
@@ -430,7 +431,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       }
       // An explicit destination belongs to the runtime's composition path.
       // Its pixels must never be sent straight to the global scanout escape.
-      if (SUCCEEDED(hr) && !pDstResource && !pSrcResource->scanout_primary)
+      if (SUCCEEDED(hr) && readback)
          hr = PublishPresentFrame(device, pSrcResource);
       return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                   "callback-and-publication", hr, started);
