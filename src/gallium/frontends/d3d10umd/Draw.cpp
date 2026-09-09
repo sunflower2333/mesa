@@ -65,6 +65,12 @@ update_velems(Device *pDevice)
       for (unsigned i = 0; i < state->count; i++)
          state->velems[i].src_stride = pDevice->vertex_strides[state->velems[i].vertex_buffer_index];
       cso_set_vertex_elements(pDevice->cso, state);
+   } else {
+      /* SV_VertexID-only shaders legally draw with a NULL input layout.
+       * Gallium still requires an empty vertex-elements object, including
+       * when clearing a previously populated D3D input layout. */
+      struct cso_velems_state empty = {};
+      cso_set_vertex_elements(pDevice->cso, &empty);
    }
 
    pDevice->velems_changed = false;

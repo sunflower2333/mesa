@@ -144,6 +144,9 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       return E_OUTOFMEMORY;
 
    pDevice->pipe = pipe;
+   /* D3D starts with no input layout; the runtime need not issue a NULL bind
+    * before the first vertex-ID-only draw. Resolve that state on first draw. */
+   pDevice->velems_changed = true;
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
    if (!pDevice->cso) {
       pipe->destroy(pipe);
