@@ -171,6 +171,22 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    LARGE_INTEGER transferFreq, transferStart;
    QueryPerformanceFrequency(&transferFreq);
    QueryPerformanceCounter(&transferStart);
+   // Sample the existing timing log without adding per-draw file traffic.
+   // Separate GPU mapping, VidSch/LockCb waits and CPU copy costs before
+   // changing any of the shared-resource ownership or completion rules.
+   const bool timing_sample = (transfer_sequence % 64) == 0;
+   LARGE_INTEGER phaseStart = transferStart;
+   LONGLONG phaseUsec[6] = {};
+   const auto recordPhase = [&](unsigned phase) {
+      if (!timing_sample)
+         return;
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      if (transferFreq.QuadPart > 0)
+         phaseUsec[phase] = ((now.QuadPart - phaseStart.QuadPart) * 1000000LL) /
+                            transferFreq.QuadPart;
+      phaseStart = now;
+   };
    void *pixels = NULL;
    struct pipe_transfer *transfer = NULL;
    HRESULT lock_hr = E_UNEXPECTED;
@@ -198,6 +214,7 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
       pixels = pipe->texture_map(pipe, texture, 0,
                                 publish ? PIPE_MAP_READ : PIPE_MAP_WRITE,
                                 &box, &transfer);
+      recordPhase(0);
       if (!pixels) {
          reset_status = pipe->get_device_reset_status
                            ? pipe->get_device_reset_status(pipe)
@@ -215,6 +232,7 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
          lock_hr = publish ? S_OK : SubmitSharedCopy(device, resource, false);
          if (SUCCEEDED(lock_hr))
             lock_hr = device->KTCallbacks.pfnLockCb(device->hDevice, &lock);
+         recordPhase(1);
          lock_data = lock.pData;
          if (SUCCEEDED(lock_hr)) {
             if (!lock.pData) {
@@ -230,10 +248,12 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
                      memcpy(gpu, shared, row_bytes);
                }
             }
+            recordPhase(2);
             D3DDDICB_UNLOCK unlock = {};
             unlock.NumAllocations = 1;
             unlock.phAllocations = &lock.hAllocation;
             unlock_hr = device->KTCallbacks.pfnUnlockCb(device->hDevice, &unlock);
+            recordPhase(3);
             if (publish && SUCCEEDED(lock_hr) && SUCCEEDED(unlock_hr)) {
                unlock_hr = SubmitSharedCopy(device, resource, true);
                if (SUCCEEDED(unlock_hr)) {
@@ -249,11 +269,13 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
                   }
                }
             }
+            recordPhase(4);
          }
          pipe_texture_unmap(pipe, transfer);
          reset_status = pipe->get_device_reset_status
                            ? pipe->get_device_reset_status(pipe)
                            : PIPE_NO_RESET;
+         recordPhase(5);
       }
    }
 
@@ -270,15 +292,21 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
          : 0;
       const LONG64 running = InterlockedAdd64(&total_usec, usec);
       const LONG n = InterlockedIncrement(&samples);
-      if ((n % 64) == 0) {
+      if (timing_sample) {
          HANDLE log = CreateFileA("C:\\Users\\Public\\umd_timing.log",
                                   FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                   NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
          if (log != INVALID_HANDLE_VALUE) {
-            char line[192];
+            char line[512];
             int len = _snprintf_s(line, sizeof line, _TRUNCATE,
-                                  "shared op=%s samples=%ld last=%lldus mean=%lldus\r\n",
-                                  publish ? "publish" : "refresh", n, usec, running / n);
+                                  "shared op=%s samples=%ld last=%lldus mean=%lldus "
+                                  "pid=%lu tick=%llu size=%ux%u allocation=0x%x hr=0x%08lx "
+                                  "prepare_map=%lld lock=%lld copy=%lld unlock=%lld publish=%lld unmap=%lldus\r\n",
+                                  publish ? "publish" : "refresh", n, usec, running / n,
+                                  GetCurrentProcessId(), GetTickCount64(),
+                                  texture->width0, texture->height0, resource->hAllocation,
+                                  (unsigned long)hr, phaseUsec[0], phaseUsec[1], phaseUsec[2],
+                                  phaseUsec[3], phaseUsec[4], phaseUsec[5]);
             DWORD written = 0;
             if (len > 0) WriteFile(log, line, (DWORD)len, &written, NULL);
             CloseHandle(log);
