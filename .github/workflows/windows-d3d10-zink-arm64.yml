@@ -200,7 +200,7 @@ jobs:
           }
           Write-Host 'D3D10 UMD target keeps swrast the default and zink selectable.'
 
-      - name: Assert Present readback cannot block the compositor
+      - name: Assert Present readback uses a bounded wait
         shell: pwsh
         run: |
           $source = Get-Content -LiteralPath 'src/gallium/frontends/d3d10umd/DxgiFns.cpp' -Raw
@@ -217,7 +217,11 @@ jobs:
           if ($map.Groups['busy'].Value -match 'present_publish_retry') {
             throw 'Expected nonblocking busy result must not arm adapter backoff'
           }
-          Write-Host 'Present staging readback is nonblocking and retries on the next Present.'
+          if ($source -notmatch 'fence_finish\(screen, pipe, fence, 250000000ull\)' -or
+              $source -match 'present_staging_primed|present_staging_slot') {
+            throw 'Present must finish the current copy within a finite wait budget'
+          }
+          Write-Host 'Present waits at most 250 ms for its copy fence and maps without blocking.'
 
       - name: Install Windows flex and bison
         shell: pwsh

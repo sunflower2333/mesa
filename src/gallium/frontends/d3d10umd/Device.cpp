@@ -421,8 +421,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    }
 
    pipe_resource_reference(&pDevice->index_buffer, NULL);
-   pipe_resource_reference(&pDevice->present_staging[0], NULL);
-   pipe_resource_reference(&pDevice->present_staging[1], NULL);
+   pipe_resource_reference(&pDevice->present_staging, NULL);
    if (pDevice->present_request != NULL) {
       FREE(pDevice->present_request);
       pDevice->present_request = NULL;

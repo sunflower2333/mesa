@@ -111,9 +111,7 @@ struct Device
     * they are rendered on the host, so the guest pages behind the back buffer
     * stay zero. Keep one staging surface to read a finished frame back and
     * hand the pixels to the miniport. */
-   struct pipe_resource *present_staging[2];
-   unsigned present_staging_slot;
-   bool present_staging_primed;
+   struct pipe_resource *present_staging;
    unsigned present_publish_retry;
    unsigned present_publish_backoff;
    uint8_t *present_request;

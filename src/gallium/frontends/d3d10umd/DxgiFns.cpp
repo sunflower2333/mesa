@@ -145,7 +145,7 @@ PresentAdapter(bool reopen)
  *    surface and send the pixels through the miniport's frame publication
  *    escape, which blits them into the surface it scans out.
  */
-static void
+static HRESULT
 PublishPresentFrame(struct Device *device, Resource *pSrcResource)
 {
    struct pipe_resource *src = pSrcResource ? pSrcResource->resource : NULL;
@@ -164,7 +164,7 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    }
 
    if (!enabled || src == NULL) {
-      return;
+      return S_OK;
    }
 
    /* A failed publication used to disable this path for the life of the
@@ -175,14 +175,14 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
     * rather than the display. */
    if (device->present_publish_retry > 0) {
       --device->present_publish_retry;
-      return;
+      return S_OK;
    }
 
    /* The miniport's scanout is B8G8R8A8; anything else would need a
     * conversion this path deliberately does not attempt. */
    if (src->format != PIPE_FORMAT_B8G8R8A8_UNORM &&
        src->format != PIPE_FORMAT_B8G8R8X8_UNORM) {
-      return;
+      return S_OK;
    }
 
    struct pipe_context *pipe = device->pipe;
@@ -191,23 +191,17 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    const unsigned height = src->height0;
 
    if (width == 0 || height == 0) {
-      return;
+      return S_OK;
    }
 
-   for (unsigned slot = 0; slot < 2; ++slot) {
-      if (device->present_staging[slot] != NULL &&
-          (device->present_staging[slot]->width0 != width ||
-           device->present_staging[slot]->height0 != height ||
-           device->present_staging[slot]->format != src->format)) {
-         pipe_resource_reference(&device->present_staging[slot], NULL);
-         device->present_staging_primed = false;
-      }
+   if (device->present_staging != NULL &&
+       (device->present_staging->width0 != width ||
+        device->present_staging->height0 != height ||
+        device->present_staging->format != src->format)) {
+      pipe_resource_reference(&device->present_staging, NULL);
    }
 
-   for (unsigned slot = 0; slot < 2; ++slot) {
-      if (device->present_staging[slot] != NULL) {
-         continue;
-      }
+   if (device->present_staging == NULL) {
       struct pipe_resource templat;
       memset(&templat, 0, sizeof templat);
       templat.target = PIPE_TEXTURE_2D;
@@ -226,12 +220,10 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
        * success on full-size frames.  A linear surface is host-visible, and
        * its pixels are the real ones. */
       templat.bind = PIPE_BIND_LINEAR;
-      device->present_staging[slot] = screen->resource_create(screen, &templat);
-      if (device->present_staging[slot] == NULL) {
-         device->present_publish_retry = 60;
-         return;
+      device->present_staging = screen->resource_create(screen, &templat);
+      if (device->present_staging == NULL) {
+         return E_OUTOFMEMORY;
       }
-      device->present_staging_primed = false;
    }
 
    const unsigned rowBytes = width * 4;
@@ -251,7 +243,7 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    if (device->present_request == NULL) {
       device->present_request = (uint8_t *)MALLOC(requestSize);
       if (device->present_request == NULL) {
-         return;
+         return E_OUTOFMEMORY;
       }
       device->present_request_size = requestSize;
    }
@@ -267,35 +259,32 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    box.height = height;
    box.depth = 1;
 
-   /* Copy this frame into one surface and publish the other, which holds the
-    * frame before it.  Mapping the copy just issued means waiting for the host
-    * to finish it, and that wait -- not the pixels -- was the frame time. The
-    * previous frame's copy has had a whole frame to land, so its map returns
-    * without stalling.  The screen is one frame behind; it is not a frame
-    * slower. */
-   const unsigned writeSlot = device->present_staging_slot;
-   const unsigned readSlot = writeSlot ^ 1u;
-   pipe->resource_copy_region(pipe, device->present_staging[writeSlot], 0, 0, 0, 0,
+   /* A Present owns this source's current contents. Publishing the previous
+    * device-global slot loses the first and final frames, and can mix two
+    * swapchains of equal size. Complete this copy before reading the same
+    * staging surface. Use an explicit finite fence wait and a nonblocking map
+    * so a failed host submission cannot hang the compositor in texture_map.
+    * The bridge remains a correctness fallback pending standard DXGI output;
+    * a timeout must be reported, never counted as a successful publication. */
+   pipe->resource_copy_region(pipe, device->present_staging, 0, 0, 0, 0,
                               src, 0, &box);
-   device->present_staging_slot = readSlot;
-
-   if (!device->present_staging_primed) {
-      /* Nothing has been copied into the other surface yet: publishing it now
-       * would put an uninitialised frame on the screen. */
-      device->present_staging_primed = true;
-      return;
+   struct pipe_fence_handle *fence = NULL;
+   pipe->flush(pipe, &fence, 0);
+   if (fence == NULL) {
+      return E_FAIL;
    }
+   const bool ready = screen->fence_finish(screen, pipe, fence, 250000000ull);
+   screen->fence_reference(screen, &fence, NULL);
+   if (!ready)
+      return DXGI_ERROR_WAS_STILL_DRAWING;
 
    struct pipe_transfer *transfer = NULL;
-   void *map = pipe->texture_map(pipe, device->present_staging[readSlot], 0,
+   void *map = pipe->texture_map(pipe, device->present_staging, 0,
                                  PIPE_MAP_READ | PIPE_MAP_DONTBLOCK, &box,
                                  &transfer);
    if (map == NULL) {
-      /* This runs on the caller's Present path, including DWM's compositor
-       * thread. A previous-frame copy that is still busy is expected and must
-       * never turn one dropped publication into a frozen desktop. Try the next
-       * Present; reserve adapter backoff for an escape that actually failed. */
-      return;
+      /* Reserve adapter backoff for an escape that actually failed. */
+      return DXGI_ERROR_WAS_STILL_DRAWING;
    }
 
    uint8_t *request = device->present_request;
@@ -366,6 +355,7 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
    } else {
       device->present_publish_backoff = 0;
    }
+   return S_OK;
 }
 
 
@@ -393,7 +383,9 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    QueryPerformanceCounter(&tShared);
    if (FAILED(hr))
       return hr;
-   PublishPresentFrame(device, pSrcResource);
+   hr = PublishPresentFrame(device, pSrcResource);
+   if (FAILED(hr))
+      return hr;
    QueryPerformanceCounter(&tPublish);
    device->pipe->screen->flush_frontbuffer(device->pipe->screen, device->pipe,
       pSrcResource->resource, 0, 0, pPresentData->pDXGIContext, 0, NULL);
