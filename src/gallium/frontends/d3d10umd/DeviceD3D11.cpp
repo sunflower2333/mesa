@@ -889,6 +889,39 @@ FillDeviceFuncs11(D3D11DDI_DEVICEFUNCS *pDeviceFuncs)
    pDeviceFuncs->pfnRecycleCreateCommandList = Stub_RecycleCreateCommandList;
    pDeviceFuncs->pfnRecycleCreateDeferredContext = Stub_RecycleCreateDeferredContext;
    pDeviceFuncs->pfnRecycleDestroyCommandList = Stub_RecycleDestroyCommandList;
+
+   /* The runtime validates this table before it will create an 11_0 device,
+    * and a single slot left null is enough for it to refuse. That is the
+    * cheapest explanation for what the compositor does: at 10_1 it loads this
+    * driver and keeps it, at 11_0 it drops the library entirely and composites
+    * on WARP, which is what a failed device creation looks like from outside.
+    * The table is function pointers throughout, so count the empty slots and
+    * report them rather than guessing which are required. */
+   {
+      void **slots = (void **)pDeviceFuncs;
+      const size_t count = sizeof *pDeviceFuncs / sizeof(void *);
+      size_t empty = 0;
+      size_t firstEmpty = count;
+      for (size_t i = 0; i < count; ++i) {
+         if (slots[i] == NULL) {
+            if (empty == 0)
+               firstEmpty = i;
+            ++empty;
+         }
+      }
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_devfuncs.log",
+                               FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[192];
+         int len = _snprintf_s(line, sizeof line, _TRUNCATE,
+                               "D3D11 device funcs: slots=%zu empty=%zu firstEmpty=%zu\r\n",
+                               count, empty, firstEmpty);
+         DWORD written = 0;
+         if (len > 0) WriteFile(log, line, (DWORD)len, &written, NULL);
+         CloseHandle(log);
+      }
+   }
 }
 
 #endif /* SUPPORT_D3D11 */
