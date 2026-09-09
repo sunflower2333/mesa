@@ -632,6 +632,23 @@ _QueryResourceResidency( DXGI_DDI_ARG_QUERYRESOURCERESIDENCY *QueryResourceResid
  * ----------------------------------------------------------------------
  */
 
+static bool
+RotationScratchMatches(const struct pipe_resource *scratch,
+                       const struct pipe_resource *source)
+{
+   return scratch && scratch->target == source->target &&
+          scratch->format == source->format &&
+          scratch->width0 == source->width0 && scratch->height0 == source->height0 &&
+          scratch->depth0 == source->depth0 && scratch->array_size == source->array_size &&
+          scratch->last_level == source->last_level &&
+          scratch->nr_samples == source->nr_samples &&
+          scratch->nr_storage_samples == source->nr_storage_samples &&
+          scratch->nr_sparse_levels == source->nr_sparse_levels &&
+          scratch->compression_rate == source->compression_rate &&
+          scratch->usage == source->usage && scratch->bind == source->bind &&
+          scratch->flags == source->flags;
+}
+
 HRESULT APIENTRY
 _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResourceIdentities )
 {
@@ -651,6 +668,9 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    if (!first || !first->resource)
       return E_INVALIDARG;
    const ULONGLONG started = GetTickCount64();
+   LARGE_INTEGER frequency, begin, refreshed, allocated, copied;
+   QueryPerformanceFrequency(&frequency);
+   QueryPerformanceCounter(&begin);
    unsigned dirtyBefore = 0;
    // Kernel-backed back buffers must rotate as a homogeneous set. Validate
    // before copying pixels or changing any allocation identity.
@@ -678,6 +698,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    }
 
    struct pipe_resource *resource0 = CastPipeResource(RotateResourceIdentities->pResources[0]);
+   QueryPerformanceCounter(&refreshed);
 
    assert(resource0);
    LOG_UNSUPPORTED(resource0->last_level);
@@ -687,12 +708,22 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
     * alternative of recreating all views.
     */
 
-   struct pipe_resource *temp_resource;
-   temp_resource = screen->resource_create(screen, resource0);
+   // Every rotation overwrites scratch before reading it, on this device's
+   // same ordered pipe context. Retain one matching image instead of creating
+   // and retiring a full-size host allocation on every composition frame.
+   // Existing views still refer to the original textures; pixel-copy order,
+   // allocation ownership and shared-resource synchronization are unchanged.
+   const bool reused = RotationScratchMatches(device->rotation_scratch, resource0);
+   if (!reused) {
+      pipe_resource_reference(&device->rotation_scratch, NULL);
+      device->rotation_scratch = screen->resource_create(screen, resource0);
+   }
+   struct pipe_resource *temp_resource = device->rotation_scratch;
    assert(temp_resource);
    if (!temp_resource) {
       return E_OUTOFMEMORY;
    }
+   QueryPerformanceCounter(&allocated);
 
    struct pipe_box src_box;
    src_box.x = 0;
@@ -730,7 +761,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
                                  &src_box);
    }
 
-   pipe_resource_reference(&temp_resource, NULL);
+   QueryPerformanceCounter(&copied);
 
    // DXGI rotates kernel identities, while the runtime handles stay attached
    // to their Resource objects. Pixel copies above preserve existing views.
@@ -761,12 +792,18 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, NULL);
       if (log != INVALID_HANDLE_VALUE) {
-         char line[192];
+         const LONGLONG hz = frequency.QuadPart > 0 ? frequency.QuadPart : 1;
+         char line[320];
          int len = _snprintf_s(line, sizeof line, _TRUNCATE,
-                              "rotate tick=%llu pid=%lu n=%ld buffers=%u dirty=%u elapsed=%llums\r\n",
+                              "rotate tick=%llu pid=%lu n=%ld buffers=%u dirty=%u elapsed=%llums "
+                              "refresh=%lld scratch=%lld copy=%lldus reused=%u\r\n",
                               GetTickCount64(), GetCurrentProcessId(), rotation,
                               RotateResourceIdentities->Resources, dirtyBefore,
-                              GetTickCount64() - started);
+                              GetTickCount64() - started,
+                              ((refreshed.QuadPart - begin.QuadPart) * 1000000LL) / hz,
+                              ((allocated.QuadPart - refreshed.QuadPart) * 1000000LL) / hz,
+                              ((copied.QuadPart - allocated.QuadPart) * 1000000LL) / hz,
+                              reused ? 1u : 0u);
          DWORD written;
          if (len > 0) WriteFile(log, line, (DWORD)len, &written, NULL);
          CloseHandle(log);

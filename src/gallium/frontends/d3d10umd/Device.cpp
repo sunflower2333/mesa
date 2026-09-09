@@ -432,6 +432,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
 
    pipe_resource_reference(&pDevice->index_buffer, NULL);
    pipe_resource_reference(&pDevice->present_staging, NULL);
+   pipe_resource_reference(&pDevice->rotation_scratch, NULL);
    if (pDevice->present_request != NULL) {
       FREE(pDevice->present_request);
       pDevice->present_request = NULL;

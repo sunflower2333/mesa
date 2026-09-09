@@ -112,6 +112,8 @@ struct Device
     * stay zero. Keep one staging surface to read a finished frame back and
     * hand the pixels to the miniport. */
    struct pipe_resource *present_staging;
+   /* One scratch image for ordered back-buffer identity copies. */
+   struct pipe_resource *rotation_scratch;
    unsigned present_publish_retry;
    unsigned present_publish_backoff;
    uint8_t *present_request;
