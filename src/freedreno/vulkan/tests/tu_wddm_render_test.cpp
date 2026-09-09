@@ -1438,7 +1438,7 @@ test_positive_allocation_destroy_status_retains_owner()
 }
 
 void
-test_allocation_destroy_requires_retired_submissions()
+test_allocation_destroy_delegates_retirement_to_vidmm()
 {
    test_fixture fixture;
    init_fixture(&fixture);
@@ -1449,20 +1449,26 @@ test_allocation_destroy_requires_retired_submissions()
 
    fixture.context.last_submitted_fence = 7;
    fixture.escape_status = kStatusInvalidParameter;
+   // A failed advisory fence query cannot authorize dropping the owner.
+   // VidMm decides: retain ownership on its failure, without AssumeNotInUse.
+   fixture.destroy_allocation_status = kStatusInvalidParameter;
    CHECK(!tu_wddm_allocation_destroy(&allocation));
    CHECK(fixture.escape_calls == 1);
-   CHECK(fixture.destroy_allocation_calls == 0);
+   CHECK(fixture.destroy_allocation_calls == 1);
+   CHECK(fixture.destroy_assume_not_in_use == 0);
    CHECK(allocation.last_destroy_status ==
-         static_cast<uint32_t>(kStatusDeviceBusy));
+         static_cast<uint32_t>(kStatusInvalidParameter));
    CHECK(allocation.handle == kAllocationHandle);
    CHECK(allocation.context == &fixture.context);
    CHECK(allocation.private_info.RequestedIova == kVaStart);
    CHECK(allocation.vma_size == 4096);
 
-   fixture.context.last_submitted_fence = 0;
-   fixture.escape_status = kStatusSuccess;
+   // The private query still fails; a real VidMm success permits cleanup.
+   fixture.destroy_allocation_status = kStatusSuccess;
    CHECK(tu_wddm_allocation_destroy(&allocation));
-   CHECK(fixture.destroy_allocation_calls == 1);
+   CHECK(fixture.escape_calls == 2);
+   CHECK(fixture.destroy_allocation_calls == 2);
+   CHECK(fixture.destroy_assume_not_in_use == 0);
    CHECK(allocation.handle == 0);
    CHECK(allocation.context == NULL);
 }
@@ -2038,7 +2044,7 @@ main()
    test_failed_allocation_rollback_retains_owner();
    test_failed_allocation_teardown_retains_owner();
    test_positive_allocation_destroy_status_retains_owner();
-   test_allocation_destroy_requires_retired_submissions();
+   test_allocation_destroy_delegates_retirement_to_vidmm();
    test_failed_unlock_retains_owner();
    test_null_lock_data_is_rolled_back();
    test_null_lock_data_rollback_retains_owner();
