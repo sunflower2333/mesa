@@ -1989,6 +1989,24 @@ out:
 static void
 bind_gfx_stage(struct zink_context *ctx, mesa_shader_stage stage, struct zink_shader *shader)
 {
+   /* These are borrowed pointers to the last program used for a draw. Once a
+    * stage is replaced, the frontend may delete all shaders of that program
+    * without issuing another draw. Shader pruning and batch retirement can
+    * then free the program before the next bind or context teardown. Remove
+    * its hash contribution while the old stage still keeps it alive. */
+   if (!shader || ctx->gfx_stages[stage] != shader) {
+      if (stage < MESA_SHADER_COMPUTE) {
+         if (ctx->curr_program)
+            ctx->gfx_pipeline_state.final_hash ^= ctx->curr_program->last_variant_hash;
+         ctx->curr_program = NULL;
+      }
+      if (stage == MESA_SHADER_FRAGMENT || stage > MESA_SHADER_COMPUTE) {
+         if (ctx->mesh_program)
+            ctx->gfx_pipeline_state.mesh_final_hash ^= ctx->mesh_program->last_variant_hash;
+         ctx->mesh_program = NULL;
+      }
+   }
+
    if (shader && shader->info.num_inlinable_uniforms)
       ctx->shader_has_inlinable_uniforms_mask |= 1 << stage;
    else
@@ -2024,16 +2042,6 @@ bind_gfx_stage(struct zink_context *ctx, mesa_shader_stage stage, struct zink_sh
       if (shader->info.uses_bindless)
          zink_descriptors_init_bindless(ctx);
    } else {
-      if (stage < MESA_SHADER_COMPUTE) {
-         if (ctx->curr_program)
-            ctx->gfx_pipeline_state.final_hash ^= ctx->curr_program->last_variant_hash;
-         ctx->curr_program = NULL;
-      }
-      if (stage == MESA_SHADER_FRAGMENT || stage > MESA_SHADER_COMPUTE) {
-         if (ctx->mesh_program)
-            ctx->gfx_pipeline_state.mesh_final_hash ^= ctx->mesh_program->last_variant_hash;
-         ctx->mesh_program = NULL;
-      }
       ctx->shader_stages &= ~BITFIELD_BIT(stage);
    }
    /* avoid potential overdraw conflicts */

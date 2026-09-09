@@ -129,7 +129,8 @@ static void VerifyPixels(Device &d, ID3D11Texture2D *texture,
       Check(E_FAIL, "Shared or local pixel contents");
 }
 
-static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[4])
+static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[4],
+                          bool releaseBeforeReadback = false)
 {
    const char *vsSource = "float4 main(uint id:SV_VertexID):SV_Position {"
       "float2 p=float2((id<<1)&2,id&2);return float4(p*float2(2,-2)+float2(-1,1),0,1);}";
@@ -164,8 +165,49 @@ static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[
    D3D11_VIEWPORT viewport = {0, 0, (float)desc.Width, (float)desc.Height, 0, 1};
    d.context->RSSetViewports(1, &viewport);
    d.context->Draw(3, 0);
+   if (releaseBeforeReadback) {
+      // The D3D frontend substitutes its empty shaders for these NULL binds.
+      // Delete the old pair without drawing with the replacements, then let
+      // readback retire their last GPU batch before device teardown.
+      d.context->VSSetShader(NULL, NULL, 0);
+      d.context->PSSetShader(NULL, NULL, 0);
+      vs.Reset();
+      ps.Reset();
+   }
    VerifyPixels(d, output.Get(), color, "sampled shared texture");
    d.context->ClearState();
+}
+
+static void ShaderLifetimeTest(IDXGIAdapter *adapter)
+{
+   for (unsigned iteration = 0; iteration < 8; ++iteration) {
+      printf("SHADER LIFETIME %u\n", iteration);
+      Device d = CreateDevice(adapter);
+      D3D11_TEXTURE2D_DESC desc = {};
+      desc.Width = desc.Height = 64;
+      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      ComPtr<ID3D11Texture2D> texture;
+      Check(d.device->CreateTexture2D(&desc, NULL, &texture), "Create lifetime texture");
+      ComPtr<ID3D11RenderTargetView> target;
+      Check(d.device->CreateRenderTargetView(texture.Get(), NULL, &target), "Create lifetime RTV");
+      const float *color = colors[iteration % ARRAYSIZE(colors)];
+      d.context->ClearRenderTargetView(target.Get(), color);
+      SampleTexture(d, texture.Get(), color, true);
+      // Exercise batch reuse without another draw selecting a new program.
+      for (unsigned retire = 0; retire < 3; ++retire)
+         VerifyPixels(d, texture.Get(), color, "post-delete batch retirement");
+      CheckDevice(d, "before shader lifetime teardown");
+      target.Reset();
+      texture.Reset();
+      d.context->ClearState();
+      d.context->Flush();
+      d.context.Reset();
+      d.device.Reset();
+      printf("SHADER LIFETIME %u teardown completed\n", iteration);
+   }
 }
 
 static void SharedTest(IDXGIAdapter *adapter, const char *mode)
@@ -476,8 +518,9 @@ int main(int argc, char **argv)
    if (!child && ((argc != 1 && argc != 2) ||
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
-       strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime")))) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--dcomp]\n");
+       strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
+       strcmp(mode, "--shader-lifetime")))) {
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp]\n");
       return 2;
    }
    DWORD session;
@@ -512,6 +555,8 @@ int main(int argc, char **argv)
          ProcessSharedTest(adapter.Get());
       else if (!strcmp(mode, "--dcomp"))
          CompositionTest(adapter.Get());
+      else if (!strcmp(mode, "--shader-lifetime"))
+         ShaderLifetimeTest(adapter.Get());
       else
          SharedTest(adapter.Get(), mode);
       printf("RESULT: PASS mode=%s\n", mode);
