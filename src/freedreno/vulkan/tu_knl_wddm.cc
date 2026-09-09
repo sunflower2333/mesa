@@ -67,8 +67,10 @@ public:
          LARGE_INTEGER due;
          /* Relative time is negative, in 100ns units; round up, never to 0. */
          due.QuadPart = -static_cast<LONGLONG>((interval_ns + 99) / 100);
+         /* WAIT_OBJECT_0 is zero, but its SDK macro references STATUS_WAIT_0,
+          * hidden by this transport's WIN32_NO_STATUS header boundary. */
          if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE) &&
-             WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0)
+             WaitForSingleObject(timer, INFINITE) == 0)
             return;
          CloseHandle(timer);
          timer = NULL;
