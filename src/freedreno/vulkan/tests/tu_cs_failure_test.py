@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run production command-stream failure paths with a controlled BO allocator."""
 import argparse
+import os
 from pathlib import Path
 import re
 import shutil
@@ -38,7 +39,11 @@ def main():
         return (root / relative).read_text()
 
     header, source = read("tu_cs.h"), read("tu_cs.cc")
-    cs_struct = re.search(r"struct tu_cs\n\{.*?\n\};", header, re.S).group()
+    declarations = []
+    for kind, name in [("enum", "tu_cs_mode"), ("struct", "tu_cs_entry"),
+                       ("struct", "tu_cs_memory"), ("struct", "tu_draw_state"),
+                       ("struct", "tu_bo_array"), ("struct", "tu_cs")]:
+        declarations.append(re.search(rf"{kind} {name}\s*\{{.*?\n\}};", header, re.S).group())
     sink_size = re.search(r"#define TU_CS_FAIL_SINK_SIZE .*", header).group()
     functions = [definition(source, "tu_cs_init_external"), definition(header, "tu_cs_fail")]
     if "tu_cs_init_failed_external" in header:
@@ -47,20 +52,22 @@ def main():
                   definition(header, "tu_cs_draw_state"),
                   definition(source, "tu_cs_end_sub_stream")]
     fixture = (here / "tu_cs_failure_test.cpp").read_text()
-    fixture = fixture.replace("// PRODUCTION_CS_STRUCT", cs_struct)
+    fixture = fixture.replace("// PRODUCTION_CS_STRUCTS", "\n".join(declarations))
     fixture = fixture.replace("// PRODUCTION_SINK_SIZE", sink_size)
     fixture = fixture.replace("// PRODUCTION_FUNCTIONS", "\n\n".join(functions))
     with tempfile.TemporaryDirectory(prefix="turnip-cs-failure-") as output:
         directory = Path(output)
         unit = directory / "fixture.cpp"
         unit.write_text(fixture)
-        compiler = shutil.which("cl")
+        # Mesa uses GNU compound literals in C++ and builds with clang-cl.
+        compiler = shutil.which("clang-cl") if os.name == "nt" else None
         if compiler:
             if args.sanitize:
                 parser.error("--sanitize requires clang++ or g++")
             executable = directory / "fixture.exe"
             # Production CS entries multiply uint32 sizes by sizeof(uint32_t).
-            command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/wd4838", "/std:c++20", str(unit),
+            command = [compiler, "/nologo", "/EHsc", "/W4", "/WX",
+                       "/clang:-Wno-c++11-narrowing", "/std:c++20", str(unit),
                        f"/Fe{executable}"]
         else:
             executable = directory / "fixture"

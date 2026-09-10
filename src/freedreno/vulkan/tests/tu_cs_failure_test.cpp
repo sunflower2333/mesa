@@ -11,16 +11,11 @@
 #define TU_COND_EXEC_STACK_SIZE 4
 using VkResult = int;
 constexpr VkResult VK_SUCCESS = 0;
-enum tu_cs_mode { TU_CS_MODE_GROW, TU_CS_MODE_SUB_STREAM, TU_CS_MODE_EXTERNAL };
 struct tu_device { unsigned property; };
 struct tu_bo { uint64_t iova; uint32_t *map; };
-struct tu_bo_array { tu_bo **bos; uint32_t bo_count, bo_capacity; uint32_t *start; };
-struct tu_cs_entry { tu_bo *bo; uint32_t size, offset; };
-struct tu_draw_state { uint64_t iova; uint32_t size; bool writeable; };
-struct tu_cs_memory { uint32_t *map; uint64_t iova; bool writeable; };
 struct tu_pkt;
 struct tu_crb;
-// PRODUCTION_CS_STRUCT
+// PRODUCTION_CS_STRUCTS
 // PRODUCTION_SINK_SIZE
 uint32_t tu_cs_fail_sink[TU_CS_FAIL_SINK_SIZE];
 
