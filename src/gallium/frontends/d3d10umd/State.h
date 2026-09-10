@@ -43,7 +43,6 @@
 #include "util/u_hash_table.h"
 #include "cso_cache/cso_context.h"
 
-#define SUPPORT_MSAA 0
 #define SUPPORT_D3D10_1 1
 #define SUPPORT_D3D11 1
 
@@ -92,6 +91,7 @@ struct Device
    void *empty_vs;
 
    enum mesa_prim primitive;
+   bool d3d10_rasterization;
 
    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
    struct pipe_stream_output_target *draw_so_target;

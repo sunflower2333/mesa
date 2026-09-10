@@ -1142,6 +1142,189 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
    CheckDevice(d, "Format capability queries");
 }
 
+static ComPtr<ID3DBlob> CompileMsaaShader(const char *source, const char *profile)
+{
+   ComPtr<ID3DBlob> code, errors;
+   HRESULT hr = D3DCompile(source, strlen(source), NULL, NULL, NULL, "main", profile,
+                           D3DCOMPILE_ENABLE_STRICTNESS, 0, &code, &errors);
+   if (errors)
+      printf("%s\n", static_cast<const char *>(errors->GetBufferPointer()));
+   Check(hr, "Compile MSAA shader");
+   return code;
+}
+
+static void VerifyMsaaPixels(Device &d, ID3D11Texture2D *texture, UINT subresource,
+                             UINT samples, int sample, const char *label)
+{
+   D3D11_TEXTURE2D_DESC desc;
+   texture->GetDesc(&desc);
+   const UINT width = desc.Width >> (subresource % desc.MipLevels);
+   const UINT height = desc.Height >> (subresource % desc.MipLevels);
+   desc.Width = width;
+   desc.Height = height;
+   desc.MipLevels = desc.ArraySize = 1;
+   desc.Usage = D3D11_USAGE_STAGING;
+   desc.BindFlags = desc.MiscFlags = 0;
+   desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+   ComPtr<ID3D11Texture2D> staging;
+   Check(d.device->CreateTexture2D(&desc, NULL, &staging), "Create MSAA readback");
+   d.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture, subresource, NULL);
+   D3D11_MAPPED_SUBRESOURCE map = {};
+   Check(d.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map), "Map MSAA readback");
+   UINT mismatches = 0;
+   for (UINT y = 0; y < height; ++y) {
+      const auto *row = static_cast<const unsigned char *>(map.pData) + y * map.RowPitch;
+      for (UINT x = 0; x < width; ++x) {
+         const float checker = float((x ^ y) & 1);
+         // Sample loads deliberately swizzle BGRA; resolves retain RGBA.
+         float expected[] = {sample < 0 ? 0.5f : checker,
+            sample < 0 ? (samples == 4 ? 0.5f : 0.0f) : float((sample >> 1) & 1),
+            sample < 0 ? checker : float(sample & 1), 1.0f};
+         if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+            const float red = expected[0];
+            expected[0] = expected[2];
+            expected[2] = red;
+         }
+         bool wrong = false;
+         for (UINT c = 0; c < 4; ++c) {
+            if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+               const auto *half = reinterpret_cast<const uint16_t *>(row);
+               const uint16_t wanted = expected[c] == 1 ? 0x3c00 :
+                                        expected[c] == 0.5f ? 0x3800 : 0;
+               wrong |= half[x * 4 + c] != wanted;
+            } else {
+               const int wanted = int(expected[c] * 255 + 0.5f);
+               wrong |= abs(int(row[x * 4 + c]) - wanted) > 1;
+            }
+         }
+         mismatches += wrong;
+      }
+   }
+   d.context->Unmap(staging.Get(), 0);
+   printf("%s format=%u samples=%u selected=%d mismatches=%u/%u\n",
+          label, unsigned(desc.Format), samples, sample, mismatches, width * height);
+   Check(mismatches ? E_FAIL : S_OK, "MSAA pixel contents");
+}
+
+static void MultisampleTest(IDXGIAdapter *adapter)
+{
+   Device d = CreateDevice(adapter);
+   const char *vsSource = "float4 main(uint id:SV_VertexID):SV_Position {"
+      "float2 p=float2((id<<1)&2,id&2);return float4(p*float2(2,-2)+float2(-1,1),0,1);}";
+   const char *drawSource = "cbuffer Params:register(b0){uint4 choice;}"
+      "float4 main(float4 p:SV_Position):SV_Target{"
+      "return float4(choice.x&1,(choice.x>>1)&1,(uint(p.x)^uint(p.y))&1,1);}";
+   auto vsCode = CompileMsaaShader(vsSource, "vs_4_1");
+   auto drawCode = CompileMsaaShader(drawSource, "ps_4_1");
+   ComPtr<ID3D11VertexShader> vs;
+   ComPtr<ID3D11PixelShader> draw;
+   Check(d.device->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), NULL, &vs), "Create MSAA VS");
+   Check(d.device->CreatePixelShader(drawCode->GetBufferPointer(), drawCode->GetBufferSize(), NULL, &draw), "Create MSAA PS");
+   D3D11_BUFFER_DESC cbDesc = {};
+   cbDesc.ByteWidth = 16;
+   cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+   ComPtr<ID3D11Buffer> constants;
+   Check(d.device->CreateBuffer(&cbDesc, NULL, &constants), "Create MSAA parameters");
+   ID3D11Buffer *cb = constants.Get();
+   d.context->PSSetConstantBuffers(0, 1, &cb);
+   d.context->VSSetShader(vs.Get(), NULL, 0);
+   d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   D3D11_VIEWPORT viewport = {0, 0, 16, 16, 0, 1};
+   d.context->RSSetViewports(1, &viewport);
+   D3D11_RASTERIZER_DESC rsDesc = {};
+   rsDesc.FillMode = D3D11_FILL_SOLID;
+   rsDesc.CullMode = D3D11_CULL_NONE;
+   rsDesc.DepthClipEnable = TRUE;
+   // FL10_1+ must multisample triangles even when MultisampleEnable is false.
+   ComPtr<ID3D11RasterizerState> rs;
+   Check(d.device->CreateRasterizerState(&rsDesc, &rs), "Create MSAA rasterizer");
+   d.context->RSSetState(rs.Get());
+   const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM,
+      DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+      DXGI_FORMAT_R8G8B8A8_TYPELESS};
+   const UINT counts[] = {2, 4};
+   for (DXGI_FORMAT storage : formats) {
+      const DXGI_FORMAT format = storage == DXGI_FORMAT_R8G8B8A8_TYPELESS ?
+                                  DXGI_FORMAT_R8G8B8A8_UNORM : storage;
+      for (UINT count : counts) {
+         printf("MSAA case storage=%u typed=%u samples=%u\n", unsigned(storage), unsigned(format), count);
+         UINT quality = 0, caps = 0;
+         Check(d.device->CheckFormatSupport(format, &caps), "Query MSAA format");
+         Check(d.device->CheckMultisampleQualityLevels(format, count, &quality), "Query MSAA quality");
+         Check(quality && (caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET) &&
+               (caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD) ? S_OK : E_FAIL,
+               "Real MSAA support required (unsupported is not a pass)");
+         D3D11_TEXTURE2D_DESC desc = {};
+         desc.Width = desc.Height = 16;
+         desc.MipLevels = 1;
+         desc.ArraySize = 2;
+         desc.SampleDesc.Count = count;
+         desc.Format = storage;
+         desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+         ComPtr<ID3D11Texture2D> source, output, resolved;
+         Check(d.device->CreateTexture2D(&desc, NULL, &source), "Create multisample array");
+         D3D11_RENDER_TARGET_VIEW_DESC rtDesc = {};
+         rtDesc.Format = format;
+         rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+         rtDesc.Texture2DMSArray.FirstArraySlice = 1;
+         rtDesc.Texture2DMSArray.ArraySize = 1;
+         ComPtr<ID3D11RenderTargetView> msTarget, target;
+         Check(d.device->CreateRenderTargetView(source.Get(), &rtDesc, &msTarget), "Create MSAA array RTV");
+         D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+         srvDesc.Format = format;
+         srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY;
+         srvDesc.Texture2DMSArray.ArraySize = 2;
+         ComPtr<ID3D11ShaderResourceView> input;
+         Check(d.device->CreateShaderResourceView(source.Get(), &srvDesc, &input), "Create MSAA array SRV");
+         desc.Format = format;
+         desc.ArraySize = desc.SampleDesc.Count = 1;
+         Check(d.device->CreateTexture2D(&desc, NULL, &output), "Create sample-load output");
+         Check(d.device->CreateRenderTargetView(output.Get(), NULL, &target), "Create sample-load RTV");
+         desc.Width = desc.Height = 32;
+         desc.ArraySize = desc.MipLevels = 2;
+         Check(d.device->CreateTexture2D(&desc, NULL, &resolved), "Create mip-array resolve destination");
+         ID3D11RenderTargetView *rtv = msTarget.Get();
+         d.context->OMSetRenderTargets(1, &rtv, NULL);
+         const float black[] = {0, 0, 0, 0};
+         d.context->ClearRenderTargetView(rtv, black);
+         d.context->PSSetShader(draw.Get(), NULL, 0);
+         for (UINT sample = 0; sample < count; ++sample) {
+            const UINT params[] = {sample, 0, 0, 0};
+            d.context->UpdateSubresource(cb, 0, NULL, params, 0, 0);
+            d.context->OMSetBlendState(NULL, NULL, 1u << sample);
+            d.context->Draw(3, 0);
+         }
+         d.context->OMSetRenderTargets(0, NULL, NULL);
+         d.context->ResolveSubresource(resolved.Get(), 3, source.Get(), 1, format);
+         VerifyMsaaPixels(d, resolved.Get(), 3, count, -1, "resolve to array1/mip1");
+         char loadSource[512];
+         sprintf_s(loadSource, "Texture2DMSArray<float4,%u> tex:register(t0);"
+            "cbuffer Params:register(b0){uint4 choice;}"
+            "float4 main(float4 p:SV_Position):SV_Target{"
+            "return tex.Load(int3(int2(p.xy)-int2(1,0),1),choice.x,int2(1,0)).bgra;}", count);
+         auto loadCode = CompileMsaaShader(loadSource, "ps_4_1");
+         ComPtr<ID3D11PixelShader> load;
+         Check(d.device->CreatePixelShader(loadCode->GetBufferPointer(), loadCode->GetBufferSize(), NULL, &load), "Create LD_MS PS");
+         rtv = target.Get();
+         ID3D11ShaderResourceView *srv = input.Get();
+         d.context->OMSetRenderTargets(1, &rtv, NULL);
+         d.context->OMSetBlendState(NULL, NULL, ~0u);
+         d.context->PSSetShaderResources(0, 1, &srv);
+         d.context->PSSetShader(load.Get(), NULL, 0);
+         for (UINT sample = 0; sample < count; ++sample) {
+            const UINT params[] = {sample, 0, 0, 0};
+            d.context->UpdateSubresource(cb, 0, NULL, params, 0, 0);
+            d.context->Draw(3, 0);
+            VerifyMsaaPixels(d, output.Get(), 0, count, int(sample), "load array1/offset/swizzle");
+         }
+         srv = NULL;
+         d.context->PSSetShaderResources(0, 1, &srv);
+         d.context->OMSetRenderTargets(0, NULL, NULL);
+         CheckDevice(d, "MSAA case");
+      }
+   }
+}
+
 int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
@@ -1159,6 +1342,7 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
        strcmp(mode, "--buffer-fetch") && strcmp(mode, "--buffer-large") && strcmp(mode, "--buffer-fetch-large") &&
        strcmp(mode, "--buffer-signatures") && strcmp(mode, "--format-caps") &&
+       strcmp(mode, "--msaa") && strcmp(mode, "--msaa-warp") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
@@ -1166,12 +1350,13 @@ int main(int argc, char **argv)
       printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large|--buffer-signatures\n");
       printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait|--sample-reuse-warp\n");
       printf("Format capability contract: --format-caps\n");
+      printf("Multisample render/resolve/load: --msaa|--msaa-warp (reference only)\n");
       return 2;
    }
    DWORD session;
    ProcessIdToSessionId(GetCurrentProcessId(), &session);
    printf("mode=%s session=%lu pid=%lu\n", mode, session, GetCurrentProcessId());
-   warpControl = !strcmp(mode, "--sample-reuse-warp");
+   warpControl = !strcmp(mode, "--sample-reuse-warp") || !strcmp(mode, "--msaa-warp");
    try {
       if (!strcmp(mode, "--buffer-signatures")) {
          BufferSignatureTest();
@@ -1208,6 +1393,8 @@ int main(int argc, char **argv)
          CompositionTest(adapter.Get());
       else if (!strcmp(mode, "--format-caps"))
          FormatCapsTest(adapter.Get());
+      else if (!strcmp(mode, "--msaa") || !strcmp(mode, "--msaa-warp"))
+         MultisampleTest(adapter.Get());
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--sample-reuse") || !strcmp(mode, "--sample-reuse-unbind") ||

@@ -1524,6 +1524,43 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
  * ----------------------------------------------------------------------
  */
 
+static bool
+resolveFormatCompatible(DXGI_FORMAT resource, DXGI_FORMAT typed)
+{
+   // A typed resource must match exactly. A typeless resource may use a
+   // typed member of its DXGI family, not any format of the same block size.
+   switch (resource) {
+   case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R32G32B32A32_SINT;
+   case DXGI_FORMAT_R32G32B32_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R32G32B32_SINT;
+   case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R16G16B16A16_SINT;
+   case DXGI_FORMAT_R32G32_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R32G32_SINT;
+   case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R10G10B10A2_UINT;
+   case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R8G8B8A8_SINT;
+   case DXGI_FORMAT_R16G16_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R16G16_SINT;
+   case DXGI_FORMAT_R32_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R32_SINT;
+   case DXGI_FORMAT_R8G8_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R8G8_SINT;
+   case DXGI_FORMAT_R16_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R16_SINT;
+   case DXGI_FORMAT_R8_TYPELESS:
+      return typed > resource && typed <= DXGI_FORMAT_R8_SINT;
+   case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+      return typed == DXGI_FORMAT_B8G8R8A8_UNORM || typed == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+   case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+      return typed == DXGI_FORMAT_B8G8R8X8_UNORM || typed == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+   default:
+      return typed == resource;
+   }
+}
+
 void APIENTRY
 ResourceResolveSubResource(D3D10DDI_HDEVICE hDevice,        // IN
                            D3D10DDI_HRESOURCE hDstResource, // IN
@@ -1532,7 +1569,50 @@ ResourceResolveSubResource(D3D10DDI_HDEVICE hDevice,        // IN
                            UINT SrcSubResource,             // IN
                            DXGI_FORMAT ResolveFormat)       // IN
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
+   LOG_ENTRYPOINT();
+   Device *device = CastDevice(hDevice);
+   Resource *src = CastResource(hSrcResource);
+   Resource *dst = CastResource(hDstResource);
+   const enum pipe_format format = FormatTranslate(ResolveFormat, false);
+   if (!src || !dst || !src->resource || !dst->resource ||
+       SrcSubResource >= src->NumSubResources || DstSubResource >= dst->NumSubResources ||
+       src->buffer || dst->buffer || src->resource->nr_samples <= 1 ||
+       dst->resource->nr_samples > 1 || format == PIPE_FORMAT_NONE ||
+       util_format_is_depth_or_stencil(format) || util_format_is_pure_integer(format) ||
+       util_format_is_compressed(format) ||
+       !resolveFormatCompatible(src->Format, ResolveFormat) ||
+       !resolveFormatCompatible(dst->Format, ResolveFormat)) {
+      SetError(hDevice, E_INVALIDARG);
+      return;
+   }
+
+   struct pipe_blit_info blit = {};
+   subResourceBox(src->resource, SrcSubResource, &blit.src.level, &blit.src.box);
+   subResourceBox(dst->resource, DstSubResource, &blit.dst.level, &blit.dst.box);
+   if (blit.src.box.width != blit.dst.box.width ||
+       blit.src.box.height != blit.dst.box.height ||
+       blit.src.box.depth != 1 || blit.dst.box.depth != 1 ||
+       util_format_get_blocksize(format) != util_format_get_blocksize(src->resource->format) ||
+       util_format_get_blocksize(format) != util_format_get_blocksize(dst->resource->format)) {
+      SetError(hDevice, E_INVALIDARG);
+      return;
+   }
+   // Resolve is unpredicated. Preserve shared backing before touching one
+   // subresource, and publish the resolved destination through normal ownership.
+   HRESULT hr = RefreshSharedResource(device, src);
+   if (SUCCEEDED(hr))
+      hr = RefreshSharedResource(device, dst);
+   if (FAILED(hr)) {
+      SetError(hDevice, hr);
+      return;
+   }
+   blit.src.resource = src->resource;
+   blit.dst.resource = dst->resource;
+   blit.src.format = blit.dst.format = format;
+   blit.mask = PIPE_MASK_RGBA;
+   blit.filter = PIPE_TEX_FILTER_NEAREST;
+   device->pipe->blit(device->pipe, &blit);
+   MarkSharedResourceWritten(device, dst->resource);
 }
 
 

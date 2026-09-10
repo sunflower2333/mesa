@@ -216,11 +216,14 @@ CreateRasterizerState(
    state.fill_front = translate_fill_mode(pRasterizerDesc->FillMode);
    state.fill_back = state.fill_front;
    state.scissor = (pRasterizerDesc->ScissorEnable ? 1 : 0);
-   state.line_smooth = (pRasterizerDesc->AntialiasedLineEnable ? 1 : 0);
+   state.line_smooth = pRasterizerDesc->AntialiasedLineEnable &&
+                       !pRasterizerDesc->MultisampleEnable;
    state.offset_units = (float)pRasterizerDesc->DepthBias;
    state.offset_scale = pRasterizerDesc->SlopeScaledDepthBias;
    state.offset_clamp = pRasterizerDesc->DepthBiasClamp;
-   state.multisample = /* pRasterizerDesc->MultisampleEnable */ 0;
+   // Since D3D10.1 this flag selects line mode, not triangle multisampling.
+   state.multisample = !CastDevice(hDevice)->d3d10_rasterization ||
+                       pRasterizerDesc->MultisampleEnable;
    state.half_pixel_center = 1;
    state.bottom_edge_rule = 0;
    state.clip_halfz = 1;
@@ -233,7 +236,7 @@ CreateRasterizerState(
    state.point_line_tri_clip = 1;
 
    state.line_width = 1.0f;
-   state.line_rectangular = 0;
+   state.line_rectangular = pRasterizerDesc->MultisampleEnable ? 1 : 0;
 
    pRasterizerState->handle = pipe->create_rasterizer_state(pipe, &state);
 }

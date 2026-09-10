@@ -1397,10 +1397,40 @@ Shader_tgsi_translate(const unsigned *code,
       }
          break;
 
-      case D3D10_SB_OPCODE_LD_MS:
-         /* XXX: We don't support multi-sampling yet, but we need to parse
-          * this opcode regardless, so we just ignore sample index operand
-          * for now */
+      case D3D10_SB_OPCODE_LD_MS: {
+         unsigned resource = opcode.src[1].base.index[0].imm;
+         assert(opcode.src[1].base.index_dim == 1);
+         assert(opcode.src[1].base.index[0].index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
+         assert(resource < SHADER_MAX_RESOURCES);
+         if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
+            if (ureg_src_is_undef(sx->samplers[resource]))
+               sx->samplers[resource] = ureg_DECL_sampler(ureg, resource);
+            struct ureg_dst coord = ureg_DECL_temporary(ureg);
+            ureg_MOV(ureg, ureg_writemask(coord, TGSI_WRITEMASK_XYZ),
+                     translate_src_operand(sx, &opcode.src[0], OF_INT));
+            ureg_MOV(ureg, ureg_writemask(coord, TGSI_WRITEMASK_W),
+                     ureg_scalar(translate_src_operand(sx, &opcode.src[2], OF_INT), TGSI_SWIZZLE_X));
+            struct ureg_dst texel = ureg_DECL_temporary(ureg);
+            struct ureg_src srcreg[2] = { ureg_src(coord), sx->samplers[resource] };
+            sample_ureg_emit(ureg, TGSI_OPCODE_TXF, 2, &opcode, texel,
+                             srcreg, sx->resources[resource].target);
+            ureg_MOV(ureg, translate_dst_operand(sx, &opcode.dst[0], opcode.saturate),
+                     ureg_swizzle(ureg_src(texel), opcode.src[1].swizzle[0],
+                                  opcode.src[1].swizzle[1], opcode.src[1].swizzle[2],
+                                  opcode.src[1].swizzle[3]));
+            ureg_release_temporary(ureg, texel);
+            ureg_release_temporary(ureg, coord);
+         } else {
+            struct ureg_src srcreg[3];
+            srcreg[0] = translate_src_operand(sx, &opcode.src[0], OF_INT);
+            srcreg[1] = translate_src_operand(sx, &opcode.src[1], OF_INT);
+            srcreg[2] = translate_src_operand(sx, &opcode.src[2], OF_INT);
+            sample_ureg_emit(ureg, TGSI_OPCODE_SAMPLE_I_MS, 3, &opcode,
+                             translate_dst_operand(sx, &opcode.dst[0], opcode.saturate),
+                             srcreg, sx->resources[resource].target);
+         }
+         break;
+      }
       case D3D10_SB_OPCODE_LD:
          if (!(st_debug & ST_DEBUG_NEW_TEX_OPS)) {
             unsigned resource = opcode.src[1].base.index[0].imm;

@@ -144,6 +144,10 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       return E_OUTOFMEMORY;
 
    pDevice->pipe = pipe;
+   pDevice->d3d10_rasterization =
+      pCreateData->Interface == D3D10_0_DDI_INTERFACE_VERSION ||
+      pCreateData->Interface == D3D10_0_x_DDI_INTERFACE_VERSION ||
+      pCreateData->Interface == D3D10_0_7_DDI_INTERFACE_VERSION;
    /* D3D starts with no input layout; the runtime need not issue a NULL bind
     * before the first vertex-ID-only draw. Resolve that state on first draw. */
    pDevice->velems_changed = true;
@@ -573,25 +577,30 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
                                    PIPE_BIND_RENDER_TARGET)) {
       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET;
       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_BLENDABLE;
+   }
 
-#if SUPPORT_MSAA
-      if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
-                                      PIPE_BIND_RENDER_TARGET)) {
-         *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
+   const bool depth = util_format_is_depth_or_stencil(format);
+   const unsigned renderBind = depth ? PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
+   // Color resolves average normalized/float samples. Integer resolve support
+   // is deliberately excluded until that separate contract is implemented.
+   if (!util_format_is_pure_integer(format)) {
+      for (unsigned samples = 2; samples <= 4; samples *= 2) {
+         if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
+                                          samples, samples, renderBind))
+            *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
       }
-#endif
    }
 
    if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
                                    PIPE_BIND_SAMPLER_VIEW)) {
       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
 
-#if SUPPORT_MSAA
-      if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 4, 4,
-                                      PIPE_BIND_RENDER_TARGET)) {
-         *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
+      for (unsigned samples = 2; samples <= 4; samples *= 2) {
+         if (!util_format_is_pure_integer(format) &&
+             screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
+                                           samples, samples, renderBind | PIPE_BIND_SAMPLER_VIEW))
+            *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
       }
-#endif
    }
 }
 
@@ -616,9 +625,20 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
 {
    //LOG_ENTRYPOINT();
 
-   /* The DDI requires one quality level for single-sample resources even
-    * while multisample rendering is disabled. Zero rejects ordinary targets. */
+   /* The DDI requires one quality level for single-sample resources. */
    *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
+   if (SampleCount != 2 && SampleCount != 4)
+      return;
+
+   struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
+   enum pipe_format format = FormatTranslate(Format, false);
+   if (format == PIPE_FORMAT_NONE || util_format_is_pure_integer(format))
+      return;
+   const unsigned bind = util_format_is_depth_or_stencil(format) ?
+                            PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
+   if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
+                                    SampleCount, SampleCount, bind))
+      *pNumQualityLevels = 1;
 }
 
 
