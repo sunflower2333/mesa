@@ -268,6 +268,9 @@ jobs:
             '-Dllvm=disabled',
             '-Dshader-cache=disabled',
             '-Dzlib=enabled',
+            # A shared z-1.dll collides with the native ARM64 DLL on PATH.
+            # Keep compression inside the EC ICD/UMD for normal loader use.
+            '-Dzlib:default_library=static',
             '-Dzstd=disabled',
             '-Db_vscrt=static_from_buildtype',
             '-Dtools=[]',
@@ -364,7 +367,7 @@ jobs:
           $buildDir = Join-Path $env:RUNNER_TEMP 'mesa-d3d10-zink-arm64ec'
           $stageDir = 'arm64ec-runtime'
           New-Item -ItemType Directory $stageDir | Out-Null
-          foreach ($name in @('viogpud3d_zink.dll', 'vulkan_freedreno.dll', 'z-1.dll')) {
+          foreach ($name in @('viogpud3d_zink.dll', 'vulkan_freedreno.dll')) {
             $files = @(Get-ChildItem $buildDir -Recurse -File -Filter $name)
             if ($files.Count -ne 1) { throw "Expected exactly one $name" }
             python bin/verify-arm64ec-pe.py $files[0].FullName
@@ -374,6 +377,9 @@ jobs:
             $imports
             if ($imports -match '(?i)\b(?:msvcp|vcruntime)[0-9_]*\.dll\b') {
               throw "Unexpected dynamic CRT dependency: $name"
+            }
+            if ($imports -match '(?i)\b(?:z-1|zlib1)\.dll\b') {
+              throw "ARM64EC compression must be statically linked: $name"
             }
             Copy-Item $files[0].FullName $stageDir
             $pdb = [IO.Path]::ChangeExtension($files[0].FullName, '.pdb')
