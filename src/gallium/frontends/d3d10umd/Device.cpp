@@ -582,29 +582,30 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
    if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
                                    PIPE_BIND_RENDER_TARGET)) {
       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET;
-      *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_BLENDABLE;
+      if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
+                                      PIPE_BIND_RENDER_TARGET | PIPE_BIND_BLENDABLE))
+         *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_BLENDABLE;
    }
 
    const bool depth = util_format_is_depth_or_stencil(format);
    const unsigned renderBind = depth ? PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
-   // Color resolves average normalized/float samples. Integer resolve support
-   // is deliberately excluded until that separate contract is implemented.
-   if (!util_format_is_pure_integer(format)) {
-      for (unsigned samples = 2; samples <= 4; samples *= 2) {
-         if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
-                                          samples, samples, renderBind))
-            *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
-      }
+   // Integer surfaces support MSAA rendering and individual sample loads.
+   // Averaging resolves are a separate operation, rejected in Resource.cpp.
+   for (unsigned samples = 2; samples <= 4; samples *= 2) {
+      if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
+                                       samples, samples, renderBind))
+         *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
    }
 
    if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
                                    PIPE_BIND_SAMPLER_VIEW)) {
-      *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
+      // SHADER_SAMPLE promises filtering, not just access via Load/LD_MS.
+      if (!util_format_is_pure_integer(format))
+         *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
 
       for (unsigned samples = 2; samples <= 4; samples *= 2) {
-         if (!util_format_is_pure_integer(format) &&
-             screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
-                                           samples, samples, renderBind | PIPE_BIND_SAMPLER_VIEW))
+         if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
+                                          samples, samples, renderBind | PIPE_BIND_SAMPLER_VIEW))
             *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
       }
    }
@@ -637,7 +638,7 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
    if (SampleCount == 2 || SampleCount == 4) {
       struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
       enum pipe_format format = FormatTranslate(Format, false);
-      if (format != PIPE_FORMAT_NONE && !util_format_is_pure_integer(format)) {
+      if (format != PIPE_FORMAT_NONE) {
          const unsigned bind = util_format_is_depth_or_stencil(format) ?
                                   PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
          if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,

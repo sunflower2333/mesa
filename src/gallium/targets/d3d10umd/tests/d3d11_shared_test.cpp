@@ -1153,10 +1153,15 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
    bool valid = true;
    const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM,
       DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
-      DXGI_FORMAT_D24_UNORM_S8_UINT};
+      DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_R32G32B32A32_UINT,
+      DXGI_FORMAT_R32G32B32A32_SINT};
    for (DXGI_FORMAT format : formats) {
       UINT caps = 0;
       Check(d.device->CheckFormatSupport(format, &caps), "CheckFormatSupport");
+      if (format == DXGI_FORMAT_R32G32B32A32_UINT || format == DXGI_FORMAT_R32G32B32A32_SINT)
+         Check(!(caps & (D3D11_FORMAT_SUPPORT_BLENDABLE | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE |
+                         D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE)) ? S_OK : E_FAIL,
+               "Integer formats do not filter, blend or average samples");
       printf("format=%u caps=0x%08x render_target=%d msaa_target=%d msaa_resolve=%d\n",
              unsigned(format), caps, !!(caps & D3D11_FORMAT_SUPPORT_RENDER_TARGET),
              !!(caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET),
@@ -1174,6 +1179,8 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
    Check(valid ? S_OK : E_FAIL, "Single-sample quality contract");
    const DXGI_FORMAT families[][2] = {
       {DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_FLOAT},
+      {DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_UINT},
+      {DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_SINT},
       {DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_FLOAT},
       {DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT},
    };
@@ -1235,18 +1242,29 @@ static void VerifyMsaaPixels(Device &d, ID3D11Texture2D *texture, UINT subresour
             expected[2] = red;
          }
          bool wrong = false;
-         for (UINT c = 0; c < 4; ++c) {
-            if (desc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
-               const auto *values = reinterpret_cast<const float *>(row);
-               wrong |= values[x * 4 + c] != expected[c];
-            } else if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-               const auto *half = reinterpret_cast<const uint16_t *>(row);
-               const uint16_t wanted = expected[c] == 1 ? 0x3c00 :
-                                        expected[c] == 0.5f ? 0x3800 : 0;
-               wrong |= half[x * 4 + c] != wanted;
-            } else {
-               const int wanted = int(expected[c] * 255 + 0.5f);
-               wrong |= abs(int(row[x * 4 + c]) - wanted) > 1;
+         if (desc.Format == DXGI_FORMAT_R32G32B32A32_UINT) {
+            const uint32_t wanted[] = {uint32_t(checker) * 0xfedcba98u,
+               uint32_t((sample >> 1) & 1) * 16777217u,
+               uint32_t(sample & 1) * 65537u, 0x89abcdefu};
+            wrong = memcmp(row + x * sizeof(wanted), wanted, sizeof(wanted)) != 0;
+         } else if (desc.Format == DXGI_FORMAT_R32G32B32A32_SINT) {
+            const int32_t wanted[] = {int32_t(checker) * -987654321,
+               ((sample >> 1) & 1) * 16777217, (sample & 1) * -12345, -1};
+            wrong = memcmp(row + x * sizeof(wanted), wanted, sizeof(wanted)) != 0;
+         } else {
+            for (UINT c = 0; c < 4; ++c) {
+               if (desc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+                  const auto *values = reinterpret_cast<const float *>(row);
+                  wrong |= values[x * 4 + c] != expected[c];
+               } else if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+                  const auto *half = reinterpret_cast<const uint16_t *>(row);
+                  const uint16_t wanted = expected[c] == 1 ? 0x3c00 :
+                                           expected[c] == 0.5f ? 0x3800 : 0;
+                  wrong |= half[x * 4 + c] != wanted;
+               } else {
+                  const int wanted = int(expected[c] * 255 + 0.5f);
+                  wrong |= abs(int(row[x * 4 + c]) - wanted) > 1;
+               }
             }
          }
          mismatches += wrong;
@@ -1293,13 +1311,33 @@ static void MultisampleTest(IDXGIAdapter *adapter)
    d.context->RSSetState(rs.Get());
    const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM,
       DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
-      DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R32G32B32A32_TYPELESS};
+      DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R32G32B32A32_TYPELESS,
+      DXGI_FORMAT_R32G32B32A32_UINT, DXGI_FORMAT_R32G32B32A32_SINT};
    const UINT counts[] = {2, 4};
    for (DXGI_FORMAT storage : formats) {
-         const DXGI_FORMAT format = storage == DXGI_FORMAT_R8G8B8A8_TYPELESS ?
-                                  DXGI_FORMAT_R8G8B8A8_UNORM :
-                                     storage == DXGI_FORMAT_R32G32B32A32_TYPELESS ?
-                                        DXGI_FORMAT_R32G32B32A32_FLOAT : storage;
+      const DXGI_FORMAT format = storage == DXGI_FORMAT_R8G8B8A8_TYPELESS ?
+                                 DXGI_FORMAT_R8G8B8A8_UNORM :
+                                    storage == DXGI_FORMAT_R32G32B32A32_TYPELESS ?
+                                       DXGI_FORMAT_R32G32B32A32_FLOAT : storage;
+      const bool uintFormat = format == DXGI_FORMAT_R32G32B32A32_UINT;
+      const bool sintFormat = format == DXGI_FORMAT_R32G32B32A32_SINT;
+      const bool integer = uintFormat || sintFormat;
+      const char *valueType = uintFormat ? "uint4" : sintFormat ? "int4" : "float4";
+      ComPtr<ID3D11PixelShader> integerDraw;
+      if (integer) {
+         const char *source = uintFormat ?
+            "cbuffer Params:register(b0){uint4 choice;}"
+            "uint4 main(float4 p:SV_Position):SV_Target{"
+            "return uint4((choice.x&1)*65537u,((choice.x>>1)&1)*16777217u,"
+            "((uint(p.x)^uint(p.y))&1)*0xfedcba98u,0x89abcdefu);}" :
+            "cbuffer Params:register(b0){uint4 choice;}"
+            "int4 main(float4 p:SV_Position):SV_Target{"
+            "return int4(int(choice.x&1)*-12345,int((choice.x>>1)&1)*16777217,"
+            "int((uint(p.x)^uint(p.y))&1)*-987654321,-1);}";
+         auto code = CompileMsaaShader(source, "ps_4_1");
+         Check(d.device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), NULL, &integerDraw),
+               "Create integer MSAA PS");
+      }
       for (UINT count : counts) {
          printf("MSAA case storage=%u typed=%u samples=%u\n", unsigned(storage), unsigned(format), count);
          UINT quality = 0, caps = 0;
@@ -1341,7 +1379,7 @@ static void MultisampleTest(IDXGIAdapter *adapter)
          d.context->OMSetRenderTargets(1, &rtv, NULL);
          const float black[] = {0, 0, 0, 0};
          d.context->ClearRenderTargetView(rtv, black);
-         d.context->PSSetShader(draw.Get(), NULL, 0);
+         d.context->PSSetShader(integer ? integerDraw.Get() : draw.Get(), NULL, 0);
          for (UINT sample = 0; sample < count; ++sample) {
             const UINT params[] = {sample, 0, 0, 0};
             d.context->UpdateSubresource(cb, 0, NULL, params, 0, 0);
@@ -1349,13 +1387,15 @@ static void MultisampleTest(IDXGIAdapter *adapter)
             d.context->Draw(3, 0);
          }
          d.context->OMSetRenderTargets(0, NULL, NULL);
-         d.context->ResolveSubresource(resolved.Get(), 3, source.Get(), 1, format);
-         VerifyMsaaPixels(d, resolved.Get(), 3, count, -1, "resolve to array1/mip1");
+         if (!integer) {
+            d.context->ResolveSubresource(resolved.Get(), 3, source.Get(), 1, format);
+            VerifyMsaaPixels(d, resolved.Get(), 3, count, -1, "resolve to array1/mip1");
+         }
          char loadSource[512];
-         sprintf_s(loadSource, "Texture2DMSArray<float4,%u> tex:register(t0);"
+         sprintf_s(loadSource, "Texture2DMSArray<%s,%u> tex:register(t0);"
             "cbuffer Params:register(b0){uint4 choice;}"
-            "float4 main(float4 p:SV_Position):SV_Target{"
-            "return tex.Load(int3(int2(p.xy)-int2(1,0),1),choice.x,int2(1,0)).bgra;}", count);
+            "%s main(float4 p:SV_Position):SV_Target{"
+            "return tex.Load(int3(int2(p.xy)-int2(1,0),1),choice.x,int2(1,0)).bgra;}", valueType, count, valueType);
          auto loadCode = CompileMsaaShader(loadSource, "ps_4_1");
          ComPtr<ID3D11PixelShader> load;
          Check(d.device->CreatePixelShader(loadCode->GetBufferPointer(), loadCode->GetBufferSize(), NULL, &load), "Create LD_MS PS");
