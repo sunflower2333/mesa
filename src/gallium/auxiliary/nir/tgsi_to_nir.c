@@ -1393,8 +1393,12 @@ ttn_tex(struct ttn_compile *c, nir_def **src)
       src.swizzle[2] = tex_offset->SwizzleZ;
       src.swizzle[3] = TGSI_SWIZZLE_W;
 
-      instr->src[src_number] = nir_tex_src_for_ssa(nir_tex_src_offset,
-                                                   nir_mov_alu(b, src, nir_tex_instr_src_size(instr, src_number)));
+      /* Set the kind before querying its width. Array offsets exclude the
+       * layer coordinate, unlike the zero-initialized coord source kind.
+       */
+      instr->src[src_number].src_type = nir_tex_src_offset;
+      instr->src[src_number].src =
+         nir_src_for_ssa(nir_mov_alu(b, src, nir_tex_instr_src_size(instr, src_number)));
       src_number++;
    }
 

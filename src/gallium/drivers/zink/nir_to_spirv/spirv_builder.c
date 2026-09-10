@@ -1205,10 +1205,6 @@ spirv_builder_emit_image_fetch(struct spirv_builder *b,
       extra_operands[num_extra_operands++] = src->lod;
       operand_mask |= SpvImageOperandsLodMask;
    }
-   if (src->sample) {
-      extra_operands[num_extra_operands++] = src->sample;
-      operand_mask |= SpvImageOperandsSampleMask;
-   }
    assert(!(src->const_offset && src->offset));
    if (src->const_offset) {
       extra_operands[num_extra_operands++] = src->const_offset;
@@ -1216,6 +1212,11 @@ spirv_builder_emit_image_fetch(struct spirv_builder *b,
    } else if (src->offset) {
       extra_operands[num_extra_operands++] = src->offset;
       operand_mask |= SpvImageOperandsOffsetMask;
+   }
+   /* Image operands follow mask-bit order: offsets precede Sample. */
+   if (src->sample) {
+      extra_operands[num_extra_operands++] = src->sample;
+      operand_mask |= SpvImageOperandsSampleMask;
    }
    if (src->sparse)
       result_type = sparse_wrap_result_type(b, result_type);
