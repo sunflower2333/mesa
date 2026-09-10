@@ -41,6 +41,9 @@ struct Device {
    ComPtr<ID3D11DeviceContext> context;
 };
 
+// Reference behavior only. This mode never counts as VIOGPU acceptance.
+static bool warpControl;
+
 static void CheckDevice(Device &d, const char *operation)
 {
    HRESULT reason = d.device->GetDeviceRemovedReason();
@@ -67,7 +70,8 @@ static Device CreateDevice(IDXGIAdapter *adapter)
       D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
    };
    D3D_FEATURE_LEVEL level;
-   Check(D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL,
+   Check(D3D11CreateDevice(warpControl ? NULL : adapter,
+                          warpControl ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_UNKNOWN, NULL,
                           D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, ARRAYSIZE(levels),
                           D3D11_SDK_VERSION, &d.device, &level, &d.context),
          "D3D11CreateDevice");
@@ -75,8 +79,8 @@ static Device CreateDevice(IDXGIAdapter *adapter)
    HMODULE umd = GetModuleHandleW(L"viogpud3d.dll");
    if (umd)
       GetModuleFileNameA(umd, path, ARRAYSIZE(path));
-   printf("device: feature_level=0x%x umd=%s\n", level, path);
-   if (!umd)
+   printf("device: feature_level=0x%x umd=%s reference_warp=%d\n", level, path, warpControl);
+   if (!warpControl && !umd)
       Check(E_FAIL, "VIOGPU UMD must be loaded");
    return d;
 }
@@ -247,8 +251,9 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter, const char *mode)
       producer.context->Flush();
       Check(producerMutex->ReleaseSync(1), "Reuse producer release");
       Acquire(consumerMutex.Get(), 1, "Reuse consumer acquire");
-      if (unbind)
-         consumer.context->PSSetShaderResources(0, 1, &srv);
+      // ReleaseSync unsets shared resources from the runtime pipeline. Keep
+      // the same SRV object, but bind it anew after every ownership acquire.
+      consumer.context->PSSetShaderResources(0, 1, &srv);
       D3D11_VIEWPORT viewport = {(float)(frame * 64), 0, 64, 64, 0, 1};
       consumer.context->RSSetViewports(1, &viewport);
       consumer.context->Draw(3, 0);
@@ -1092,7 +1097,8 @@ int main(int argc, char **argv)
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
        strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") &&
-       strcmp(mode, "--sample-reuse-unbind") && strcmp(mode, "--sample-reuse-wait") && strcmp(mode, "--buffer-reuse") &&
+       strcmp(mode, "--sample-reuse-unbind") && strcmp(mode, "--sample-reuse-wait") &&
+       strcmp(mode, "--sample-reuse-warp") && strcmp(mode, "--buffer-reuse") &&
        strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") &&
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
@@ -1103,12 +1109,13 @@ int main(int argc, char **argv)
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large|--buffer-signatures\n");
-      printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait\n");
+      printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait|--sample-reuse-warp\n");
       return 2;
    }
    DWORD session;
    ProcessIdToSessionId(GetCurrentProcessId(), &session);
    printf("mode=%s session=%lu pid=%lu\n", mode, session, GetCurrentProcessId());
+   warpControl = !strcmp(mode, "--sample-reuse-warp");
    try {
       if (!strcmp(mode, "--buffer-signatures")) {
          BufferSignatureTest();
@@ -1135,7 +1142,7 @@ int main(int argc, char **argv)
             break;
          }
       }
-      if (!adapter)
+      if (!adapter && !warpControl)
          Check(E_FAIL, "VIOGPU hardware adapter required");
       if (child)
          ProcessConsumer(adapter.Get(), ParseHandle(argv[2]), ParseHandle(argv[3]), ParseHandle(argv[4]));
@@ -1146,7 +1153,7 @@ int main(int argc, char **argv)
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--sample-reuse") || !strcmp(mode, "--sample-reuse-unbind") ||
-               !strcmp(mode, "--sample-reuse-wait"))
+               !strcmp(mode, "--sample-reuse-wait") || warpControl)
          SharedSampleReuseTest(adapter.Get(), mode);
       else if (!strncmp(mode, "--buffer-", 9))
          DynamicBufferReuseTest(adapter.Get(), mode);
@@ -1158,7 +1165,8 @@ int main(int argc, char **argv)
          CompositionTimingSample();
       else
          SharedTest(adapter.Get(), mode);
-      printf("RESULT: PASS mode=%s\n", mode);
+      printf("RESULT: PASS mode=%s%s\n", mode,
+             warpControl ? " reference WARP only; not VIOGPU validation" : "");
       return 0;
    } catch (HRESULT hr) {
       printf("RESULT: FAIL mode=%s hr=0x%08lx\n", mode, (unsigned long)hr);
