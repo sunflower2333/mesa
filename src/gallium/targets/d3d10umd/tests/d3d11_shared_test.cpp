@@ -1478,9 +1478,9 @@ static void TextureResultSwizzleTest(IDXGIAdapter *adapter)
    ComPtr<ID3D11SamplerState> sampler;
    Check(d.device->CreateSamplerState(&sd,&sampler), "Create result sampler");
    ID3D11SamplerState *ss=sampler.Get();d.context->PSSetSamplers(0,1,&ss);
-   const char *ops[]={"t.Sample(s,float2(0.5,0.5))","t.SampleLevel(s,float2(0.5,0.5),0)",
-                      "t.SampleBias(s,float2(0.5,0.5),0)","t.SampleGrad(s,float2(0.5,0.5),float2(0,0),float2(0,0))",
-                      "t.Load(int3(0,0,0))"};
+   const char *ops[]={"t.Sample(s,p)","t.SampleLevel(s,p,0)",
+                      "t.SampleBias(s,p,0)","t.SampleGrad(s,p,float2(0,0),float2(0,0))",
+                      "t.Load(int3(int2(p*0),0))"};
    const char *swizzles[]={"bgra","rrrr"};
    unsigned total=0,failed=0;
    for (bool redOnly : {false,true}) {
@@ -1493,12 +1493,18 @@ static void TextureResultSwizzleTest(IDXGIAdapter *adapter)
       Check(d.device->CreateShaderResourceView(input.Get(),NULL,&view), "Create result SRV");
       ID3D11ShaderResourceView *srv=view.Get();d.context->PSSetShaderResources(0,1,&srv);
       for(unsigned op=0;op<ARRAYSIZE(ops);op++)for(unsigned sw=0;sw<ARRAYSIZE(swizzles);sw++) {
-         char text[512];snprintf(text,sizeof(text),"Texture2D<float4> t:register(t0);SamplerState s:register(s0);float4 main():SV_Target{return %s.%s;}",ops[op],swizzles[sw]);
+         char text[1024];
+         // Different coordinates stop the compiler from merging four scalar
+         // samples into one vector sample followed by a MOV swizzle.
+         snprintf(text,sizeof(text),"Texture2D<float4> t:register(t0);SamplerState s:register(s0);"
+            "float4 get(float2 p){return %s;}float4 main():SV_Target{return float4("
+            "get(float2(.2,.2)).%c,get(float2(.4,.4)).%c,get(float2(.6,.6)).%c,get(float2(.8,.8)).%c);}",
+            ops[op],swizzles[sw][0],swizzles[sw][1],swizzles[sw][2],swizzles[sw][3]);
          auto code=compile(text,"ps_4_0");
          ComPtr<ID3DBlob> assembly;
          Check(D3DDisassemble(code->GetBufferPointer(),code->GetBufferSize(),0,NULL,&assembly), "Disassemble result PS");
          const char *asmText=(const char *)assembly->GetBufferPointer();
-         const bool encoded=strstr(asmText,sw==0?"t0.zyxw":"t0.xxxx")!=NULL;
+         const bool encoded=strstr(asmText,sw==0?"t0.zzzz":"t0.xxxx")!=NULL;
          printf("RESULT_SWIZZLE input=%s op=%u swizzle=%s encoded=%d\n%s\n",redOnly?"R8":"RGBA8",op,swizzles[sw],encoded,asmText);
          Check(encoded?S_OK:E_FAIL,"Compiler must encode resource-result swizzle");
          ComPtr<ID3D11PixelShader> ps;
