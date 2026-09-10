@@ -182,6 +182,99 @@ static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[
    d.context->ClearState();
 }
 
+static void SharedSampleReuseTest(IDXGIAdapter *adapter)
+{
+   // Reuse one sampled shared image across CPU/GPU ownership transitions.
+   // Read the consumer only after all draws: a readback between draws would
+   // introduce transfer barriers and hide a missing host-to-sampler dependency.
+   Device producer = CreateDevice(adapter), consumer = CreateDevice(adapter);
+   D3D11_TEXTURE2D_DESC desc = {};
+   desc.Width = desc.Height = 64;
+   desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+   desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+   desc.Usage = D3D11_USAGE_DEFAULT;
+   desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+   desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+   ComPtr<ID3D11Texture2D> texture, opened, output;
+   Check(producer.device->CreateTexture2D(&desc, NULL, &texture), "Create reused shared texture");
+   ComPtr<IDXGIResource> shared;
+   Check(texture.As(&shared), "Reused IDXGIResource");
+   HANDLE handle = NULL;
+   Check(shared->GetSharedHandle(&handle), "Reused shared handle");
+   Check(consumer.device->OpenSharedResource(handle, IID_PPV_ARGS(&opened)), "Open reused texture");
+   ComPtr<IDXGIKeyedMutex> producerMutex, consumerMutex;
+   Check(texture.As(&producerMutex), "Reused producer mutex");
+   Check(opened.As(&consumerMutex), "Reused consumer mutex");
+   ComPtr<ID3D11RenderTargetView> producerTarget, consumerTarget;
+   Check(producer.device->CreateRenderTargetView(texture.Get(), NULL, &producerTarget), "Reused producer RTV");
+   desc.Width *= ARRAYSIZE(colors);
+   desc.MiscFlags = 0;
+   Check(consumer.device->CreateTexture2D(&desc, NULL, &output), "Create stripe output");
+   Check(consumer.device->CreateRenderTargetView(output.Get(), NULL, &consumerTarget), "Stripe output RTV");
+   ComPtr<ID3D11ShaderResourceView> input;
+   Check(consumer.device->CreateShaderResourceView(opened.Get(), NULL, &input), "Reused shared SRV");
+   const char *vsSource = "float4 main(uint id:SV_VertexID):SV_Position {"
+      "float2 p=float2((id<<1)&2,id&2);return float4(p*float2(2,-2)+float2(-1,1),0,1);}";
+   const char *psSource = "Texture2D<float4> tex:register(t0);"
+      "float4 main(float4 p:SV_Position):SV_Target{return tex.Load(int3((int2)p.xy & 63,0));}";
+   ComPtr<ID3DBlob> vsCode, psCode, errors;
+   Check(D3DCompile(vsSource, strlen(vsSource), NULL, NULL, NULL, "main", "vs_4_1",
+                    D3DCOMPILE_ENABLE_STRICTNESS, 0, &vsCode, &errors), "Compile reuse VS");
+   errors.Reset();
+   Check(D3DCompile(psSource, strlen(psSource), NULL, NULL, NULL, "main", "ps_4_1",
+                    D3DCOMPILE_ENABLE_STRICTNESS, 0, &psCode, &errors), "Compile reuse PS");
+   ComPtr<ID3D11VertexShader> vs;
+   ComPtr<ID3D11PixelShader> ps;
+   Check(consumer.device->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), NULL, &vs), "Create reuse VS");
+   Check(consumer.device->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), NULL, &ps), "Create reuse PS");
+   ID3D11RenderTargetView *rtv = consumerTarget.Get();
+   ID3D11ShaderResourceView *srv = input.Get();
+   consumer.context->OMSetRenderTargets(1, &rtv, NULL);
+   consumer.context->PSSetShaderResources(0, 1, &srv);
+   consumer.context->VSSetShader(vs.Get(), NULL, 0);
+   consumer.context->PSSetShader(ps.Get(), NULL, 0);
+   consumer.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   for (unsigned frame = 0; frame < ARRAYSIZE(colors); ++frame) {
+      Acquire(producerMutex.Get(), 0, "Reuse producer acquire");
+      producer.context->ClearRenderTargetView(producerTarget.Get(), colors[frame]);
+      producer.context->Flush();
+      Check(producerMutex->ReleaseSync(1), "Reuse producer release");
+      Acquire(consumerMutex.Get(), 1, "Reuse consumer acquire");
+      D3D11_VIEWPORT viewport = {(float)(frame * 64), 0, 64, 64, 0, 1};
+      consumer.context->RSSetViewports(1, &viewport);
+      consumer.context->Draw(3, 0);
+      consumer.context->Flush();
+      Check(consumerMutex->ReleaseSync(0), "Reuse consumer release");
+   }
+   desc.Usage = D3D11_USAGE_STAGING;
+   desc.BindFlags = 0;
+   desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+   ComPtr<ID3D11Texture2D> readback;
+   Check(consumer.device->CreateTexture2D(&desc, NULL, &readback), "Create stripe readback");
+   consumer.context->CopyResource(readback.Get(), output.Get());
+   D3D11_MAPPED_SUBRESOURCE map = {};
+   CheckDeviceCall(consumer, consumer.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &map), "Read all stripes");
+   unsigned mismatches = 0;
+   for (UINT y = 0; y < desc.Height; ++y) {
+      const unsigned char *row = (const unsigned char *)map.pData + y * map.RowPitch;
+      for (UINT x = 0; x < desc.Width; ++x) {
+         const float *color = colors[x / 64];
+         const unsigned char expected[] = {
+            (unsigned char)(255 * color[2]), (unsigned char)(255 * color[1]),
+            (unsigned char)(255 * color[0]), (unsigned char)(255 * color[3]),
+         };
+         mismatches += memcmp(row + x * 4, expected, sizeof expected) != 0;
+      }
+   }
+   consumer.context->Unmap(readback.Get(), 0);
+   printf("reused shared sampling: mismatches=%u/%u\n", mismatches, desc.Width * desc.Height);
+   consumer.context->ClearState();
+   if (mismatches)
+      Check(E_FAIL, "Repeated shared sampling contents");
+   CheckDevice(producer, "Reuse producer final");
+   CheckDevice(consumer, "Reuse consumer final");
+}
+
 static void ShaderLifetimeTest(IDXGIAdapter *adapter)
 {
    for (unsigned iteration = 0; iteration < 8; ++iteration) {
@@ -692,10 +785,10 @@ int main(int argc, char **argv)
    if (!child && ((argc != 1 && argc != 2) ||
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
-       strcmp(mode, "--sample") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
+       strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       return 2;
    }
    DWORD session;
@@ -732,6 +825,8 @@ int main(int argc, char **argv)
          CompositionTest(adapter.Get());
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
+      else if (!strcmp(mode, "--sample-reuse"))
+         SharedSampleReuseTest(adapter.Get());
       else if (!strcmp(mode, "--timestamp"))
          TimestampTest(adapter.Get());
       else if (!strcmp(mode, "--query-poll"))

@@ -2894,6 +2894,25 @@ zink_image_map(struct pipe_context *pctx,
       ptr = map_resource(screen, staging_res);
    } else {
       assert(res->linear);
+      if (!(usage & PIPE_MAP_UNSYNCHRONIZED)) {
+         /* Waiting for the last draw alone does not make its writes visible
+          * to the host, nor invalidate GPU caches after a CPU write. Move to
+          * GENERAL with explicit host access before exposing the mapping.
+          * This also retires the initial UNDEFINED transition before the CPU
+          * writes pixels that the next draw must preserve.
+          */
+         VkAccessFlags access = 0;
+         if (usage & PIPE_MAP_READ)
+            access |= VK_ACCESS_HOST_READ_BIT;
+         if (usage & PIPE_MAP_WRITE)
+            access |= VK_ACCESS_HOST_WRITE_BIT;
+         zink_resource_image_barrier(ctx, res, VK_IMAGE_LAYOUT_GENERAL,
+                                     access, VK_PIPELINE_STAGE_HOST_BIT);
+         /* Include the new barrier in the wait, even if the image's previous
+          * resource usage already completed before this map.
+          */
+         zink_fence_wait(pctx);
+      }
       ptr = map_resource(screen, res);
       if (!ptr)
          goto fail;
@@ -2923,11 +2942,13 @@ zink_image_map(struct pipe_context *pctx,
                         box->z * srl.depthPitch +
                         (box->y / desc->block.height) * srl.rowPitch +
                         (box->x / desc->block.width) * (desc->block.bits / 8);
-      if (!res->obj->coherent) {
-         VkDeviceSize size = (VkDeviceSize)box->width * box->height * desc->block.bits / 8;
-         VkMappedMemoryRange range = zink_resource_init_mem_range(screen, res->obj, res->obj->offset + offset, size);
-         if (VKSCR(FlushMappedMemoryRanges)(screen->dev, 1, &range) != VK_SUCCESS) {
-            mesa_loge("ZINK: vkFlushMappedMemoryRanges failed");
+      if (!res->obj->coherent && (usage & PIPE_MAP_READ)) {
+         /* Cover row/layer padding as well as texels. Writes are flushed on
+          * unmap; reads invalidate only after the GPU-to-host dependency.
+          */
+         VkMappedMemoryRange range = zink_resource_init_mem_range(screen, res->obj, res->obj->offset, res->obj->size);
+         if (VKSCR(InvalidateMappedMemoryRanges)(screen->dev, 1, &range) != VK_SUCCESS) {
+            mesa_loge("ZINK: vkInvalidateMappedMemoryRanges failed");
          }
       }
       ptr = ((uint8_t *)ptr) + offset;
