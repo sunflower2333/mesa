@@ -15,6 +15,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cwchar>
+#include <initializer_list>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -1439,6 +1440,91 @@ static void MultisampleTest(IDXGIAdapter *adapter)
    }
 }
 
+static void TextureResultSwizzleTest(IDXGIAdapter *adapter)
+{
+   Device d = CreateDevice(adapter);
+   auto compile = [](const char *text, const char *profile) {
+      ComPtr<ID3DBlob> code, errors;
+      HRESULT hr = D3DCompile(text, strlen(text), NULL, NULL, NULL, "main", profile,
+                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+      if (errors) printf("%s\n", (const char *)errors->GetBufferPointer());
+      Check(hr, "Compile texture-result shader");
+      return code;
+   };
+   auto vsCode = compile("float4 main(uint id:SV_VertexID):SV_Position {"
+                         "return float4(id==1?3:-1,id==2?3:-1,0,1);}", "vs_4_0");
+   ComPtr<ID3D11VertexShader> vs;
+   Check(d.device->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), NULL, &vs), "Create result VS");
+   d.context->VSSetShader(vs.Get(), NULL, 0);
+   d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   D3D11_RASTERIZER_DESC raster = {};
+   raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE; raster.DepthClipEnable = TRUE;
+   ComPtr<ID3D11RasterizerState> rs;
+   Check(d.device->CreateRasterizerState(&raster, &rs), "Create result rasterizer");
+   d.context->RSSetState(rs.Get());
+   D3D11_VIEWPORT viewport = {0,0,4,4,0,1}; d.context->RSSetViewports(1,&viewport);
+   D3D11_TEXTURE2D_DESC td = {};
+   td.Width=4;td.Height=4;td.MipLevels=1;td.ArraySize=1;td.SampleDesc.Count=1;
+   td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_RENDER_TARGET;
+   ComPtr<ID3D11Texture2D> output, staging;
+   Check(d.device->CreateTexture2D(&td,NULL,&output), "Create result target");
+   ComPtr<ID3D11RenderTargetView> target;
+   Check(d.device->CreateRenderTargetView(output.Get(),NULL,&target), "Create result RTV");
+   ID3D11RenderTargetView *rt=target.Get();d.context->OMSetRenderTargets(1,&rt,NULL);
+   td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+   Check(d.device->CreateTexture2D(&td,NULL,&staging), "Create result staging");
+   D3D11_SAMPLER_DESC sd={};sd.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+   sd.AddressU=sd.AddressV=sd.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sd.MaxLOD=D3D11_FLOAT32_MAX;
+   ComPtr<ID3D11SamplerState> sampler;
+   Check(d.device->CreateSamplerState(&sd,&sampler), "Create result sampler");
+   ID3D11SamplerState *ss=sampler.Get();d.context->PSSetSamplers(0,1,&ss);
+   const char *ops[]={"t.Sample(s,float2(0.5,0.5))","t.SampleLevel(s,float2(0.5,0.5),0)",
+                      "t.SampleBias(s,float2(0.5,0.5),0)","t.SampleGrad(s,float2(0.5,0.5),float2(0,0),float2(0,0))",
+                      "t.Load(int3(0,0,0))"};
+   const char *swizzles[]={"bgra","rrrr"};
+   unsigned total=0,failed=0;
+   for (bool redOnly : {false,true}) {
+      const unsigned char source[]={32,64,128,192};
+      td.Width=td.Height=1;td.Usage=D3D11_USAGE_IMMUTABLE;td.CPUAccessFlags=0;
+      td.BindFlags=D3D11_BIND_SHADER_RESOURCE;td.Format=redOnly?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
+      D3D11_SUBRESOURCE_DATA data={source,redOnly?1u:4u,0};
+      ComPtr<ID3D11Texture2D> input;ComPtr<ID3D11ShaderResourceView> view;
+      Check(d.device->CreateTexture2D(&td,&data,&input), "Create result input");
+      Check(d.device->CreateShaderResourceView(input.Get(),NULL,&view), "Create result SRV");
+      ID3D11ShaderResourceView *srv=view.Get();d.context->PSSetShaderResources(0,1,&srv);
+      for(unsigned op=0;op<ARRAYSIZE(ops);op++)for(unsigned sw=0;sw<ARRAYSIZE(swizzles);sw++) {
+         char text[512];snprintf(text,sizeof(text),"Texture2D<float4> t:register(t0);SamplerState s:register(s0);float4 main():SV_Target{return %s.%s;}",ops[op],swizzles[sw]);
+         auto code=compile(text,"ps_4_0");
+         ComPtr<ID3DBlob> assembly;
+         Check(D3DDisassemble(code->GetBufferPointer(),code->GetBufferSize(),0,NULL,&assembly), "Disassemble result PS");
+         const char *asmText=(const char *)assembly->GetBufferPointer();
+         const bool encoded=strstr(asmText,sw==0?"t0.zyxw":"t0.xxxx")!=NULL;
+         printf("RESULT_SWIZZLE input=%s op=%u swizzle=%s encoded=%d\n%s\n",redOnly?"R8":"RGBA8",op,swizzles[sw],encoded,asmText);
+         Check(encoded?S_OK:E_FAIL,"Compiler must encode resource-result swizzle");
+         ComPtr<ID3D11PixelShader> ps;
+         Check(d.device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),NULL,&ps), "Create result PS");
+         const float clear[]={1,0,1,0};d.context->ClearRenderTargetView(target.Get(),clear);
+         d.context->PSSetShader(ps.Get(),NULL,0);d.context->Draw(3,0);
+         d.context->CopyResource(staging.Get(),output.Get());
+         D3D11_MAPPED_SUBRESOURCE map={};Check(d.context->Map(staging.Get(),0,D3D11_MAP_READ,0,&map),"Map result pixels");
+         unsigned char original[]={32,(unsigned char)(redOnly?0:64),(unsigned char)(redOnly?0:128),(unsigned char)(redOnly?255:192)};
+         const unsigned order[]={2,1,0,3};unsigned char expected[4];
+         for(unsigned c=0;c<4;c++)expected[c]=original[sw==0?order[c]:0];
+         unsigned mismatches=0;
+         for(unsigned y=0;y<4;y++)for(unsigned x=0;x<4;x++) {
+            const auto pixel=(const unsigned char *)map.pData+y*map.RowPitch+x*4;
+            if(memcmp(pixel,expected,4))mismatches++;
+            if(x==0&&y==0)printf("pixel=%u,%u,%u,%u expected=%u,%u,%u,%u\n",pixel[0],pixel[1],pixel[2],pixel[3],expected[0],expected[1],expected[2],expected[3]);
+         }
+         d.context->Unmap(staging.Get(),0);total++;failed+=mismatches!=0;
+         printf("result_mismatches=%u/16\n",mismatches);
+      }
+      ID3D11ShaderResourceView *none=NULL;d.context->PSSetShaderResources(0,1,&none);
+   }
+   printf("TEXTURE_RESULT cases=%u failed=%u\n",total,failed);
+   CheckDevice(d,"Texture result test");Check(failed?E_FAIL:S_OK,"Texture result pixels");
+}
+
 int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
@@ -1472,6 +1558,7 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-fetch") && strcmp(mode, "--buffer-large") && strcmp(mode, "--buffer-fetch-large") &&
        strcmp(mode, "--buffer-signatures") && strcmp(mode, "--format-caps") && strcmp(mode, "--format-caps-warp") &&
        strcmp(mode, "--msaa") && strcmp(mode, "--msaa-warp") &&
+       strcmp(mode, "--texture-result") && strcmp(mode, "--texture-result-warp") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
@@ -1480,6 +1567,7 @@ int main(int argc, char **argv)
       printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait|--sample-reuse-warp\n");
       printf("Format capability contract: --format-caps|--format-caps-warp (reference only)\n");
       printf("Multisample render/resolve/load: --msaa|--msaa-warp (reference only)\n");
+      printf("Texture return swizzles: --texture-result|--texture-result-warp (reference only)\n");
       printf("RGBA shared atlas: --rgba-shared|--rgba-sample|--rgba-keyed|--rgba-nt|--rgba-partial|--rgba-process|--rgba-dcomp|--rgba-local-warp\n");
       return 2;
    }
@@ -1487,6 +1575,7 @@ int main(int argc, char **argv)
    ProcessIdToSessionId(GetCurrentProcessId(), &session);
    printf("mode=%s session=%lu pid=%lu\n", requestedMode, session, GetCurrentProcessId());
    warpControl = !strcmp(mode, "--sample-reuse-warp") || !strcmp(mode, "--msaa-warp") ||
+                 !strcmp(mode, "--texture-result-warp") ||
                  !strcmp(mode, "--format-caps-warp") ||
                  !strcmp(requestedMode, "--rgba-local-warp");
    try {
@@ -1527,6 +1616,8 @@ int main(int argc, char **argv)
          FormatCapsTest(adapter.Get());
       else if (!strcmp(mode, "--msaa") || !strcmp(mode, "--msaa-warp"))
          MultisampleTest(adapter.Get());
+      else if (!strcmp(mode, "--texture-result") || !strcmp(mode, "--texture-result-warp"))
+         TextureResultSwizzleTest(adapter.Get());
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--sample-reuse") || !strcmp(mode, "--sample-reuse-unbind") ||
