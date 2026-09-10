@@ -1,10 +1,10 @@
 name: Windows D3D10 UMD on Zink (ARM64EC)
 
-# Emulated x64 processes -- FurMark and 3DMark among them -- cannot load the
-# ARM64 user-mode driver, so they get no D3D at all: a 32-bit dxdiag on the
-# guest reports this adapter with an empty feature level list. This builds the
-# same user-mode driver as ARM64EC, which is the form an emulated x64 process
-# can load, to be installed through the INF's UserModeDriverNameWoW entry.
+# Emulated x64 processes cannot load a native ARM64 user-mode driver. This
+# builds an ARM64EC UMD, but compile success alone does not provide a working
+# deployment: its Vulkan ICD/dependencies must also support x64/ARM64EC, and
+# native/x64 selection needs a supported loader mechanism (such as ARM64X).
+# UserModeDriverNameWoW selects a 32-bit UMD, not this x64-compatible image.
 #
 # Kept separate from the driver package build on purpose: ARM64EC is a new
 # target for this tree and a failure here must not stop the ARM64 package.

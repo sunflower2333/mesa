@@ -44,6 +44,31 @@ struct Device {
 // Reference behavior only. This mode never counts as VIOGPU acceptance.
 static bool warpControl;
 
+static void PrintClientIdentity()
+{
+   using QueryMachine = BOOL (WINAPI *)(HANDLE, USHORT *, USHORT *);
+   auto query = reinterpret_cast<QueryMachine>(GetProcAddress(
+      GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
+   USHORT processMachine = 0, nativeMachine = 0;
+   if (query && query(GetCurrentProcess(), &processMachine, &nativeMachine))
+      printf("client: pointer_bits=%u process_machine=0x%04x native_machine=0x%04x\n",
+             unsigned(sizeof(void *) * 8), processMachine, nativeMachine);
+   else
+      printf("client: pointer_bits=%u machine_query_unavailable\n", unsigned(sizeof(void *) * 8));
+}
+
+static void PrintDriverModules()
+{
+   const wchar_t *names[] = {L"viogpud3d.dll", L"viogpud3dec.dll",
+                            L"vulkan-1.dll", L"vulkan_freedreno.dll", L"d3d10warp.dll"};
+   for (const wchar_t *name : names) {
+      char path[MAX_PATH] = {};
+      HMODULE module = GetModuleHandleW(name);
+      if (module && GetModuleFileNameA(module, path, ARRAYSIZE(path)))
+         printf("module: %ls=%s\n", name, path);
+   }
+}
+
 static void CheckDevice(Device &d, const char *operation)
 {
    HRESULT reason = d.device->GetDeviceRemovedReason();
@@ -70,11 +95,12 @@ static Device CreateDevice(IDXGIAdapter *adapter)
       D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
    };
    D3D_FEATURE_LEVEL level;
-   Check(D3D11CreateDevice(warpControl ? NULL : adapter,
+   HRESULT hr = D3D11CreateDevice(warpControl ? NULL : adapter,
                           warpControl ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_UNKNOWN, NULL,
                           D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, ARRAYSIZE(levels),
-                          D3D11_SDK_VERSION, &d.device, &level, &d.context),
-         "D3D11CreateDevice");
+                          D3D11_SDK_VERSION, &d.device, &level, &d.context);
+   PrintDriverModules();
+   Check(hr, "D3D11CreateDevice");
    char path[MAX_PATH] = {};
    HMODULE umd = GetModuleHandleW(L"viogpud3d.dll");
    if (umd)
@@ -1091,6 +1117,7 @@ static void CompositionTimingSample()
 int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
+   PrintClientIdentity();
    const char *mode = argc >= 2 ? argv[1] : "--shared";
    const bool child = !strcmp(mode, "--process-child") && argc == 5;
    if (!child && ((argc != 1 && argc != 2) ||

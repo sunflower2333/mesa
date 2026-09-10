@@ -1,4 +1,4 @@
-name: Windows graphics probes (ARM64)
+name: Windows graphics probes (ARM64, x64, x86)
 
 on:
   workflow_dispatch:
@@ -33,12 +33,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Compiled shader signatures failed' }
   build:
     runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: arm64
+            compiler: x64_arm64
+            machine: '0xaa64'
+          - target: x64
+            compiler: x64
+            machine: '0x8664'
+          - target: x86
+            compiler: x64_x86
+            machine: '0x014c'
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64_arm64
-      - name: Build native ARM64 probe with SDK only
+          arch: ${{ matrix.compiler }}
+      - name: Build shared-resource probe with SDK only
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path probes | Out-Null
@@ -49,12 +62,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Probe compilation failed' }
           $bytes = [IO.File]::ReadAllBytes('probes/d3d11_shared_test.exe')
           $pe = [BitConverter]::ToInt32($bytes, 0x3c)
-          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0xaa64) {
-            throw 'Probe is not ARM64'
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne ${{ matrix.machine }}) {
+            throw 'Probe architecture mismatch'
           }
           Get-FileHash probes/d3d11_shared_test.exe | Format-List
           Write-Host 'Compile gate only; shared pixels and composition must run on the VIOGPU guest.'
-      - name: Build native ARM64 scanout timing probe
+      - name: Build scanout timing probe
         shell: pwsh
         run: |
           cl /nologo /std:c++17 /EHsc /W3 /MT /Zi `
@@ -64,32 +77,32 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Present probe compilation failed' }
           $bytes = [IO.File]::ReadAllBytes('probes/d3d11_present_test.exe')
           $pe = [BitConverter]::ToInt32($bytes, 0x3c)
-          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0xaa64) {
-            throw 'Present probe is not ARM64'
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne ${{ matrix.machine }}) {
+            throw 'Present probe architecture mismatch'
           }
           Get-FileHash probes/d3d11_present_test.exe | Format-List
-      - name: Build native ARM64 Vulkan compute and buffer-copy probe
+      - name: Build Vulkan compute and buffer-copy probe
         shell: pwsh
         run: |
           cl /nologo /std:c++17 /EHsc /W4 /WX /MT /I include `
             src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp `
-            /Fe:probes/tu_wddm_vulkan_compute_probe_arm64.exe /Fo:probes/
+            /Fe:probes/tu_wddm_vulkan_compute_probe_${{ matrix.target }}.exe /Fo:probes/
           if ($LASTEXITCODE -ne 0) { throw 'Vulkan probe compilation failed' }
-          $bytes = [IO.File]::ReadAllBytes('probes/tu_wddm_vulkan_compute_probe_arm64.exe')
+          $bytes = [IO.File]::ReadAllBytes('probes/tu_wddm_vulkan_compute_probe_${{ matrix.target }}.exe')
           $pe = [BitConverter]::ToInt32($bytes, 0x3c)
-          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0xaa64) {
-            throw 'Vulkan probe is not ARM64'
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne ${{ matrix.machine }}) {
+            throw 'Vulkan probe architecture mismatch'
           }
-          Get-FileHash probes/tu_wddm_vulkan_compute_probe_arm64.exe | Format-List
+          Get-FileHash probes/tu_wddm_vulkan_compute_probe_${{ matrix.target }}.exe | Format-List
           Write-Host 'Use the matching tu_wddm_compute.spv from the full Turnip workload artifact.'
       - uses: actions/upload-artifact@v4
         with:
-          name: tu-wddm-compute-probe-arm64
-          path: probes/tu_wddm_vulkan_compute_probe_arm64.exe
+          name: tu-wddm-compute-probe-${{ matrix.target }}
+          path: probes/tu_wddm_vulkan_compute_probe_${{ matrix.target }}.exe
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: d3d11-shared-probe-arm64
+          name: d3d11-shared-probe-${{ matrix.target }}
           path: |
             probes/d3d11_shared_test.exe
             probes/d3d11_shared_test.pdb
