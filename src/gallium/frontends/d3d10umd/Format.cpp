@@ -176,13 +176,17 @@ FormatTranslate(DXGI_FORMAT Format, BOOL depth)
    case DXGI_FORMAT_R8_TYPELESS:
       return PIPE_FORMAT_R8_UNORM;
    case DXGI_FORMAT_R32G32B32A32_TYPELESS:
-      return PIPE_FORMAT_R32G32B32A32_UNORM;
+      // Vulkan has no32-bit UNORM channel formats. Use an actual member of
+      // the DXGI family for storage and capability queries; otherwise the
+      // typeless parent reports no MSAA while its FLOAT view reports support,
+      // which makes the D3D runtime reject device initialization.
+      return PIPE_FORMAT_R32G32B32A32_FLOAT;
    case DXGI_FORMAT_R32G32B32_TYPELESS:
-      return PIPE_FORMAT_R32G32B32_UNORM;
+      return PIPE_FORMAT_R32G32B32_FLOAT;
    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
       return PIPE_FORMAT_R16G16B16A16_UNORM;
    case DXGI_FORMAT_R32G32_TYPELESS:
-      return PIPE_FORMAT_R32G32_UNORM;
+      return PIPE_FORMAT_R32G32_FLOAT;
    case DXGI_FORMAT_R8G8_TYPELESS:
       return PIPE_FORMAT_R8G8_UNORM;
    case DXGI_FORMAT_R16_TYPELESS:

@@ -1172,6 +1172,22 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
       }
    }
    Check(valid ? S_OK : E_FAIL, "Single-sample quality contract");
+   const DXGI_FORMAT families[][2] = {
+      {DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_FLOAT},
+      {DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_FLOAT},
+      {DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT},
+   };
+   const UINT familySamples[] = {2, 4};
+   for (const auto &family : families) {
+      for (UINT count : familySamples) {
+         UINT parent = 0, typed = 0;
+         Check(d.device->CheckMultisampleQualityLevels(family[0], count, &parent), "Query typeless quality");
+         Check(d.device->CheckMultisampleQualityLevels(family[1], count, &typed), "Query typed quality");
+         printf("MSAA family parent=%u typed=%u samples=%u quality=%u/%u\n",
+                unsigned(family[0]), unsigned(family[1]), count, parent, typed);
+         Check(parent >= typed ? S_OK : E_FAIL, "Typeless supports its typed MSAA view");
+      }
+   }
    CheckDevice(d, "Format capability queries");
 }
 
@@ -1220,7 +1236,10 @@ static void VerifyMsaaPixels(Device &d, ID3D11Texture2D *texture, UINT subresour
          }
          bool wrong = false;
          for (UINT c = 0; c < 4; ++c) {
-            if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            if (desc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+               const auto *values = reinterpret_cast<const float *>(row);
+               wrong |= values[x * 4 + c] != expected[c];
+            } else if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
                const auto *half = reinterpret_cast<const uint16_t *>(row);
                const uint16_t wanted = expected[c] == 1 ? 0x3c00 :
                                         expected[c] == 0.5f ? 0x3800 : 0;
@@ -1274,11 +1293,13 @@ static void MultisampleTest(IDXGIAdapter *adapter)
    d.context->RSSetState(rs.Get());
    const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM,
       DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
-      DXGI_FORMAT_R8G8B8A8_TYPELESS};
+      DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R32G32B32A32_TYPELESS};
    const UINT counts[] = {2, 4};
    for (DXGI_FORMAT storage : formats) {
-      const DXGI_FORMAT format = storage == DXGI_FORMAT_R8G8B8A8_TYPELESS ?
-                                  DXGI_FORMAT_R8G8B8A8_UNORM : storage;
+         const DXGI_FORMAT format = storage == DXGI_FORMAT_R8G8B8A8_TYPELESS ?
+                                  DXGI_FORMAT_R8G8B8A8_UNORM :
+                                     storage == DXGI_FORMAT_R32G32B32A32_TYPELESS ?
+                                        DXGI_FORMAT_R32G32B32A32_FLOAT : storage;
       for (UINT count : counts) {
          printf("MSAA case storage=%u typed=%u samples=%u\n", unsigned(storage), unsigned(format), count);
          UINT quality = 0, caps = 0;
