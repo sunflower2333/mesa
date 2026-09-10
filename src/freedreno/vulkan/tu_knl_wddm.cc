@@ -2044,8 +2044,12 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
       iova = util_vma_heap_alloc(&dev->vma, vma_size, os_page_size);
    }
    mtx_unlock(&dev->vma_mutex);
-   if (iova == 0)
+   if (iova == 0) {
+      tu_wddm_diag("bo_init VMA exhausted size=%llu rounded=%llu va_size=%llu name=%s",
+                   (unsigned long long)size, (unsigned long long)vma_size,
+                   (unsigned long long)dev->wddm_context.info.VaSize, name ? name : "");
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
 
    struct tu_wddm_allocation *allocation = (struct tu_wddm_allocation *)vk_zalloc(
       &dev->vk.alloc, sizeof(*allocation), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -2076,6 +2080,9 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
    struct tu_bo *bo = token ? tu_device_lookup_bo(dev, token) : NULL;
    bool added = bo != NULL && tu_wddm_add_bo_locked(dev, bo);
    if (!added) {
+      tu_wddm_diag("bo_init BO table failed count=%u limit=%u size=%llu capacity_available=%u name=%s",
+                   dev->wddm_bo_count, (unsigned)TU_WDDM_MAX_RENDER_ALLOCATIONS,
+                   (unsigned long long)size, (unsigned)capacity_available, name ? name : "");
       mtx_unlock(&dev->bo_mutex);
       vk_free(&dev->vk.alloc, allocation);
       mtx_lock(&dev->vma_mutex);
@@ -2112,6 +2119,9 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
    mtx_unlock(&dev->bo_mutex);
 
    if (!allocation_created) {
+      tu_wddm_diag("bo_init KMT allocation failed status=0x%08x handle=%u size=%llu iova=0x%llx name=%s",
+                   allocation->last_create_status, (unsigned)allocation->handle,
+                   (unsigned long long)size, (unsigned long long)iova, name ? name : "");
       if (allocation->handle != 0) {
          /* CreateAllocation returned a handle and its compensating destroy
           * failed.  Keep the sparse-array slot, VMA, and final BO reference as

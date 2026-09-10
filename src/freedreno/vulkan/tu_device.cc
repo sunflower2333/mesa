@@ -3684,6 +3684,10 @@ tu_add_to_heap(struct tu_device *dev, struct tu_bo *bo)
    uint64_t mem_heap_used = p_atomic_add_return(&mem_heap->used, accounting_size);
    if (mem_heap_used < accounting_size || mem_heap_used > mem_heap->size) {
 #ifdef TU_HAS_WDDM
+      if (bo->wddm_allocation != NULL)
+         tu_wddm_diag("bo_init heap exhausted used=%llu size=%llu request=%llu",
+                      (unsigned long long)mem_heap_used, (unsigned long long)mem_heap->size,
+                      (unsigned long long)accounting_size);
       if (bo->wddm_allocation != NULL) {
          /* WDDM teardown can fail and retain the allocation.  Its final-owner
           * path releases accounting only after KMT destruction succeeds. */
