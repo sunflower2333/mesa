@@ -551,6 +551,15 @@ Flush(D3D10DDI_HDEVICE hDevice)  // IN
  * ----------------------------------------------------------------------
  */
 
+static bool
+IsDepthStencilAspectView(DXGI_FORMAT format)
+{
+   return format == DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS ||
+          format == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT ||
+          format == DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+          format == DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+}
+
 void APIENTRY
 CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
                    DXGI_FORMAT Format,       // IN
@@ -579,7 +588,13 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
       return;
    }
 
-   if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
+   // DXGI aspect views are SRV-only even when their Gallium storage format
+   // supports attachments. The D3D runtime rejects those attachment claims.
+   const bool aspectView = IsDepthStencilAspectView(Format);
+   const bool stencilView = Format == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT ||
+                            Format == DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+   if (!aspectView &&
+       screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
                                    PIPE_BIND_RENDER_TARGET)) {
       *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET;
       if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
@@ -592,7 +607,8 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
    // Integer surfaces support MSAA rendering and individual sample loads.
    // Averaging resolves are a separate operation, rejected in Resource.cpp.
    for (unsigned samples = 2; samples <= 4; samples *= 2) {
-      if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
+      if (!aspectView &&
+          screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
                                        samples, samples, renderBind))
          *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
    }
@@ -600,12 +616,12 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
    if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D, 0, 0,
                                    PIPE_BIND_SAMPLER_VIEW)) {
       // SHADER_SAMPLE promises filtering, not just access via Load/LD_MS.
-      if (!util_format_is_pure_integer(format))
+      if (!stencilView && !util_format_is_pure_integer(format))
          *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
 
       for (unsigned samples = 2; samples <= 4; samples *= 2) {
          if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
-                                          samples, samples, renderBind | PIPE_BIND_SAMPLER_VIEW))
+                                          samples, samples, PIPE_BIND_SAMPLER_VIEW))
             *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
       }
    }
@@ -635,7 +651,7 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
 
    /* The DDI requires one quality level for single-sample resources. */
    *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
-   if (SampleCount == 2 || SampleCount == 4) {
+   if (!IsDepthStencilAspectView(Format) && (SampleCount == 2 || SampleCount == 4)) {
       struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
       enum pipe_format format = FormatTranslate(Format, false);
       if (format != PIPE_FORMAT_NONE) {

@@ -1154,7 +1154,9 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
    const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM,
       DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
       DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_R32G32B32A32_UINT,
-      DXGI_FORMAT_R32G32B32A32_SINT};
+      DXGI_FORMAT_R32G32B32A32_SINT, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+      DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+      DXGI_FORMAT_X24_TYPELESS_G8_UINT};
    for (DXGI_FORMAT format : formats) {
       UINT caps = 0;
       Check(d.device->CheckFormatSupport(format, &caps), "CheckFormatSupport");
@@ -1162,6 +1164,21 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
          Check(!(caps & (D3D11_FORMAT_SUPPORT_BLENDABLE | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE |
                          D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE)) ? S_OK : E_FAIL,
                "Integer formats do not filter, blend or average samples");
+      const bool depthView = format == DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS ||
+                             format == DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+      const bool stencilView = format == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT ||
+                               format == DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+      if (depthView || stencilView) {
+         const UINT forbidden = D3D11_FORMAT_SUPPORT_RENDER_TARGET |
+            D3D11_FORMAT_SUPPORT_BLENDABLE | D3D11_FORMAT_SUPPORT_DEPTH_STENCIL |
+            D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET |
+            D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE;
+         Check(!(caps & forbidden) ? S_OK : E_FAIL, "Depth/stencil aspect views are SRV-only");
+         Check((caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD) ? S_OK : E_FAIL,
+               "Depth/stencil aspect views retain MSAA loads");
+         Check(!!(caps & D3D11_FORMAT_SUPPORT_SHADER_SAMPLE) == depthView ? S_OK : E_FAIL,
+               "Only the depth aspect supports filtered sampling");
+      }
       printf("format=%u caps=0x%08x render_target=%d msaa_target=%d msaa_resolve=%d\n",
              unsigned(format), caps, !!(caps & D3D11_FORMAT_SUPPORT_RENDER_TARGET),
              !!(caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET),
@@ -1450,7 +1467,7 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
        strcmp(mode, "--buffer-fetch") && strcmp(mode, "--buffer-large") && strcmp(mode, "--buffer-fetch-large") &&
-       strcmp(mode, "--buffer-signatures") && strcmp(mode, "--format-caps") &&
+       strcmp(mode, "--buffer-signatures") && strcmp(mode, "--format-caps") && strcmp(mode, "--format-caps-warp") &&
        strcmp(mode, "--msaa") && strcmp(mode, "--msaa-warp") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
@@ -1458,7 +1475,7 @@ int main(int argc, char **argv)
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large|--buffer-signatures\n");
       printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait|--sample-reuse-warp\n");
-      printf("Format capability contract: --format-caps\n");
+      printf("Format capability contract: --format-caps|--format-caps-warp (reference only)\n");
       printf("Multisample render/resolve/load: --msaa|--msaa-warp (reference only)\n");
       printf("RGBA shared atlas: --rgba-shared|--rgba-sample|--rgba-keyed|--rgba-nt|--rgba-partial|--rgba-process|--rgba-dcomp|--rgba-local-warp\n");
       return 2;
@@ -1467,6 +1484,7 @@ int main(int argc, char **argv)
    ProcessIdToSessionId(GetCurrentProcessId(), &session);
    printf("mode=%s session=%lu pid=%lu\n", requestedMode, session, GetCurrentProcessId());
    warpControl = !strcmp(mode, "--sample-reuse-warp") || !strcmp(mode, "--msaa-warp") ||
+                 !strcmp(mode, "--format-caps-warp") ||
                  !strcmp(requestedMode, "--rgba-local-warp");
    try {
       if (!strcmp(mode, "--buffer-signatures")) {
@@ -1502,7 +1520,7 @@ int main(int argc, char **argv)
          ProcessSharedTest(adapter.Get());
       else if (!strcmp(mode, "--dcomp"))
          CompositionTest(adapter.Get());
-      else if (!strcmp(mode, "--format-caps"))
+      else if (!strcmp(mode, "--format-caps") || !strcmp(mode, "--format-caps-warp"))
          FormatCapsTest(adapter.Get());
       else if (!strcmp(mode, "--msaa") || !strcmp(mode, "--msaa-warp"))
          MultisampleTest(adapter.Get());

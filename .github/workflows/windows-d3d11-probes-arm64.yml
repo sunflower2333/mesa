@@ -31,6 +31,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Signature test compilation failed' }
           & ./signatures/check.exe --buffer-signatures
           if ($LASTEXITCODE -ne 0) { throw 'Compiled shader signatures failed' }
+          & ./signatures/check.exe --format-caps-warp
+          if ($LASTEXITCODE -ne 0) { throw 'Format capability reference failed (WARP control only)' }
           & ./signatures/check.exe --msaa-warp
           if ($LASTEXITCODE -ne 0) { throw 'MSAA reference pixels failed (WARP control only)' }
           & ./signatures/check.exe --rgba-local-warp
