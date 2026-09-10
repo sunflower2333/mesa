@@ -35,7 +35,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path output | Out-Null
           cl /nologo /std:c11 /O2 /MT /W3 /DVK_USE_PLATFORM_WIN32_KHR `
-            /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I headers/include `
+            /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_USE_MATH_DEFINES `
+            /D_CRT_SECURE_NO_WARNINGS /I headers/include `
             tools/cube/cube.c /Fe:output/vkcube.exe /Fo:output/ `
             /link user32.lib shell32.lib gdi32.lib
           if ($LASTEXITCODE -ne 0) { throw 'VKCube compilation failed' }
