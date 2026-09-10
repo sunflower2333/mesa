@@ -1128,7 +1128,8 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
              unsigned(format), caps, !!(caps & D3D11_FORMAT_SUPPORT_RENDER_TARGET),
              !!(caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET),
              !!(caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE));
-      for (UINT count : {1u, 2u, 4u, 8u}) {
+      const UINT sampleCounts[] = {1, 2, 4, 8};
+      for (UINT count : sampleCounts) {
          UINT quality = 0xdeadbeef;
          HRESULT hr = d.device->CheckMultisampleQualityLevels(format, count, &quality);
          printf("format=%u samples=%u quality=%u hr=0x%08lx\n",
