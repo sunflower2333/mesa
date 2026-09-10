@@ -283,6 +283,7 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
    const bool single = strcmp(mode, "--buffer-reuse") && !rebind;
    const bool immutable = !strcmp(mode, "--buffer-static");
    const bool vertexId = !strcmp(mode, "--buffer-vertexid");
+   const bool fetch = !strcmp(mode, "--buffer-fetch");
    const bool noCull = !strcmp(mode, "--buffer-nocull");
    const bool arrays = !strcmp(mode, "--buffer-arrays");
    const bool zeroOffset = !strcmp(mode, "--buffer-zero-offset");
@@ -307,6 +308,15 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
          "float2 p=float2((id<<1)&2,id&2);return float4(p*float2(2,-2)+float2(-1,1),0,1);}";
    const char *psSource = "cbuffer C:register(b0){float4 color;}"
       "float4 main():SV_Target{return color;}";
+   if (fetch) {
+      // Generate coverage independently, but pass real VB data through the
+      // VS/PS interface. This separates vertex fetching from position output.
+      vsSource = "struct O{float4 p:SV_Position;float4 c:COLOR;};"
+         "O main(float4 c:POSITION,uint id:SV_VertexID){O o;"
+         "float2 p=float2((id<<1)&2,id&2);"
+         "o.p=float4(p*float2(2,-2)+float2(-1,1),0,1);o.c=c;return o;}";
+      psSource = "float4 main(float4 c:COLOR):SV_Target{return c;}";
+   }
    ComPtr<ID3DBlob> vsCode, psCode, errors;
    Check(D3DCompile(vsSource, strlen(vsSource), NULL, NULL, NULL, "main", "vs_4_1",
                     D3DCOMPILE_ENABLE_STRICTNESS, 0, &vsCode, &errors), "Compile buffer VS");
@@ -363,8 +373,12 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
    for (unsigned draw = 0; draw < (single ? 4u : 32u); ++draw) {
       const unsigned stripe = draw % 4;
       const float left = -1.0f + stripe * 0.5f, right = left + 0.5f;
-      const float vertices[5][4] = {{100, 100, 0, 1},
+      float vertices[5][4] = {{100, 100, 0, 1},
          {left, 1, 0, 1}, {right, 1, 0, 1}, {left, -1, 0, 1}, {right, -1, 0, 1}};
+      if (fetch) {
+         for (unsigned i = 1; i < ARRAYSIZE(vertices); ++i)
+            memcpy(vertices[i], colors[stripe], sizeof vertices[i]);
+      }
       const uint16_t indices[] = {0, 1, 2, 2, 1, 3};
       if (immutable) {
          // Each draw owns initialized, immutable buffers. Keep the same VB/IB
@@ -411,7 +425,7 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
          d.context->IASetIndexBuffer(index.Get(), DXGI_FORMAT_R16_UINT, indexPadding * 2);
          d.context->PSSetConstantBuffers(0, 1, &cb);
       }
-      if (vertexId) {
+      if (vertexId || fetch) {
          viewport.TopLeftX = (float)(stripe * 16);
          viewport.Width = 16;
          d.context->RSSetViewports(1, &viewport);
@@ -447,6 +461,21 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
    d.context->Unmap(readback.Get(), 0);
    printf("dynamic buffer reuse: mismatches=%u/4096 draws=%u rebind=%d immutable=%d vertexId=%d noCull=%d\n",
           mismatches, single ? 4 : 32, rebind, immutable, vertexId, noCull);
+   // Only inspect the upload after all draws and the image check, so this
+   // diagnostic cannot serialize the buffer reuse workload being tested.
+   vertex->GetDesc(&bd);
+   bd.Usage = D3D11_USAGE_STAGING;
+   bd.BindFlags = 0;
+   bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+   ComPtr<ID3D11Buffer> vertexReadback;
+   Check(d.device->CreateBuffer(&bd, NULL, &vertexReadback), "Create VB readback");
+   d.context->CopyResource(vertexReadback.Get(), vertex.Get());
+   CheckDeviceCall(d, d.context->Map(vertexReadback.Get(), 0, D3D11_MAP_READ, 0, &map), "Read VB upload");
+   const float *uploaded = (const float *)((const char *)map.pData + offset);
+   for (unsigned i = 0; i < 4; ++i)
+      printf("uploaded vertex %u: %.3f,%.3f,%.3f,%.3f\n", i,
+             uploaded[i * 4], uploaded[i * 4 + 1], uploaded[i * 4 + 2], uploaded[i * 4 + 3]);
+   d.context->Unmap(vertexReadback.Get(), 0);
    d.context->ClearState();
    if (mismatches)
       Check(E_FAIL, "Dynamic buffer reuse contents");
@@ -967,10 +996,12 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") &&
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
+       strcmp(mode, "--buffer-fetch") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
+      printf("Additional buffer isolation: --buffer-fetch\n");
       return 2;
    }
    DWORD session;
