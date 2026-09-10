@@ -1,0 +1,28 @@
+name: Zink SPIR-V image operand contract
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/gallium/drivers/zink/nir_to_spirv/spirv_builder*'
+      - '.github/workflows/zink-spirv-builder.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  image-operands:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check normal and sparse multisample operand encoding
+        run: |
+          cc -std=c11 -O1 -g -fsanitize=address,undefined \
+            -ffunction-sections -fdata-sections -DHAVE_ENDIAN_H \
+            -DHAVE_STRUCT_TIMESPEC -DHAVE_PTHREAD -D_POSIX_C_SOURCE=200809L \
+            -I src -I include -I src/gallium/include -I src/gallium/auxiliary \
+            src/gallium/drivers/zink/nir_to_spirv/spirv_builder_test.c \
+            src/gallium/drivers/zink/nir_to_spirv/spirv_builder.c \
+            src/util/ralloc.c src/util/hash_table.c src/util/set.c \
+            -Wl,--gc-sections -pthread -lm -o spirv-builder-test
+          ./spirv-builder-test
