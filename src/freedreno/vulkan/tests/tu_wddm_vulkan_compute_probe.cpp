@@ -82,8 +82,9 @@ main(int argc, char **argv)
    uint32_t iteration_count = kDefaultIterationCount;
    bool elements_seen = false;
    bool iterations_seen = false;
+   bool copy_readback = false;
    if (argc < 2 || (argc % 2) != 0) {
-      fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT]\n", argv[0]);
+      fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1]\n", argv[0]);
       return 2;
    }
    for (int argument = 2; argument < argc; argument += 2) {
@@ -93,8 +94,11 @@ main(int argc, char **argv)
       } else if (strcmp(argv[argument], "--iterations") == 0 && !iterations_seen &&
                  parse_positive_u32(argv[argument + 1], kMaxIterationCount, &iteration_count)) {
          iterations_seen = true;
+      } else if (strcmp(argv[argument], "--copy-readback") == 0 && !copy_readback &&
+                 strcmp(argv[argument + 1], "1") == 0) {
+         copy_readback = true;
       } else {
-         fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT]\n", argv[0]);
+         fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1]\n", argv[0]);
          return 2;
       }
    }
@@ -114,6 +118,8 @@ main(int argc, char **argv)
    VkDevice device = VK_NULL_HANDLE;
    VkBuffer buffer = VK_NULL_HANDLE;
    VkDeviceMemory memory = VK_NULL_HANDLE;
+   VkBuffer copied_buffer = VK_NULL_HANDLE;
+   VkDeviceMemory copied_memory = VK_NULL_HANDLE;
    VkDescriptorSetLayout descriptor_layout = VK_NULL_HANDLE;
    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
    VkShaderModule shader = VK_NULL_HANDLE;
@@ -122,6 +128,7 @@ main(int argc, char **argv)
    VkCommandPool command_pool = VK_NULL_HANDLE;
    VkFence fence = VK_NULL_HANDLE;
    void *mapped = nullptr;
+   void *copied_map = nullptr;
 
    PFN_vkDestroyInstance destroy_instance = nullptr;
    PFN_vkDestroyDevice destroy_device = nullptr;
@@ -139,6 +146,8 @@ main(int argc, char **argv)
    auto cleanup = [&]() {
       if (mapped != nullptr && unmap_memory != nullptr)
          unmap_memory(device, memory);
+      if (copied_map != nullptr && unmap_memory != nullptr)
+         unmap_memory(device, copied_memory);
       if (destroy_fence != nullptr && fence != VK_NULL_HANDLE)
          destroy_fence(device, fence, nullptr);
       if (destroy_command_pool != nullptr && command_pool != VK_NULL_HANDLE)
@@ -157,6 +166,10 @@ main(int argc, char **argv)
          destroy_buffer(device, buffer, nullptr);
       if (free_memory != nullptr && memory != VK_NULL_HANDLE)
          free_memory(device, memory, nullptr);
+      if (destroy_buffer != nullptr && copied_buffer != VK_NULL_HANDLE)
+         destroy_buffer(device, copied_buffer, nullptr);
+      if (free_memory != nullptr && copied_memory != VK_NULL_HANDLE)
+         free_memory(device, copied_memory, nullptr);
       if (destroy_device != nullptr && device != VK_NULL_HANDLE)
          destroy_device(device, nullptr);
       if (destroy_instance != nullptr && instance != VK_NULL_HANDLE)
@@ -315,6 +328,7 @@ main(int argc, char **argv)
    PFN_vkCmdBindPipeline cmd_bind_pipeline = LOAD_DEVICE(CmdBindPipeline);
    PFN_vkCmdBindDescriptorSets cmd_bind_descriptor_sets = LOAD_DEVICE(CmdBindDescriptorSets);
    PFN_vkCmdDispatch cmd_dispatch = LOAD_DEVICE(CmdDispatch);
+   PFN_vkCmdCopyBuffer cmd_copy_buffer = LOAD_DEVICE(CmdCopyBuffer);
    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier = LOAD_DEVICE(CmdPipelineBarrier);
    PFN_vkCreateFence create_fence = LOAD_DEVICE(CreateFence);
    destroy_fence = LOAD_DEVICE(DestroyFence);
@@ -335,6 +349,7 @@ main(int argc, char **argv)
        update_descriptor_sets == nullptr || create_command_pool == nullptr || destroy_command_pool == nullptr ||
        allocate_command_buffers == nullptr || begin_command_buffer == nullptr || end_command_buffer == nullptr ||
        cmd_bind_pipeline == nullptr || cmd_bind_descriptor_sets == nullptr || cmd_dispatch == nullptr ||
+       (copy_readback && cmd_copy_buffer == nullptr) ||
        cmd_pipeline_barrier == nullptr || create_fence == nullptr || destroy_fence == nullptr ||
        reset_fences == nullptr || queue_submit == nullptr || wait_for_fences == nullptr || destroy_buffer == nullptr ||
        free_memory == nullptr || destroy_device == nullptr) {
@@ -371,6 +386,8 @@ main(int argc, char **argv)
    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
    buffer_info.size = buffer_size;
    buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+   if (copy_readback)
+      buffer_info.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
    result = create_buffer(device, &buffer_info, nullptr, &buffer);
    if (result != VK_SUCCESS) {
@@ -424,6 +441,41 @@ main(int argc, char **argv)
       if (result != VK_SUCCESS) {
          cleanup();
          return report("vkFlushMappedMemoryRanges failed", result);
+      }
+   }
+
+   if (copy_readback) {
+      buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+      result = create_buffer(device, &buffer_info, nullptr, &copied_buffer);
+      if (result != VK_SUCCESS) {
+         cleanup();
+         return report("copy destination buffer creation failed", result);
+      }
+      get_buffer_memory_requirements(device, copied_buffer, &requirements);
+      if (!(requirements.memoryTypeBits & (UINT32_C(1) << memory_type))) {
+         cleanup();
+         return report("copy destination cannot use the same memory type", VK_SUCCESS);
+      }
+      allocation_info.allocationSize = requirements.size;
+      result = allocate_memory(device, &allocation_info, nullptr, &copied_memory);
+      if (result == VK_SUCCESS)
+         result = bind_buffer_memory(device, copied_buffer, copied_memory, 0);
+      if (result == VK_SUCCESS)
+         result = map_memory(device, copied_memory, 0, VK_WHOLE_SIZE, 0, &copied_map);
+      if (result != VK_SUCCESS) {
+         cleanup();
+         return report("copy destination allocation/map failed", result);
+      }
+      memset(copied_map, 0xcd, static_cast<size_t>(buffer_size));
+      if (!(memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+         VkMappedMemoryRange range = {};
+         range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+         range.memory = copied_memory;
+         range.size = VK_WHOLE_SIZE;
+         if ((result = flush_mapped_memory_ranges(device, 1, &range)) != VK_SUCCESS) {
+            cleanup();
+            return report("copy destination flush failed", result);
+         }
       }
    }
 
@@ -552,6 +604,25 @@ main(int argc, char **argv)
    to_host.size = VK_WHOLE_SIZE;
    cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr,
                         1, &to_host, 0, nullptr);
+   if (copy_readback) {
+      // Compare shader output in its original allocation with an independent
+      // GPU buffer copy. Image readback does not exercise this transfer path.
+      VkBufferMemoryBarrier barriers[2] = {to_host, to_host};
+      barriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+      barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+      barriers[1].buffer = copied_buffer;
+      barriers[1].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+      barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 2, barriers, 0, nullptr);
+      VkBufferCopy region = {0, 0, buffer_size};
+      cmd_copy_buffer(command_buffer, buffer, copied_buffer, 1, &region);
+      barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      barriers[1].dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+      cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                           0, 0, nullptr, 1, &barriers[1], 0, nullptr);
+   }
    if ((result = end_command_buffer(command_buffer)) != VK_SUCCESS) {
       cleanup();
       return report("vkEndCommandBuffer failed", result);
@@ -586,6 +657,13 @@ main(int argc, char **argv)
          cleanup();
          return report("vkInvalidateMappedMemoryRanges failed", result);
       }
+      if (copy_readback) {
+         range.memory = copied_memory;
+         if ((result = invalidate_mapped_memory_ranges(device, 1, &range)) != VK_SUCCESS) {
+            cleanup();
+            return report("copy destination invalidate failed", result);
+         }
+      }
    }
    uint64_t checksum = 0;
    for (uint32_t i = 0; i < element_count; i++) {
@@ -599,6 +677,25 @@ main(int argc, char **argv)
          return 1;
       }
       checksum += actual;
+   }
+
+   if (copy_readback) {
+      uint32_t mismatches = 0;
+      for (uint32_t i = 0; i < element_count; i++) {
+         uint32_t expected = static_cast<uint32_t *>(mapped)[i];
+         uint32_t actual = static_cast<uint32_t *>(copied_map)[i];
+         if (actual != expected) {
+            if (mismatches < 8)
+               fprintf(stderr, "buffer copy element %u: source %u, destination %u\n", i, expected, actual);
+            mismatches++;
+         }
+      }
+      printf("Vulkan buffer copy: source compute verified, mismatches %u/%u, memory flags 0x%x\n",
+             mismatches, element_count, memory_flags);
+      if (mismatches) {
+         cleanup();
+         return 1;
+      }
    }
 
    cleanup();
