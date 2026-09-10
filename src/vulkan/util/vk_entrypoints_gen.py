@@ -201,9 +201,6 @@ extern decltype(&${tmpl_prefix}_${e.name}${v}) ${tmpl_prefix}_${e.name}_${entryp
 #pragma comment(linker, "/alternatename:_${tmpl_prefix}_${e.name}_${entrypoint_v}=_${tmpl_prefix}_entrypoint_stub_ptr")
 #else
 #pragma comment(linker, "/alternatename:${tmpl_prefix}_${e.name}_${entrypoint_v}=${tmpl_prefix}_entrypoint_stub_ptr")
-#if defined(_M_ARM64EC)
-#pragma comment(linker, "/alternatename:#${tmpl_prefix}_${e.name}_${entrypoint_v}=#${tmpl_prefix}_entrypoint_stub_ptr")
-#endif
 #endif
   % endfor
   % if e.guard is not None:
@@ -225,11 +222,14 @@ extern decltype(&${tmpl_prefix}_${e.name}${v}) ${tmpl_prefix}_${e.name}_${entryp
       % for args_size in [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 60, 104]:
     #pragma comment(linker, "/alternatename:_${p}_${e.name}@${args_size}=_vk_entrypoint_stub@0")
       % endfor
+#elif defined(_M_ARM64EC)
+    /* The compiler already aliases the undecorated function to its EC name.
+     * Giving both names fallback aliases chains anti-dependencies in LLD 20,
+     * leaving the undecorated symbol unresolved. Alias only the EC function.
+     */
+    #pragma comment(linker, "/alternatename:#${p}_${e.name}=#vk_entrypoint_stub")
 #else
     #pragma comment(linker, "/alternatename:${p}_${e.name}=vk_entrypoint_stub")
-#if defined(_M_ARM64EC)
-    #pragma comment(linker, "/alternatename:#${p}_${e.name}=#vk_entrypoint_stub")
-#endif
 #endif
 #else
     % if entrypoints == device_entrypoints:

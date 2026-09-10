@@ -150,26 +150,29 @@ libfreedreno_ir3 = static_library(
   build_by_default : false,
 )
 
-test('ir3_disasm',
-  executable(
-    'ir3_disasm',
-    'tests/disasm.c',
-    link_args : [ld_args_build_id],
-    link_with: [libfreedreno_ir3],
-    dependencies: [idep_libir3decode, idep_mesautil, idep_nir],
-    include_directories: [inc_freedreno, inc_include, inc_src],
-  ),
-  suite: ['freedreno'],
-)
+# These tests require POSIX fmemopen/err.h, unlike the compiler library.
+if with_tests and host_machine.system() != 'windows'
+  test('ir3_disasm',
+    executable(
+      'ir3_disasm',
+      'tests/disasm.c',
+      link_args : [ld_args_build_id],
+      link_with: [libfreedreno_ir3],
+      dependencies: [idep_libir3decode, idep_mesautil, idep_nir],
+      include_directories: [inc_freedreno, inc_include, inc_src],
+    ),
+    suite: ['freedreno'],
+  )
 
-test('ir3_delay_test',
-  executable(
-    'ir3_delay_test',
-    'tests/delay.c',
-    link_with: libfreedreno_ir3,
-    link_args: ld_args_build_id,
-    dependencies: [idep_mesautil, idep_nir],
-    include_directories: [inc_freedreno, inc_include, inc_src],
-  ),
-  suite: ['freedreno'],
-)
+  test('ir3_delay_test',
+    executable(
+      'ir3_delay_test',
+      'tests/delay.c',
+      link_with: libfreedreno_ir3,
+      link_args: ld_args_build_id,
+      dependencies: [idep_mesautil, idep_nir],
+      include_directories: [inc_freedreno, inc_include, inc_src],
+    ),
+    suite: ['freedreno'],
+  )
+endif
