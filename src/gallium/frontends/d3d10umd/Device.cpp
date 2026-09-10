@@ -560,6 +560,15 @@ IsDepthStencilAspectView(DXGI_FORMAT format)
           format == DXGI_FORMAT_X24_TYPELESS_G8_UINT;
 }
 
+static bool
+IsMultisampleRenderFormat(DXGI_FORMAT format)
+{
+   // XR_BIAS is creation-only, just as its CheckFormatSupport special case
+   // below specifies. It must not inherit MSAA from R10G10B10A2 storage.
+   return !IsDepthStencilAspectView(format) &&
+          format != DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM;
+}
+
 void APIENTRY
 CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
                    DXGI_FORMAT Format,       // IN
@@ -607,7 +616,7 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
    // Integer surfaces support MSAA rendering and individual sample loads.
    // Averaging resolves are a separate operation, rejected in Resource.cpp.
    for (unsigned samples = 2; samples <= 4; samples *= 2) {
-      if (!aspectView &&
+      if (IsMultisampleRenderFormat(Format) &&
           screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
                                        samples, samples, renderBind))
          *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
@@ -651,7 +660,7 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
 
    /* The DDI requires one quality level for single-sample resources. */
    *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
-   if (!IsDepthStencilAspectView(Format) && (SampleCount == 2 || SampleCount == 4)) {
+   if (IsMultisampleRenderFormat(Format) && (SampleCount == 2 || SampleCount == 4)) {
       struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
       enum pipe_format format = FormatTranslate(Format, false);
       if (format != PIPE_FORMAT_NONE) {

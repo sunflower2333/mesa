@@ -1156,7 +1156,7 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
       DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_R32G32B32A32_UINT,
       DXGI_FORMAT_R32G32B32A32_SINT, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
       DXGI_FORMAT_X32_TYPELESS_G8X24_UINT, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
-      DXGI_FORMAT_X24_TYPELESS_G8_UINT};
+      DXGI_FORMAT_X24_TYPELESS_G8_UINT, DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM};
    for (DXGI_FORMAT format : formats) {
       UINT caps = 0;
       Check(d.device->CheckFormatSupport(format, &caps), "CheckFormatSupport");
@@ -1191,6 +1191,9 @@ static void FormatCapsTest(IDXGIAdapter *adapter)
                 unsigned(format), count, quality, (unsigned long)hr);
          if (FAILED(hr) || (count == 1 && quality != 1))
             valid = false;
+         if (count > 1 && (depthView || stencilView ||
+                          format == DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM))
+            Check(!quality ? S_OK : E_FAIL, "Non-attachment format has no MSAA quality levels");
       }
    }
    Check(valid ? S_OK : E_FAIL, "Single-sample quality contract");
