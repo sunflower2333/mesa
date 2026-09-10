@@ -10,7 +10,9 @@ using UINT64 = uint64_t;
 using BOOL = int;
 using HRESULT = int32_t;
 #define APIENTRY
+#ifndef __out_bcount_full_opt
 #define __out_bcount_full_opt(x)
+#endif
 #define LOG_ENTRYPOINT() ((void)0)
 #define LOG_UNSUPPORTED(x) ((void)(x))
 #define DebugPrintf(...) ((void)0)
