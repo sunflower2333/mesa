@@ -1480,14 +1480,16 @@ static void TextureResultSwizzleTest(IDXGIAdapter *adapter)
    ID3D11SamplerState *ss=sampler.Get();d.context->PSSetSamplers(0,1,&ss);
    const char *ops[]={"t.Sample(s,p)","t.SampleLevel(s,p,0)",
                       "t.SampleBias(s,p,0)","t.SampleGrad(s,p,float2(0,0),float2(0,0))",
-                      "t.Load(int3(int2(p*0),0))"};
+                      "t.Load(int3(int2(p*4),0))"};
    const char *swizzles[]={"bgra","rrrr"};
    unsigned total=0,failed=0;
    for (bool redOnly : {false,true}) {
-      const unsigned char source[]={32,64,128,192};
-      td.Width=td.Height=1;td.Usage=D3D11_USAGE_IMMUTABLE;td.CPUAccessFlags=0;
+      const unsigned char color[]={32,64,128,192};
+      unsigned char source[64];
+      for(unsigned i=0;i<16;i++)memcpy(source+i*(redOnly?1:4),color,redOnly?1:4);
+      td.Width=td.Height=4;td.Usage=D3D11_USAGE_IMMUTABLE;td.CPUAccessFlags=0;
       td.BindFlags=D3D11_BIND_SHADER_RESOURCE;td.Format=redOnly?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
-      D3D11_SUBRESOURCE_DATA data={source,redOnly?1u:4u,0};
+      D3D11_SUBRESOURCE_DATA data={source,redOnly?4u:16u,0};
       ComPtr<ID3D11Texture2D> input;ComPtr<ID3D11ShaderResourceView> view;
       Check(d.device->CreateTexture2D(&td,&data,&input), "Create result input");
       Check(d.device->CreateShaderResourceView(input.Get(),NULL,&view), "Create result SRV");

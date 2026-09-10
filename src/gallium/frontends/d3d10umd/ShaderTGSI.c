@@ -1131,6 +1131,23 @@ texture_dim_from_tgsi_target(unsigned tgsi_target)
    }
 }
 
+/* Legacy TGSI texture opcodes do not encode D3D's resource-result swizzle.
+ * Fetch all channels first, then swizzle before applying the destination
+ * mask and saturation. In particular, a scalar R8 lookup into .y/.z must
+ * read the selected red result, not the format's default zero channels.
+ */
+static void
+legacy_texture_result(struct Shader_xlate *sx,
+                      const struct Shader_opcode *opcode,
+                      struct ureg_dst texel)
+{
+   const struct Shader_src_operand *resource = &opcode->src[1];
+   ureg_MOV(sx->ureg, translate_dst_operand(sx, &opcode->dst[0], opcode->saturate),
+            ureg_swizzle(ureg_src(texel), resource->swizzle[0], resource->swizzle[1],
+                         resource->swizzle[2], resource->swizzle[3]));
+   ureg_release_temporary(sx->ureg, texel);
+}
+
 static bool
 operand_is_scalar(const struct Shader_src_operand *operand)
 {
@@ -1414,11 +1431,7 @@ Shader_tgsi_translate(const unsigned *code,
             struct ureg_src srcreg[2] = { ureg_src(coord), sx->samplers[resource] };
             sample_ureg_emit(ureg, TGSI_OPCODE_TXF, 2, &opcode, texel,
                              srcreg, sx->resources[resource].target);
-            ureg_MOV(ureg, translate_dst_operand(sx, &opcode.dst[0], opcode.saturate),
-                     ureg_swizzle(ureg_src(texel), opcode.src[1].swizzle[0],
-                                  opcode.src[1].swizzle[1], opcode.src[1].swizzle[2],
-                                  opcode.src[1].swizzle[3]));
-            ureg_release_temporary(ureg, texel);
+            legacy_texture_result(sx, &opcode, texel);
             ureg_release_temporary(ureg, coord);
          } else {
             struct ureg_src srcreg[3];
@@ -1442,11 +1455,13 @@ Shader_tgsi_translate(const unsigned *code,
                   ureg_DECL_sampler(ureg, resource);
             }
 
+            struct ureg_dst texel = ureg_DECL_temporary(ureg);
             ureg_TXF(ureg,
-                     translate_dst_operand(sx, &opcode.dst[0], opcode.saturate),
+                     texel,
                      sx->resources[resource].target,
                      translate_src_operand(sx, &opcode.src[0], OF_FLOAT),
                      sx->samplers[resource]);
+            legacy_texture_result(sx, &opcode, texel);
          }
          else {
             struct ureg_src srcreg[2];
@@ -1565,12 +1580,13 @@ Shader_tgsi_translate(const unsigned *code,
 
             LOG_UNSUPPORTED(opcode.src[1].base.index[0].imm != opcode.src[2].base.index[0].imm);
 
+            struct ureg_dst texel = ureg_DECL_temporary(ureg);
             ureg_TEX(ureg,
-                     translate_dst_operand(sx, &opcode.dst[0],
-                                           opcode.saturate),
+                     texel,
                      sx->resources[opcode.src[1].base.index[0].imm].target,
                      translate_src_operand(sx, &opcode.src[0], OF_FLOAT),
                      translate_src_operand(sx, &opcode.src[2], OF_FLOAT));
+            legacy_texture_result(sx, &opcode, texel);
          }
          else {
             struct ureg_src srcreg[3];
@@ -1709,13 +1725,14 @@ Shader_tgsi_translate(const unsigned *code,
                      ureg_writemask(r0, TGSI_WRITEMASK_W),
                      translate_src_operand(sx, &opcode.src[3], OF_FLOAT));
 
+            struct ureg_dst texel = ureg_DECL_temporary(ureg);
             ureg_TXL(ureg,
-                     translate_dst_operand(sx, &opcode.dst[0],
-                                           opcode.saturate),
+                     texel,
                      sx->resources[opcode.src[1].base.index[0].imm].target,
                      ureg_src(r0),
                      translate_src_operand(sx, &opcode.src[2], OF_FLOAT));
 
+            legacy_texture_result(sx, &opcode, texel);
             ureg_release_temporary(ureg, r0);
          }
          else {
@@ -1742,14 +1759,15 @@ Shader_tgsi_translate(const unsigned *code,
             assert(opcode.src[1].base.index_dim == 1);
             assert(opcode.src[1].base.index[0].imm < SHADER_MAX_RESOURCES);
 
+            struct ureg_dst texel = ureg_DECL_temporary(ureg);
             ureg_TXD(ureg,
-                     translate_dst_operand(sx, &opcode.dst[0],
-                                           opcode.saturate),
+                     texel,
                      sx->resources[opcode.src[1].base.index[0].imm].target,
                      translate_src_operand(sx, &opcode.src[0], OF_FLOAT),
                      translate_src_operand(sx, &opcode.src[3], OF_FLOAT),
                      translate_src_operand(sx, &opcode.src[4], OF_FLOAT),
                      translate_src_operand(sx, &opcode.src[2], OF_FLOAT));
+            legacy_texture_result(sx, &opcode, texel);
          }
          else {
             struct ureg_src srcreg[5];
@@ -1787,13 +1805,14 @@ Shader_tgsi_translate(const unsigned *code,
                      ureg_writemask(r0, TGSI_WRITEMASK_W),
                      translate_src_operand(sx, &opcode.src[3], OF_FLOAT));
 
+            struct ureg_dst texel = ureg_DECL_temporary(ureg);
             ureg_TXB(ureg,
-                     translate_dst_operand(sx, &opcode.dst[0],
-                                           opcode.saturate),
+                     texel,
                      sx->resources[opcode.src[1].base.index[0].imm].target,
                      ureg_src(r0),
                      translate_src_operand(sx, &opcode.src[2], OF_FLOAT));
 
+            legacy_texture_result(sx, &opcode, texel);
             ureg_release_temporary(ureg, r0);
          }
          else {
