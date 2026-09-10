@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cwchar>
 #include <initializer_list>
+#include <vector>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -1440,6 +1441,58 @@ static void MultisampleTest(IDXGIAdapter *adapter)
    }
 }
 
+// FXC leaves HLSL component selections in MOVs even at /O3. Change only the
+// resource operand of our single, full-vector texture instruction so this
+// regression necessarily exercises the DXBC result-swizzle contract.
+static ComPtr<ID3DBlob> TextureResultBytecode(ID3DBlob *compiled, unsigned op, unsigned sw)
+{
+   const size_t bytes = compiled->GetBufferSize();
+   Check(bytes >= 32 && bytes % 4 == 0 ? S_OK : E_FAIL, "DXBC container size");
+   std::vector<uint32_t> words(bytes / 4);
+   memcpy(words.data(), compiled->GetBufferPointer(), bytes);
+   Check(words[0] == 0x43425844 && words[6] == bytes &&
+         words[7] <= words.size() - 8 ? S_OK : E_FAIL, "DXBC container header");
+   // SM4 tokenized-program opcodes: sample, sample_l, sample_b, sample_d, ld.
+   const unsigned expectedOpcodes[] = {69, 72, 74, 73, 45};
+   Check(op < ARRAYSIZE(expectedOpcodes) && sw < 2 ? S_OK : E_FAIL, "Texture operand selection");
+   unsigned changed = 0;
+   for (unsigned chunk = 0; chunk < words[7]; ++chunk) {
+      const size_t offset = words[8 + chunk];
+      Check(offset % 4 == 0 && offset <= bytes - 8 ? S_OK : E_FAIL, "DXBC chunk offset");
+      const size_t start = offset / 4;
+      if (words[start] != 0x52444853 && words[start] != 0x58454853) continue; // SHDR/SHEX
+      const size_t length = words[start + 1];
+      Check(length >= 8 && length % 4 == 0 && length <= bytes - offset - 8 ? S_OK : E_FAIL,
+            "DXBC shader chunk size");
+      const size_t end = start + 2 + length / 4;
+      Check(words[start + 3] == length / 4 ? S_OK : E_FAIL, "DXBC shader token count");
+      for (size_t i = start + 4; i < end;) {
+         const unsigned count = (words[i] >> 24) & 0x7f;
+         Check(count && count <= end - i ? S_OK : E_FAIL, "DXBC instruction length");
+         if ((words[i] & 0x7ff) == expectedOpcodes[op]) {
+            for (size_t j = i + 1; j + 1 < i + count; ++j) {
+               // Nonextended resource, one immediate index, four components,
+               // identity swizzle; these small generated shaders bind only t0.
+               if (words[j] == 0x00107e46 && words[j + 1] == 0) {
+                  const unsigned swizzle = sw == 0 ? 0xc6 : 0; // zyxw / xxxx
+                  words[j] = (words[j] & ~0xff0u) | (swizzle << 4);
+                  ++changed;
+               }
+            }
+         }
+         i += count;
+      }
+   }
+   Check(changed == 1 ? S_OK : E_FAIL, "Exactly one resource-result operand patched");
+   // Re-serialize the container with the SDK so the checksum describes the
+   // changed code. WARP CreatePixelShader + exact readback validates it in CI.
+   const char marker[] = "texture-result operand regression";
+   ComPtr<ID3DBlob> result;
+   Check(D3DSetBlobPart(words.data(), bytes, D3D_BLOB_PRIVATE_DATA, 0,
+                       marker, sizeof(marker), &result), "Rebuild texture-result DXBC");
+   return result;
+}
+
 static void TextureResultSwizzleTest(IDXGIAdapter *adapter)
 {
    Device d = CreateDevice(adapter);
@@ -1496,19 +1549,16 @@ static void TextureResultSwizzleTest(IDXGIAdapter *adapter)
       ID3D11ShaderResourceView *srv=view.Get();d.context->PSSetShaderResources(0,1,&srv);
       for(unsigned op=0;op<ARRAYSIZE(ops);op++)for(unsigned sw=0;sw<ARRAYSIZE(swizzles);sw++) {
          char text[1024];
-         // Different coordinates stop the compiler from merging four scalar
-         // samples into one vector sample followed by a MOV swizzle.
          snprintf(text,sizeof(text),"Texture2D<float4> t:register(t0);SamplerState s:register(s0);"
-            "float4 get(float2 p){return %s;}float4 main():SV_Target{return float4("
-            "get(float2(.2,.2)).%c,get(float2(.4,.4)).%c,get(float2(.6,.6)).%c,get(float2(.8,.8)).%c);}",
-            ops[op],swizzles[sw][0],swizzles[sw][1],swizzles[sw][2],swizzles[sw][3]);
-         auto code=compile(text,"ps_4_0");
+            "float4 main():SV_Target{float2 p=float2(.25,.25);return %s;}", ops[op]);
+         auto originalCode=compile(text,"ps_4_0");
+         auto code=TextureResultBytecode(originalCode.Get(),op,sw);
          ComPtr<ID3DBlob> assembly;
          Check(D3DDisassemble(code->GetBufferPointer(),code->GetBufferSize(),0,NULL,&assembly), "Disassemble result PS");
          const char *asmText=(const char *)assembly->GetBufferPointer();
-         const bool encoded=strstr(asmText,sw==0?"t0.zzzz":"t0.xxxx")!=NULL;
+         const bool encoded=strstr(asmText,sw==0?"t0.zyxw":"t0.xxxx")!=NULL;
          printf("RESULT_SWIZZLE input=%s op=%u swizzle=%s encoded=%d\n%s\n",redOnly?"R8":"RGBA8",op,swizzles[sw],encoded,asmText);
-         Check(encoded?S_OK:E_FAIL,"Compiler must encode resource-result swizzle");
+         Check(encoded?S_OK:E_FAIL,"Bytecode must encode resource-result swizzle");
          ComPtr<ID3D11PixelShader> ps;
          Check(d.device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),NULL,&ps), "Create result PS");
          const float clear[]={1,0,1,0};d.context->ClearRenderTargetView(target.Get(),clear);
