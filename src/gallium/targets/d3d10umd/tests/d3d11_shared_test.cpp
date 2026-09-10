@@ -182,8 +182,10 @@ static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[
    d.context->ClearState();
 }
 
-static void SharedSampleReuseTest(IDXGIAdapter *adapter)
+static void SharedSampleReuseTest(IDXGIAdapter *adapter, const char *mode)
 {
+   const bool unbind = !strcmp(mode, "--sample-reuse-unbind");
+   const bool wait = !strcmp(mode, "--sample-reuse-wait");
    // Reuse one sampled shared image across CPU/GPU ownership transitions.
    // Read the consumer only after all draws: a readback between draws would
    // introduce transfer barriers and hide a missing host-to-sampler dependency.
@@ -227,6 +229,11 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter)
    ComPtr<ID3D11PixelShader> ps;
    Check(consumer.device->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), NULL, &vs), "Create reuse VS");
    Check(consumer.device->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), NULL, &ps), "Create reuse PS");
+   ComPtr<ID3D11Query> completion;
+   if (wait) {
+      const D3D11_QUERY_DESC query = {D3D11_QUERY_EVENT, 0};
+      Check(consumer.device->CreateQuery(&query, &completion), "Create reuse completion event");
+   }
    ID3D11RenderTargetView *rtv = consumerTarget.Get();
    ID3D11ShaderResourceView *srv = input.Get();
    consumer.context->OMSetRenderTargets(1, &rtv, NULL);
@@ -240,12 +247,34 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter)
       producer.context->Flush();
       Check(producerMutex->ReleaseSync(1), "Reuse producer release");
       Acquire(consumerMutex.Get(), 1, "Reuse consumer acquire");
+      if (unbind)
+         consumer.context->PSSetShaderResources(0, 1, &srv);
       D3D11_VIEWPORT viewport = {(float)(frame * 64), 0, 64, 64, 0, 1};
       consumer.context->RSSetViewports(1, &viewport);
       consumer.context->Draw(3, 0);
       CheckDevice(consumer, "Reuse consumer after Draw");
+      if (unbind) {
+         ID3D11ShaderResourceView *empty = NULL;
+         consumer.context->PSSetShaderResources(0, 1, &empty);
+      }
+      if (wait)
+         consumer.context->End(completion.Get());
       consumer.context->Flush();
       CheckDevice(consumer, "Reuse consumer after Flush");
+      if (wait) {
+         const ULONGLONG deadline = GetTickCount64() + 5000;
+         BOOL complete = FALSE;
+         HRESULT hr;
+         do {
+            hr = consumer.context->GetData(completion.Get(), &complete, sizeof complete,
+                                           D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if (hr != S_FALSE)
+               break;
+            Sleep(1);
+         } while (GetTickCount64() < deadline);
+         CheckDeviceCall(consumer, hr, "Reuse completion GetData");
+         Check(hr == S_OK && complete ? S_OK : E_FAIL, "Reuse GPU completion before release");
+      }
       Check(consumerMutex->ReleaseSync(0), "Reuse consumer release");
    }
    desc.Usage = D3D11_USAGE_STAGING;
@@ -1062,7 +1091,8 @@ int main(int argc, char **argv)
    if (!child && ((argc != 1 && argc != 2) ||
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
-       strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") && strcmp(mode, "--buffer-reuse") &&
+       strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") &&
+       strcmp(mode, "--sample-reuse-unbind") && strcmp(mode, "--sample-reuse-wait") && strcmp(mode, "--buffer-reuse") &&
        strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") &&
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
@@ -1073,6 +1103,7 @@ int main(int argc, char **argv)
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large|--buffer-signatures\n");
+      printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait\n");
       return 2;
    }
    DWORD session;
@@ -1114,8 +1145,9 @@ int main(int argc, char **argv)
          CompositionTest(adapter.Get());
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
-      else if (!strcmp(mode, "--sample-reuse"))
-         SharedSampleReuseTest(adapter.Get());
+      else if (!strcmp(mode, "--sample-reuse") || !strcmp(mode, "--sample-reuse-unbind") ||
+               !strcmp(mode, "--sample-reuse-wait"))
+         SharedSampleReuseTest(adapter.Get(), mode);
       else if (!strncmp(mode, "--buffer-", 9))
          DynamicBufferReuseTest(adapter.Get(), mode);
       else if (!strcmp(mode, "--timestamp"))
