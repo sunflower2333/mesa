@@ -283,7 +283,8 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
    const bool single = strcmp(mode, "--buffer-reuse") && !rebind;
    const bool immutable = !strcmp(mode, "--buffer-static");
    const bool vertexId = !strcmp(mode, "--buffer-vertexid");
-   const bool fetch = !strcmp(mode, "--buffer-fetch");
+   const bool fetch = !strcmp(mode, "--buffer-fetch") || !strcmp(mode, "--buffer-fetch-large");
+   const bool large = !strcmp(mode, "--buffer-large") || !strcmp(mode, "--buffer-fetch-large");
    const bool noCull = !strcmp(mode, "--buffer-nocull");
    const bool arrays = !strcmp(mode, "--buffer-arrays");
    const bool zeroOffset = !strcmp(mode, "--buffer-zero-offset");
@@ -335,11 +336,13 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
    D3D11_BUFFER_DESC bd = {};
    bd.Usage = D3D11_USAGE_DYNAMIC;
    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-   bd.ByteWidth = 5 * 16;
+   // Four MiB exceeds Zink's one-MiB slab entry limit, isolating buffer
+   // suballocation without changing binding offsets or populated geometry.
+   bd.ByteWidth = large ? 4 * 1024 * 1024 : 5 * 16;
    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
    ComPtr<ID3D11Buffer> vertex, index, constant;
    Check(d.device->CreateBuffer(&bd, NULL, &vertex), "Create dynamic VB");
-   bd.ByteWidth = (2 + 4 * 6) * sizeof(uint16_t);
+   bd.ByteWidth = large ? 4 * 1024 * 1024 : (2 + 4 * 6) * sizeof(uint16_t);
    bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
    Check(d.device->CreateBuffer(&bd, NULL, &index), "Create dynamic IB");
    bd.ByteWidth = 16;
@@ -996,12 +999,12 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") &&
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
-       strcmp(mode, "--buffer-fetch") &&
+       strcmp(mode, "--buffer-fetch") && strcmp(mode, "--buffer-large") && strcmp(mode, "--buffer-fetch-large") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
-      printf("Additional buffer isolation: --buffer-fetch\n");
+      printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large\n");
       return 2;
    }
    DWORD session;
