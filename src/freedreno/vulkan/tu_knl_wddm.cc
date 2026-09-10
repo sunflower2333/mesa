@@ -2565,9 +2565,33 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
              sizeof(command));
    }
 
+   /* RD submit indices include empty Vulkan submits; WDDM fence tokens do
+    * not. Emit their association at the actual Render boundary while the
+    * submit and BO ownership locks still hold. IB addresses alone can be
+    * reused and cannot identify a faulting submission. This is opt-in RD
+    * diagnostic output, never a GPU completion record. */
+   if (FD_RD_DUMP(ENABLE)) {
+      mesa_logi("wddm-rd submit: device=%u frame=%u submit=%u queue=%u fence=%u commands=%u",
+                device->device_idx, device->vk.current_frame,
+                device->submit_count, queue->msm_queue_id, fence, entry_count);
+      for (uint32_t i = 0; i < entry_count; i++) {
+         const struct tu_wddm_submit_entry *entry = util_dynarray_element(
+            &submit->entries, struct tu_wddm_submit_entry, i);
+         mesa_logi("wddm-rd IB: device=%u submit=%u fence=%u command=%u iova=0x%llx bytes=%u",
+                   device->device_idx, device->submit_count, fence, i,
+                   (unsigned long long)(entry->bo->iova + entry->offset),
+                   entry->size);
+      }
+   }
+
    bool rendered = tu_wddm_context_render(&device->wddm_context, packet,
                                           packet_size, render_refs,
                                           reference_count);
+   if (FD_RD_DUMP(ENABLE)) {
+      mesa_logi("wddm-rd Render result: device=%u submit=%u fence=%u success=%u transferred=%u",
+                device->device_idx, device->submit_count, fence,
+                (unsigned)rendered, device->wddm_context.last_submitted_fence);
+   }
    vk_free(&device->vk.alloc, render_refs);
    vk_free(&device->vk.alloc, packet);
    return rendered ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
