@@ -1,0 +1,53 @@
+name: Windows VKCube (x64)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/windows-vkcube-x64.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout pinned upstream Vulkan Tools
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/Vulkan-Tools
+          ref: 462d9819e5953e064e1dcdc04d3edc5fc6bc9431
+          fetch-depth: 1
+          path: tools
+      - name: Checkout matching Vulkan headers
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: v1.4.362
+          fetch-depth: 1
+          path: headers
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build unmodified VKCube with the system Vulkan loader
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path output | Out-Null
+          cl /nologo /std:c11 /O2 /MT /W3 /DVK_USE_PLATFORM_WIN32_KHR `
+            /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I headers/include `
+            tools/cube/cube.c /Fe:output/vkcube.exe /Fo:output/ `
+            /link user32.lib shell32.lib gdi32.lib
+          if ($LASTEXITCODE -ne 0) { throw 'VKCube compilation failed' }
+          $bytes = [IO.File]::ReadAllBytes('output/vkcube.exe')
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) {
+            throw 'VKCube must be an x64 client for the ARM64EC runtime test'
+          }
+          Get-FileHash output/vkcube.exe | Format-List
+          Write-Host 'Compile only. Visible Vulkan rendering must run on the VIOGPU guest.'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vkcube-x64
+          path: output/vkcube.exe
+          if-no-files-found: error
