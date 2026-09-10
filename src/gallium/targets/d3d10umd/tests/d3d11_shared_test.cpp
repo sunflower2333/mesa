@@ -277,7 +277,9 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter)
    CheckDevice(consumer, "Reuse consumer final");
 }
 
-static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool single)
+static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool single,
+                                   bool immutable = false, bool vertexId = false,
+                                   bool noCull = false)
 {
    // Keep bindings fixed while DISCARD replaces vertex/constant storage and
    // NO_OVERWRITE appends indices. No intermediate readbacks may serialize
@@ -294,6 +296,9 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
    Check(d.device->CreateTexture2D(&desc, NULL, &output), "Create buffer reuse target");
    Check(d.device->CreateRenderTargetView(output.Get(), NULL, &target), "Buffer reuse RTV");
    const char *vsSource = "float4 main(float4 p:POSITION):SV_Position{return p;}";
+   if (vertexId)
+      vsSource = "float4 main(uint id:SV_VertexID):SV_Position {"
+         "float2 p=float2((id<<1)&2,id&2);return float4(p*float2(2,-2)+float2(-1,1),0,1);}";
    const char *psSource = "cbuffer C:register(b0){float4 color;}"
       "float4 main():SV_Target{return color;}";
    ComPtr<ID3DBlob> vsCode, psCode, errors;
@@ -309,7 +314,8 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
    Check(d.device->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), NULL, &ps), "Create buffer PS");
    const D3D11_INPUT_ELEMENT_DESC element = {"POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT,
       0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0};
-   Check(d.device->CreateInputLayout(&element, 1, vsCode->GetBufferPointer(), vsCode->GetBufferSize(), &layout), "Create buffer layout");
+   if (!vertexId)
+      Check(d.device->CreateInputLayout(&element, 1, vsCode->GetBufferPointer(), vsCode->GetBufferSize(), &layout), "Create buffer layout");
    D3D11_BUFFER_DESC bd = {};
    bd.Usage = D3D11_USAGE_DYNAMIC;
    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -336,6 +342,15 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
    d.context->PSSetConstantBuffers(0, 1, &cb);
    D3D11_VIEWPORT viewport = {0, 0, 64, 64, 0, 1};
    d.context->RSSetViewports(1, &viewport);
+   ComPtr<ID3D11RasterizerState> rasterizer;
+   if (noCull) {
+      D3D11_RASTERIZER_DESC rs = {};
+      rs.FillMode = D3D11_FILL_SOLID;
+      rs.CullMode = D3D11_CULL_NONE;
+      rs.DepthClipEnable = TRUE;
+      Check(d.device->CreateRasterizerState(&rs, &rasterizer), "Create no-cull state");
+      d.context->RSSetState(rasterizer.Get());
+   }
    const float black[4] = {0, 0, 0, 1};
    d.context->ClearRenderTargetView(target.Get(), black);
    for (unsigned draw = 0; draw < (single ? 4u : 32u); ++draw) {
@@ -343,24 +358,57 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
       const float left = -1.0f + stripe * 0.5f, right = left + 0.5f;
       const float vertices[5][4] = {{100, 100, 0, 1},
          {left, 1, 0, 1}, {right, 1, 0, 1}, {left, -1, 0, 1}, {right, -1, 0, 1}};
-      D3D11_MAPPED_SUBRESOURCE map = {};
-      CheckDeviceCall(d, d.context->Map(vertex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map), "Discard VB");
-      memcpy(map.pData, vertices, sizeof vertices);
-      d.context->Unmap(vertex.Get(), 0);
-      CheckDeviceCall(d, d.context->Map(constant.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map), "Discard CB");
-      memcpy(map.pData, colors[stripe], sizeof colors[0]);
-      d.context->Unmap(constant.Get(), 0);
-      CheckDeviceCall(d, d.context->Map(index.Get(), 0,
-         stripe ? D3D11_MAP_WRITE_NO_OVERWRITE : D3D11_MAP_WRITE_DISCARD, 0, &map), "Append IB");
       const uint16_t indices[] = {0, 1, 2, 2, 1, 3};
-      memcpy((uint16_t *)map.pData + 2 + stripe * 6, indices, sizeof indices);
-      d.context->Unmap(index.Get(), 0);
-      if (rebind) {
+      if (immutable) {
+         // Each draw owns initialized, immutable buffers. Keep the same VB/IB
+         // offsets and shaders while removing Map/DISCARD/renaming entirely.
+         D3D11_BUFFER_DESC fixed = {};
+         fixed.Usage = D3D11_USAGE_IMMUTABLE;
+         fixed.ByteWidth = sizeof vertices;
+         fixed.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+         D3D11_SUBRESOURCE_DATA initial = {vertices, 0, 0};
+         vertex.Reset();
+         Check(d.device->CreateBuffer(&fixed, &initial, &vertex), "Immutable VB");
+         uint16_t allIndices[2 + 4 * 6] = {};
+         memcpy(allIndices + 2 + stripe * 6, indices, sizeof indices);
+         fixed.ByteWidth = sizeof allIndices;
+         fixed.BindFlags = D3D11_BIND_INDEX_BUFFER;
+         initial.pSysMem = allIndices;
+         index.Reset();
+         Check(d.device->CreateBuffer(&fixed, &initial, &index), "Immutable IB");
+         fixed.ByteWidth = sizeof colors[0];
+         fixed.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+         initial.pSysMem = colors[stripe];
+         constant.Reset();
+         Check(d.device->CreateBuffer(&fixed, &initial, &constant), "Immutable CB");
+         vb = vertex.Get();
+         cb = constant.Get();
+      } else {
+         D3D11_MAPPED_SUBRESOURCE map = {};
+         CheckDeviceCall(d, d.context->Map(vertex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map), "Discard VB");
+         memcpy(map.pData, vertices, sizeof vertices);
+         d.context->Unmap(vertex.Get(), 0);
+         CheckDeviceCall(d, d.context->Map(constant.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map), "Discard CB");
+         memcpy(map.pData, colors[stripe], sizeof colors[0]);
+         d.context->Unmap(constant.Get(), 0);
+         CheckDeviceCall(d, d.context->Map(index.Get(), 0,
+            stripe ? D3D11_MAP_WRITE_NO_OVERWRITE : D3D11_MAP_WRITE_DISCARD, 0, &map), "Append IB");
+         memcpy((uint16_t *)map.pData + 2 + stripe * 6, indices, sizeof indices);
+         d.context->Unmap(index.Get(), 0);
+      }
+      if (rebind || immutable) {
          d.context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
          d.context->IASetIndexBuffer(index.Get(), DXGI_FORMAT_R16_UINT, 4);
          d.context->PSSetConstantBuffers(0, 1, &cb);
       }
-      d.context->DrawIndexed(6, stripe * 6, 0);
+      if (vertexId) {
+         viewport.TopLeftX = (float)(stripe * 16);
+         viewport.Width = 16;
+         d.context->RSSetViewports(1, &viewport);
+         d.context->Draw(3, 0);
+      } else {
+         d.context->DrawIndexed(6, stripe * 6, 0);
+      }
    }
    desc.Usage = D3D11_USAGE_STAGING;
    desc.BindFlags = 0;
@@ -385,7 +433,8 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
       }
    }
    d.context->Unmap(readback.Get(), 0);
-   printf("dynamic buffer reuse: mismatches=%u/4096 draws=%u rebind=%d\n", mismatches, single ? 4 : 32, rebind);
+   printf("dynamic buffer reuse: mismatches=%u/4096 draws=%u rebind=%d immutable=%d vertexId=%d noCull=%d\n",
+          mismatches, single ? 4 : 32, rebind, immutable, vertexId, noCull);
    d.context->ClearState();
    if (mismatches)
       Check(E_FAIL, "Dynamic buffer reuse contents");
@@ -903,10 +952,12 @@ int main(int argc, char **argv)
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
        strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") && strcmp(mode, "--buffer-reuse") &&
-       strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
+       strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") &&
+       strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
+       strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       return 2;
    }
    DWORD session;
@@ -947,6 +998,9 @@ int main(int argc, char **argv)
          SharedSampleReuseTest(adapter.Get());
       else if (!strcmp(mode, "--buffer-reuse") || !strcmp(mode, "--buffer-rebind") || !strcmp(mode, "--buffer-first"))
          DynamicBufferReuseTest(adapter.Get(), !strcmp(mode, "--buffer-rebind"), !strcmp(mode, "--buffer-first"));
+      else if (!strcmp(mode, "--buffer-static") || !strcmp(mode, "--buffer-vertexid") || !strcmp(mode, "--buffer-nocull"))
+         DynamicBufferReuseTest(adapter.Get(), false, true, !strcmp(mode, "--buffer-static"),
+                               !strcmp(mode, "--buffer-vertexid"), !strcmp(mode, "--buffer-nocull"));
       else if (!strcmp(mode, "--timestamp"))
          TimestampTest(adapter.Get());
       else if (!strcmp(mode, "--query-poll"))
