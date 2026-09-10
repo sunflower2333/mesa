@@ -43,6 +43,7 @@ struct Device {
 
 // Reference behavior only. This mode never counts as VIOGPU acceptance.
 static bool warpControl;
+static DXGI_FORMAT sharedTextureFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
 
 static void PrintClientIdentity()
 {
@@ -115,6 +116,27 @@ static const float colors[][4] = {
    {1, 0, 1, 1}, {0, 1, 0, 1}, {0, 0, 1, 1}, {1, 1, 0, 1},
 };
 
+static void PixelBytes(DXGI_FORMAT format, const float color[4], unsigned char bytes[4])
+{
+   if (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_B8G8R8A8_UNORM)
+      Check(E_INVALIDARG, "Four-channel UNORM readback format");
+   const bool rgba = format == DXGI_FORMAT_R8G8B8A8_UNORM;
+   bytes[0] = (unsigned char)(255 * color[rgba ? 0 : 2]);
+   bytes[1] = (unsigned char)(255 * color[1]);
+   bytes[2] = (unsigned char)(255 * color[rgba ? 2 : 0]);
+   bytes[3] = (unsigned char)(255 * color[3]);
+}
+
+static void CheckSharedFormat(ID3D11Texture2D *texture)
+{
+   D3D11_TEXTURE2D_DESC desc;
+   texture->GetDesc(&desc);
+   printf("shared format=%u expected=%u size=%ux%u\n", unsigned(desc.Format),
+          unsigned(sharedTextureFormat), desc.Width, desc.Height);
+   if (desc.Format != sharedTextureFormat)
+      Check(E_FAIL, "Shared texture must retain its format when opened");
+}
+
 static void VerifyPixels(Device &d, ID3D11Texture2D *texture,
                          const float color[4], const char *label,
                          const float *inset = NULL)
@@ -132,17 +154,11 @@ static void VerifyPixels(Device &d, ID3D11Texture2D *texture,
    D3D11_MAPPED_SUBRESOURCE map;
    CheckDeviceCall(d, d.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map),
                    "Map readback");
-   const unsigned char expected[] = {
-      (unsigned char)(255 * color[2]), (unsigned char)(255 * color[1]),
-      (unsigned char)(255 * color[0]), (unsigned char)(255 * color[3]),
-   };
+   unsigned char expected[4];
+   PixelBytes(desc.Format, color, expected);
    unsigned char insetExpected[4] = {};
-   if (inset) {
-      insetExpected[0] = (unsigned char)(255 * inset[2]);
-      insetExpected[1] = (unsigned char)(255 * inset[1]);
-      insetExpected[2] = (unsigned char)(255 * inset[0]);
-      insetExpected[3] = (unsigned char)(255 * inset[3]);
-   }
+   if (inset)
+      PixelBytes(desc.Format, inset, insetExpected);
    unsigned mismatches = 0;
    unsigned char first[4];
    memcpy(first, map.pData, sizeof first);
@@ -182,6 +198,9 @@ static void SampleTexture(Device &d, ID3D11Texture2D *source, const float color[
    D3D11_TEXTURE2D_DESC desc;
    source->GetDesc(&desc);
    desc.MiscFlags = 0;
+   // RGBA shared inputs must be interpreted by the sampler before BGRA
+   // composition. A same-format raw copy would miss swapped channel metadata.
+   desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
    ComPtr<ID3D11Texture2D> output;
    Check(d.device->CreateTexture2D(&desc, NULL, &output), "Create sample output");
    ComPtr<ID3D11RenderTargetView> target;
@@ -659,7 +678,12 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
    D3D11_TEXTURE2D_DESC desc = {};
    desc.Width = desc.Height = 64;
    desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-   desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+   desc.Format = sharedTextureFormat;
+   if (sharedTextureFormat == DXGI_FORMAT_R8G8B8A8_UNORM) {
+      // Match the Explorer atlas that failed in CreateResource.
+      desc.Width = 1280;
+      desc.Height = 224;
+   }
    desc.Usage = D3D11_USAGE_DEFAULT;
    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
    desc.MiscFlags = local ? 0 : keyed ? D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
@@ -685,8 +709,11 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
       VerifyPixels(producer, texture.Get(), colors[frame], "producer");
       if (keyed)
          Check(producerMutex->ReleaseSync(frame + 1), "Producer ReleaseSync");
-      if (local)
+      if (local) {
+         if (sharedTextureFormat == DXGI_FORMAT_R8G8B8A8_UNORM)
+            SampleTexture(producer, texture.Get(), colors[frame]);
          continue;
+      }
 
       if (!opened) {
          HANDLE handle = NULL;
@@ -713,6 +740,7 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
          }
          if (keyed)
             Check(opened.As(&consumerMutex), "Consumer keyed mutex");
+         CheckSharedFormat(opened.Get());
       }
       if (keyed)
          Acquire(consumerMutex.Get(), frame + 1, "Consumer AcquireSync");
@@ -723,12 +751,8 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
       if (partial) {
          const float *changed = colors[(frame + 1) % ARRAYSIZE(colors)];
          unsigned char data[32 * 32 * 4];
-         for (unsigned p = 0; p < 32 * 32; ++p) {
-            data[p * 4] = (unsigned char)(255 * changed[2]);
-            data[p * 4 + 1] = (unsigned char)(255 * changed[1]);
-            data[p * 4 + 2] = (unsigned char)(255 * changed[0]);
-            data[p * 4 + 3] = 255;
-         }
+         for (unsigned p = 0; p < 32 * 32; ++p)
+            PixelBytes(desc.Format, changed, data + p * 4);
          const D3D11_BOX box = {16, 16, 0, 48, 48, 1};
          consumer.context->UpdateSubresource(opened.Get(), 0, &box, data, 32 * 4, 0);
          consumer.context->Flush();
@@ -783,11 +807,15 @@ static void ProcessConsumer(IDXGIAdapter *adapter, HANDLE shared, HANDLE ready, 
    ComPtr<ID3D11Texture2D> opened;
    for (unsigned frame = 0; frame < ARRAYSIZE(colors); ++frame) {
       WaitEvent(ready, "Child waits for producer");
-      if (!opened)
+      if (!opened) {
          Check(consumer.device->OpenSharedResource(shared, IID_PPV_ARGS(&opened)),
                "Child OpenSharedResource");
+         CheckSharedFormat(opened.Get());
+      }
       printf("CHILD FRAME %u pid=%lu\n", frame, GetCurrentProcessId());
       VerifyPixels(consumer, opened.Get(), colors[frame], "cross-process consumer");
+      if (sharedTextureFormat == DXGI_FORMAT_R8G8B8A8_UNORM)
+         SampleTexture(consumer, opened.Get(), colors[frame]);
       CheckWin(SetEvent(done), "Child signals readback complete");
    }
 }
@@ -812,7 +840,7 @@ static void ProcessSharedTest(IDXGIAdapter *adapter)
    D3D11_TEXTURE2D_DESC desc = {};
    desc.Width = desc.Height = 64;
    desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-   desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+   desc.Format = sharedTextureFormat;
    desc.Usage = D3D11_USAGE_DEFAULT;
    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
@@ -844,7 +872,9 @@ static void ProcessSharedTest(IDXGIAdapter *adapter)
    if (!length || length >= ARRAYSIZE(executable))
       Check(E_FAIL, "Resolve child executable");
    wchar_t command[MAX_PATH + 160];
-   if (swprintf_s(command, L"\"%ls\" --process-child %llu %llu %llu", executable,
+   const wchar_t *childMode = sharedTextureFormat == DXGI_FORMAT_R8G8B8A8_UNORM ?
+      L"--rgba-process-child" : L"--process-child";
+   if (swprintf_s(command, L"\"%ls\" %ls %llu %llu %llu", executable, childMode,
                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(shared)),
                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(child.ready)),
                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(child.done))) < 0)
@@ -885,6 +915,8 @@ static void ProcessSharedTest(IDXGIAdapter *adapter)
 
 static void CompositionTest(IDXGIAdapter *adapter)
 {
+   const UINT width = sharedTextureFormat == DXGI_FORMAT_R8G8B8A8_UNORM ? 1280 : 256;
+   const UINT height = sharedTextureFormat == DXGI_FORMAT_R8G8B8A8_UNORM ? 224 : 256;
    Device d = CreateDevice(adapter);
    ComPtr<ID3D11DeviceContext1> context1;
    Check(d.context.As(&context1), "ID3D11DeviceContext1");
@@ -896,7 +928,7 @@ static void CompositionTest(IDXGIAdapter *adapter)
       Check(HRESULT_FROM_WIN32(GetLastError()), "RegisterClass");
    HWND hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, wc.lpszClassName,
                               L"VIOGPU DirectComposition", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                              100, 100, 320, 320, NULL, NULL, wc.hInstance, NULL);
+                              100, 100, int(width + 64), int(height + 64), NULL, NULL, wc.hInstance, NULL);
    if (!hwnd)
       Check(HRESULT_FROM_WIN32(GetLastError()), "CreateWindow");
    ComPtr<IDXGIDevice> dxgi;
@@ -908,7 +940,7 @@ static void CompositionTest(IDXGIAdapter *adapter)
    ComPtr<IDCompositionSurface> surface;
    Check(comp->CreateTargetForHwnd(hwnd, TRUE, &target), "CreateTargetForHwnd");
    Check(comp->CreateVisual(&visual), "CreateVisual");
-   Check(comp->CreateSurface(256, 256, DXGI_FORMAT_B8G8R8A8_UNORM,
+   Check(comp->CreateSurface(width, height, sharedTextureFormat,
                             DXGI_ALPHA_MODE_PREMULTIPLIED, &surface), "CreateSurface");
    Check(visual->SetContent(surface.Get()), "SetContent");
    Check(target->SetRoot(visual.Get()), "SetRoot");
@@ -917,10 +949,11 @@ static void CompositionTest(IDXGIAdapter *adapter)
       ComPtr<ID3D11Texture2D> texture;
       POINT offset;
       Check(surface->BeginDraw(NULL, IID_PPV_ARGS(&texture), &offset), "BeginDraw");
+      CheckSharedFormat(texture.Get());
       ComPtr<ID3D11RenderTargetView> view;
       HRESULT drawHr = d.device->CreateRenderTargetView(texture.Get(), NULL, &view);
       if (SUCCEEDED(drawHr)) {
-         const D3D11_RECT rect = {offset.x, offset.y, offset.x + 256, offset.y + 256};
+         const D3D11_RECT rect = {offset.x, offset.y, offset.x + LONG(width), offset.y + LONG(height)};
          context1->ClearView(view.Get(), colors[frame], &rect, 1);
          d.context->Flush();
       }
@@ -1330,6 +1363,21 @@ int main(int argc, char **argv)
    setvbuf(stdout, NULL, _IONBF, 0);
    PrintClientIdentity();
    const char *mode = argc >= 2 ? argv[1] : "--shared";
+   const char *requestedMode = mode;
+   const struct { const char *requested; const char *operation; } rgbaModes[] = {
+      {"--rgba-shared", "--shared"}, {"--rgba-sample", "--sample"},
+      {"--rgba-keyed", "--keyed"}, {"--rgba-nt", "--nt"},
+      {"--rgba-partial", "--partial"}, {"--rgba-process", "--process"},
+      {"--rgba-process-child", "--process-child"}, {"--rgba-dcomp", "--dcomp"},
+      {"--rgba-local-warp", "--local"},
+   };
+   for (const auto &entry : rgbaModes) {
+      if (!strcmp(mode, entry.requested)) {
+         sharedTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+         mode = entry.operation;
+         break;
+      }
+   }
    const bool child = !strcmp(mode, "--process-child") && argc == 5;
    if (!child && ((argc != 1 && argc != 2) ||
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
@@ -1351,12 +1399,14 @@ int main(int argc, char **argv)
       printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait|--sample-reuse-warp\n");
       printf("Format capability contract: --format-caps\n");
       printf("Multisample render/resolve/load: --msaa|--msaa-warp (reference only)\n");
+      printf("RGBA shared atlas: --rgba-shared|--rgba-sample|--rgba-keyed|--rgba-nt|--rgba-partial|--rgba-process|--rgba-dcomp|--rgba-local-warp\n");
       return 2;
    }
    DWORD session;
    ProcessIdToSessionId(GetCurrentProcessId(), &session);
-   printf("mode=%s session=%lu pid=%lu\n", mode, session, GetCurrentProcessId());
-   warpControl = !strcmp(mode, "--sample-reuse-warp") || !strcmp(mode, "--msaa-warp");
+   printf("mode=%s session=%lu pid=%lu\n", requestedMode, session, GetCurrentProcessId());
+   warpControl = !strcmp(mode, "--sample-reuse-warp") || !strcmp(mode, "--msaa-warp") ||
+                 !strcmp(requestedMode, "--rgba-local-warp");
    try {
       if (!strcmp(mode, "--buffer-signatures")) {
          BufferSignatureTest();
@@ -1398,7 +1448,7 @@ int main(int argc, char **argv)
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--sample-reuse") || !strcmp(mode, "--sample-reuse-unbind") ||
-               !strcmp(mode, "--sample-reuse-wait") || warpControl)
+               !strcmp(mode, "--sample-reuse-wait") || !strcmp(mode, "--sample-reuse-warp"))
          SharedSampleReuseTest(adapter.Get(), mode);
       else if (!strncmp(mode, "--buffer-", 9))
          DynamicBufferReuseTest(adapter.Get(), mode);
@@ -1410,11 +1460,11 @@ int main(int argc, char **argv)
          CompositionTimingSample();
       else
          SharedTest(adapter.Get(), mode);
-      printf("RESULT: PASS mode=%s%s\n", mode,
+      printf("RESULT: PASS mode=%s%s\n", requestedMode,
              warpControl ? " reference WARP only; not VIOGPU validation" : "");
       return 0;
    } catch (HRESULT hr) {
-      printf("RESULT: FAIL mode=%s hr=0x%08lx\n", mode, (unsigned long)hr);
+      printf("RESULT: FAIL mode=%s hr=0x%08lx\n", requestedMode, (unsigned long)hr);
       return 1;
    }
 }

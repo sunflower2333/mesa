@@ -8,6 +8,7 @@ value.allocation.flag.gpu_read_only=8
 value.format.none=0
 value.format.b8g8r8a8_unorm=1
 value.format.b8g8r8x8_unorm=2
+value.format.r8g8b8a8_unorm=3
 value.context.flags.none=0
 value.escape.opcode.get_context_info=1
 value.escape.opcode.get_completed_fence=2

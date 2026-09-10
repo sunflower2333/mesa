@@ -33,6 +33,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Compiled shader signatures failed' }
           & ./signatures/check.exe --msaa-warp
           if ($LASTEXITCODE -ne 0) { throw 'MSAA reference pixels failed (WARP control only)' }
+          & ./signatures/check.exe --rgba-local-warp
+          if ($LASTEXITCODE -ne 0) { throw 'RGBA reference readback failed (WARP control only)' }
   build:
     runs-on: windows-2025-vs2026
     strategy:
