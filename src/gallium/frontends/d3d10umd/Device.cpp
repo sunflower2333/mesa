@@ -616,8 +616,9 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
 {
    //LOG_ENTRYPOINT();
 
-   /* XXX: Disable MSAA */
-   *pNumQualityLevels = 0;
+   /* The DDI requires one quality level for single-sample resources even
+    * while multisample rendering is disabled. Zero rejects ordinary targets. */
+   *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
 }
 
 

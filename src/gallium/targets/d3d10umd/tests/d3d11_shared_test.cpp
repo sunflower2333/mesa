@@ -1114,6 +1114,33 @@ static void CompositionTimingSample()
    }
 }
 
+static void FormatCapsTest(IDXGIAdapter *adapter)
+{
+   Device d = CreateDevice(adapter);
+   bool valid = true;
+   const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM,
+      DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+      DXGI_FORMAT_D24_UNORM_S8_UINT};
+   for (DXGI_FORMAT format : formats) {
+      UINT caps = 0;
+      Check(d.device->CheckFormatSupport(format, &caps), "CheckFormatSupport");
+      printf("format=%u caps=0x%08x render_target=%d msaa_target=%d msaa_resolve=%d\n",
+             unsigned(format), caps, !!(caps & D3D11_FORMAT_SUPPORT_RENDER_TARGET),
+             !!(caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET),
+             !!(caps & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE));
+      for (UINT count : {1u, 2u, 4u, 8u}) {
+         UINT quality = 0xdeadbeef;
+         HRESULT hr = d.device->CheckMultisampleQualityLevels(format, count, &quality);
+         printf("format=%u samples=%u quality=%u hr=0x%08lx\n",
+                unsigned(format), count, quality, (unsigned long)hr);
+         if (FAILED(hr) || (count == 1 && quality != 1))
+            valid = false;
+      }
+   }
+   Check(valid ? S_OK : E_FAIL, "Single-sample quality contract");
+   CheckDevice(d, "Format capability queries");
+}
+
 int main(int argc, char **argv)
 {
    setvbuf(stdout, NULL, _IONBF, 0);
@@ -1130,13 +1157,14 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
        strcmp(mode, "--buffer-fetch") && strcmp(mode, "--buffer-large") && strcmp(mode, "--buffer-fetch-large") &&
-       strcmp(mode, "--buffer-signatures") &&
+       strcmp(mode, "--buffer-signatures") && strcmp(mode, "--format-caps") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large|--buffer-signatures\n");
       printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait|--sample-reuse-warp\n");
+      printf("Format capability contract: --format-caps\n");
       return 2;
    }
    DWORD session;
@@ -1177,6 +1205,8 @@ int main(int argc, char **argv)
          ProcessSharedTest(adapter.Get());
       else if (!strcmp(mode, "--dcomp"))
          CompositionTest(adapter.Get());
+      else if (!strcmp(mode, "--format-caps"))
+         FormatCapsTest(adapter.Get());
       else if (!strcmp(mode, "--shader-lifetime"))
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--sample-reuse") || !strcmp(mode, "--sample-reuse-unbind") ||
