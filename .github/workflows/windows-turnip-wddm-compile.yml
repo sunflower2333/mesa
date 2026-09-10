@@ -40,6 +40,21 @@ permissions:
   contents: read
 
 jobs:
+  cs-failure-tests:
+    name: Command stream allocation failure regression
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Execute production substream failure paths
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/tu_cs_failure_test.py
+
   compile:
     name: ARM64 SDK/WDK compile
     runs-on: windows-2025-vs2026
@@ -255,6 +270,7 @@ jobs:
           $mesonOptions = @(
             '--backend=ninja',
             '--buildtype=release',
+            '-Ddebug=true',
             '-Dplatforms=windows',
             '-Dvulkan-drivers=freedreno',
             '-Dfreedreno-kmds=wddm',
@@ -674,5 +690,13 @@ jobs:
         with:
           name: turnip-wddm-arm64-icd-bundle
           path: ${{ runner.temp }}/turnip-wddm-arm64-icd/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload matching optimized Turnip symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: turnip-wddm-arm64-symbols
+          path: ${{ runner.temp }}/mesa-turnip-wddm-arm64/src/freedreno/vulkan/vulkan_freedreno.pdb
           if-no-files-found: error
           retention-days: 7

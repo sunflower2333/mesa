@@ -346,6 +346,12 @@ tu_cs_begin_sub_stream_aligned(struct tu_cs *cs, uint32_t count,
    assert(cs->mode == TU_CS_MODE_SUB_STREAM);
    assert(size);
 
+   /* A failed parent uses sink cursors which are not offsets in its BO. */
+   if (unlikely(cs->status != VK_SUCCESS)) {
+      tu_cs_init_failed_external(sub_cs, cs, cs->status);
+      return cs->status;
+   }
+
    VkResult result;
    if (tu_cs_get_space(cs) < count * size) {
       /* When we have to allocate a new BO, assume that the alignment of the
@@ -357,9 +363,7 @@ tu_cs_begin_sub_stream_aligned(struct tu_cs *cs, uint32_t count,
       cs->start += (size - tu_cs_get_offset(cs)) % size;
    }
    if (result != VK_SUCCESS) {
-      /* Freshly declared, nothing owned yet so safe to zero. */
-      memset(sub_cs, 0, sizeof(*sub_cs));
-      tu_cs_fail(sub_cs, result);
+      tu_cs_init_failed_external(sub_cs, cs, result);
       return result;
    }
 

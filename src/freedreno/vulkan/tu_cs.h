@@ -206,6 +206,21 @@ tu_cs_fail(struct tu_cs *cs, VkResult result)
    cs->reserved_end = tu_cs_fail_sink + ARRAY_SIZE(tu_cs_fail_sink);
 }
 
+/* Emitters continue recording after a failed allocation and may read device
+ * properties before writing to the failure sink (for example blend state).
+ * Preserve that context, but never expose the sink as a valid GPU stream.
+ */
+static inline void
+tu_cs_init_failed_external(struct tu_cs *cs, const struct tu_cs *parent,
+                           VkResult result)
+{
+   tu_cs_init_external(cs, parent->device, tu_cs_fail_sink,
+                       tu_cs_fail_sink + ARRAY_SIZE(tu_cs_fail_sink), 0,
+                       parent->writeable);
+   cs->name = parent->name;
+   tu_cs_fail(cs, result);
+}
+
 uint64_t
 tu_cs_get_cur_iova(const struct tu_cs *cs);
 
@@ -216,9 +231,7 @@ tu_cs_draw_state(struct tu_cs *sub_cs, struct tu_cs *cs, uint32_t size)
 
    VkResult result = tu_cs_alloc(sub_cs, size, 1, &memory);
    if (result != VK_SUCCESS) {
-      /* Freshly declared, nothing owned yet so safe to zero. */
-      memset(cs, 0, sizeof(*cs));
-      tu_cs_fail(cs, result);
+      tu_cs_init_failed_external(cs, sub_cs, result);
       return (struct tu_draw_state) {};
    }
    tu_cs_init_external(cs, sub_cs->device, memory.map, memory.map + size,
