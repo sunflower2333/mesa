@@ -210,6 +210,8 @@ QueryEnd(D3D10DDI_HDEVICE hDevice,  // IN
       // GetData(DO_NOT_FLUSH) must be able to poll it without a GPU wait.
       pipe->screen->fence_reference(pipe->screen, &pQuery->completion_fence, NULL);
       pipe->flush(pipe, &pQuery->completion_fence, PIPE_FLUSH_DEFERRED);
+      if (CheckDeviceRemoved(hDevice))
+         return;
       if (!pQuery->completion_fence)
          SetError(hDevice, E_OUTOFMEMORY);
    }
@@ -235,6 +237,9 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
 {
    LOG_ENTRYPOINT();
 
+   if (CheckDeviceRemoved(hDevice))
+      return;
+
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
    Query *pQuery = CastQuery(hQuery);
@@ -245,9 +250,12 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
    // a context the backend may submit that batch, but the timeout stays zero.
    struct pipe_screen *screen = pipe->screen;
    const bool noFlush = (Flags & D3D10_DDI_GET_DATA_DO_NOT_FLUSH) != 0;
-   if (!pQuery->completion_fence ||
-       !screen->fence_finish(screen, noFlush ? NULL : pipe,
-                             pQuery->completion_fence, 0)) {
+   const bool completed = pQuery->completion_fence &&
+      screen->fence_finish(screen, noFlush ? NULL : pipe,
+                            pQuery->completion_fence, 0);
+   if (CheckDeviceRemoved(hDevice))
+      return;
+   if (!completed) {
       SetError(hDevice, DXGI_DDI_ERR_WASSTILLDRAWING);
       return;
    }
@@ -265,6 +273,8 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
       ret = true;
    }
 
+   if (CheckDeviceRemoved(hDevice))
+      return;
    if (!ret) {
       SetError(hDevice, DXGI_DDI_ERR_WASSTILLDRAWING);
       return;

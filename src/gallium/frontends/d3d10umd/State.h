@@ -178,6 +178,22 @@ SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
 }
 
 
+/* Gallium fences may become signaled on reset to release waiters. That is
+ * not successful D3D work: report removal on the invoking runtime thread
+ * before publishing query data or shared pixels from the lost device. */
+static inline bool
+CheckDeviceRemoved(D3D10DDI_HDEVICE hDevice)
+{
+   struct pipe_context *pipe = CastPipeContext(hDevice);
+   if (pipe->get_device_reset_status &&
+       pipe->get_device_reset_status(pipe) != PIPE_NO_RESET) {
+      SetError(hDevice, D3DDDIERR_DEVICEREMOVED);
+      return true;
+   }
+   return false;
+}
+
+
 struct Resource
 {
    /* A shared resource needs a real kernel allocation behind it: without one

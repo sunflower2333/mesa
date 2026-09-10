@@ -333,6 +333,8 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    HRESULT hr = FAILED(lock_hr) ? lock_hr : unlock_hr;
    if (SUCCEEDED(lock_hr) && unlock_hr == E_UNEXPECTED)
       hr = E_FAIL;
+   if (reset_status != PIPE_NO_RESET)
+      hr = D3DDDIERR_DEVICEREMOVED;
    {
       LARGE_INTEGER transferEnd;
       QueryPerformanceCounter(&transferEnd);
