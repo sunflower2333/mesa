@@ -44,6 +44,32 @@
 #include "util/u_rect.h"
 #include "util/u_surface.h"
 
+static VIOGPU_WDDM_UINT32
+SharedPrivateFormat(DXGI_FORMAT format)
+{
+   switch (format) {
+   case DXGI_FORMAT_B8G8R8A8_UNORM:
+      return VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
+   case DXGI_FORMAT_R8G8B8A8_UNORM:
+      return VIOGPU_WDDM_FORMAT_R8G8B8A8_UNORM;
+   default:
+      return VIOGPU_WDDM_FORMAT_NONE;
+   }
+}
+
+static DXGI_FORMAT
+SharedDxgiFormat(VIOGPU_WDDM_UINT32 format)
+{
+   switch (format) {
+   case VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM:
+      return DXGI_FORMAT_B8G8R8A8_UNORM;
+   case VIOGPU_WDDM_FORMAT_R8G8B8A8_UNORM:
+      return DXGI_FORMAT_R8G8B8A8_UNORM;
+   default:
+      return DXGI_FORMAT_UNKNOWN;
+   }
+}
+
 static struct pipe_resource *
 CreateSharedTextureCache(struct pipe_screen *screen, const struct pipe_resource *templat)
 {
@@ -110,7 +136,7 @@ EnsureSharedCopy(Device *device, Resource *resource)
       info.Size = (VIOGPU_WDDM_UINT64)info.Pitch * info.Height;
       info.Alignment = 4096;
       info.Flags = VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
-      info.Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
+      info.Format = SharedPrivateFormat(resource->Format);
       D3DDDI_ALLOCATIONINFO allocation = {};
       allocation.pPrivateDriverData = &info;
       allocation.PrivateDriverDataSize = sizeof(info);
@@ -737,8 +763,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    const bool present = CastDevice(hDevice)->runtime_present &&
                         (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT);
    const bool kernelBacked = shared || present || pResource->scanout_primary;
+   const VIOGPU_WDDM_UINT32 sharedFormat = SharedPrivateFormat(pCreateResource->Format);
    if (kernelBacked && (templat.target != PIPE_TEXTURE_2D ||
-                  templat.format != PIPE_FORMAT_B8G8R8A8_UNORM ||
+                  sharedFormat == VIOGPU_WDDM_FORMAT_NONE ||
                   templat.width0 == 0 || templat.width0 > UINT_MAX / 4 ||
                   templat.height0 == 0 || templat.array_size != 1 ||
                   templat.last_level != 0 || templat.nr_samples != 1 ||
@@ -805,7 +832,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          privateData.RefreshRateNumerator = pCreateResource->pPrimaryDesc->ModeDesc.RefreshRate.Numerator;
          privateData.RefreshRateDenominator = pCreateResource->pPrimaryDesc->ModeDesc.RefreshRate.Denominator;
       }
-      privateData.Format = VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM;
+      // The allocation's format is also returned to OpenResource in another
+      // process. Preserve RGBA rather than interpreting its bytes as BGRA.
+      privateData.Format = sharedFormat;
       privateData.Width = shared_width;
       privateData.Height = shared_height;
       privateData.Pitch = shared_pitch;
@@ -1024,6 +1053,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
 
    VIOGPU_WDDM_ALLOCATION_INFO info;
    memcpy(&info, openInfo->pPrivateDriverData, sizeof info);
+   const DXGI_FORMAT sharedFormat = SharedDxgiFormat(info.Format);
    if (info.Header.Magic != VIOGPU_WDDM_ABI_MAGIC ||
        info.Header.Version != VIOGPU_WDDM_ABI_VERSION ||
        info.Header.Size != sizeof info || info.Header.Reserved != 0 ||
@@ -1031,7 +1061,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
         info.Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY) ||
        (info.Flags == VIOGPU_WDDM_ALLOCATION_PRIMARY &&
         (info.RefreshRateNumerator == 0 || info.RefreshRateDenominator == 0)) ||
-       info.Format != VIOGPU_WDDM_FORMAT_B8G8R8A8_UNORM ||
+       sharedFormat == DXGI_FORMAT_UNKNOWN ||
        info.Width == 0 || info.Width > UINT_MAX / 4 || info.Height == 0 ||
        info.Pitch < info.Width * 4 ||
        (VIOGPU_WDDM_UINT64)info.Pitch * info.Height > info.Size ||
@@ -1044,7 +1074,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    struct pipe_resource templat;
    memset(&templat, 0, sizeof templat);
    templat.target = PIPE_TEXTURE_2D;
-   templat.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   templat.format = FormatTranslate(sharedFormat, false);
    templat.width0 = info.Width;
    templat.height0 = info.Height;
    templat.depth0 = 1;
@@ -1061,7 +1091,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
       return;
    }
 
-   pResource->Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+   pResource->Format = sharedFormat;
    pResource->MipLevels = 1;
    pResource->NumSubResources = 1;
    pResource->buffer = false;
