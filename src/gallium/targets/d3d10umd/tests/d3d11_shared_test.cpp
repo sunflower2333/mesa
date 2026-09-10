@@ -277,7 +277,7 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter)
    CheckDevice(consumer, "Reuse consumer final");
 }
 
-static void DynamicBufferReuseTest(IDXGIAdapter *adapter)
+static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool single)
 {
    // Keep bindings fixed while DISCARD replaces vertex/constant storage and
    // NO_OVERWRITE appends indices. No intermediate readbacks may serialize
@@ -338,7 +338,7 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter)
    d.context->RSSetViewports(1, &viewport);
    const float black[4] = {0, 0, 0, 1};
    d.context->ClearRenderTargetView(target.Get(), black);
-   for (unsigned draw = 0; draw < 32; ++draw) {
+   for (unsigned draw = 0; draw < (single ? 4u : 32u); ++draw) {
       const unsigned stripe = draw % 4;
       const float left = -1.0f + stripe * 0.5f, right = left + 0.5f;
       const float vertices[5][4] = {{100, 100, 0, 1},
@@ -355,6 +355,11 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter)
       const uint16_t indices[] = {0, 1, 2, 2, 1, 3};
       memcpy((uint16_t *)map.pData + 2 + stripe * 6, indices, sizeof indices);
       d.context->Unmap(index.Get(), 0);
+      if (rebind) {
+         d.context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+         d.context->IASetIndexBuffer(index.Get(), DXGI_FORMAT_R16_UINT, 4);
+         d.context->PSSetConstantBuffers(0, 1, &cb);
+      }
       d.context->DrawIndexed(6, stripe * 6, 0);
    }
    desc.Usage = D3D11_USAGE_STAGING;
@@ -366,6 +371,10 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter)
    D3D11_MAPPED_SUBRESOURCE map = {};
    CheckDeviceCall(d, d.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &map), "Read buffer reuse stripes");
    unsigned mismatches = 0;
+   for (unsigned stripe = 0; stripe < 4; ++stripe) {
+      const unsigned char *pixel = (const unsigned char *)map.pData + 32 * map.RowPitch + (stripe * 16 + 8) * 4;
+      printf("buffer stripe %u: BGRA=%u,%u,%u,%u\n", stripe, pixel[0], pixel[1], pixel[2], pixel[3]);
+   }
    for (UINT y = 0; y < desc.Height; ++y) {
       const unsigned char *row = (const unsigned char *)map.pData + y * map.RowPitch;
       for (UINT x = 0; x < desc.Width; ++x) {
@@ -376,7 +385,7 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter)
       }
    }
    d.context->Unmap(readback.Get(), 0);
-   printf("dynamic buffer reuse: mismatches=%u/4096 draws=32\n", mismatches);
+   printf("dynamic buffer reuse: mismatches=%u/4096 draws=%u rebind=%d\n", mismatches, single ? 4 : 32, rebind);
    d.context->ClearState();
    if (mismatches)
       Check(E_FAIL, "Dynamic buffer reuse contents");
@@ -893,7 +902,8 @@ int main(int argc, char **argv)
    if (!child && ((argc != 1 && argc != 2) ||
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
-       strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") && strcmp(mode, "--buffer-reuse") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
+       strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") && strcmp(mode, "--buffer-reuse") &&
+       strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") && strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
@@ -935,8 +945,8 @@ int main(int argc, char **argv)
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--sample-reuse"))
          SharedSampleReuseTest(adapter.Get());
-      else if (!strcmp(mode, "--buffer-reuse"))
-         DynamicBufferReuseTest(adapter.Get());
+      else if (!strcmp(mode, "--buffer-reuse") || !strcmp(mode, "--buffer-rebind") || !strcmp(mode, "--buffer-first"))
+         DynamicBufferReuseTest(adapter.Get(), !strcmp(mode, "--buffer-rebind"), !strcmp(mode, "--buffer-first"));
       else if (!strcmp(mode, "--timestamp"))
          TimestampTest(adapter.Get());
       else if (!strcmp(mode, "--query-poll"))
