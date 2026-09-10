@@ -17,6 +17,7 @@
 #include <cwchar>
 #include <initializer_list>
 #include <vector>
+#include "dxbc_checksum.h"
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -1452,6 +1453,10 @@ static ComPtr<ID3DBlob> TextureResultBytecode(ID3DBlob *compiled, unsigned op, u
    memcpy(words.data(), compiled->GetBufferPointer(), bytes);
    Check(words[0] == 0x43425844 && words[6] == bytes &&
          words[7] <= words.size() - 8 ? S_OK : E_FAIL, "DXBC container header");
+   uint32_t checksum[4];
+   DxbcChecksum(words.data(),bytes,checksum);
+   Check(memcmp(checksum,words.data()+1,sizeof(checksum)) == 0 ? S_OK : E_FAIL,
+         "DXBC checksum matches original SDK output");
    // SM4 tokenized-program opcodes: sample, sample_l, sample_b, sample_d, ld.
    const unsigned expectedOpcodes[] = {69, 72, 74, 73, 45};
    Check(op < ARRAYSIZE(expectedOpcodes) && sw < 2 ? S_OK : E_FAIL, "Texture operand selection");
@@ -1484,12 +1489,11 @@ static ComPtr<ID3DBlob> TextureResultBytecode(ID3DBlob *compiled, unsigned op, u
       }
    }
    Check(changed == 1 ? S_OK : E_FAIL, "Exactly one resource-result operand patched");
-   // Re-serialize the container with the SDK so the checksum describes the
-   // changed code. WARP CreatePixelShader + exact readback validates it in CI.
-   const char marker[] = "texture-result operand regression";
+   DxbcChecksum(words.data(),bytes,checksum);
+   memcpy(words.data()+1,checksum,sizeof(checksum));
    ComPtr<ID3DBlob> result;
-   Check(D3DSetBlobPart(words.data(), bytes, D3D_BLOB_PRIVATE_DATA, 0,
-                       marker, sizeof(marker), &result), "Rebuild texture-result DXBC");
+   Check(D3DCreateBlob(bytes,&result), "Allocate texture-result DXBC");
+   memcpy(result->GetBufferPointer(),words.data(),bytes);
    return result;
 }
 

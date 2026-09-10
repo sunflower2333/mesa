@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'src/gallium/targets/d3d10umd/tests/d3d11_shared_test.cpp'
+      - 'src/gallium/targets/d3d10umd/tests/dxbc_checksum.h'
       - 'src/gallium/targets/d3d10umd/tests/d3d11_present_test.cpp'
       - 'src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp'
       - '.github/workflows/windows-d3d11-probes-arm64.yml'
