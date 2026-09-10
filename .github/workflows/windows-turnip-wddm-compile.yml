@@ -54,6 +54,9 @@ jobs:
       - name: Execute production substream failure paths
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_cs_failure_test.py
+      - name: Execute empty-submit queue ordering regression
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/tu_wddm_empty_submit_test.py
 
   compile:
     name: ARM64 SDK/WDK compile

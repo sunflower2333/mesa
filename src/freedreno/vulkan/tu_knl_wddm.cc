@@ -2661,7 +2661,12 @@ tu_wddm_queue_submit_locked(struct tu_queue *queue,
    struct tu_device *device = queue->device;
    const uint32_t entry_count = util_dynarray_num_elements(
       &submit->entries, struct tu_wddm_submit_entry);
-   uint32_t fence = 0;
+   /* Empty submits still signal after all earlier queue work. In particular,
+    * vkQueueWaitIdle uses an empty submit followed by a CPU wait; signaling
+    * it immediately lets the application overwrite command/shader storage
+    * while the GPU is still reading it. All WDDM queues share this context
+    * and its submission lock, so inherit its last transferred fence. */
+   uint32_t fence = device->wddm_context.last_submitted_fence;
    if (entry_count != 0) {
       if (!tu_wddm_submit_add_live_bos(device, submit))
          return vk_device_set_lost(
@@ -2697,7 +2702,7 @@ tu_wddm_queue_submit_locked(struct tu_queue *queue,
    for (uint32_t i = 0; i < signal_count; i++) {
       if (!tu_wddm_sync_set_submit_fence(signals[i].sync,
                                          &device->wddm_context, fence,
-                                         entry_count == 0))
+                                         fence == 0))
          return VK_ERROR_DEVICE_LOST;
    }
 
