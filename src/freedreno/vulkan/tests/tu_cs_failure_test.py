@@ -50,7 +50,8 @@ def main():
         functions.append(definition(header, "tu_cs_init_failed_external"))
     functions += [definition(source, "tu_cs_begin_sub_stream_aligned"),
                   definition(header, "tu_cs_draw_state"),
-                  definition(source, "tu_cs_end_sub_stream")]
+                  definition(source, "tu_cs_end_sub_stream"),
+                  definition(source, "tu_cs_reset")]
     fixture = (here / "tu_cs_failure_test.cpp").read_text()
     fixture = fixture.replace("// PRODUCTION_CS_STRUCTS", "\n".join(declarations))
     fixture = fixture.replace("// PRODUCTION_SINK_SIZE", sink_size)

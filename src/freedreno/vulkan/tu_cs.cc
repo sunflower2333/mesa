@@ -569,6 +569,12 @@ tu_cs_reset(struct tu_cs *cs)
                                                 sizeof(uint32_t));
    }
 
+   /* An allocation failure may have redirected cur/reserved_end to the
+    * failure sink before the first BO existed. Reset must discard those
+    * cursors too, otherwise a successful retry can treat the CPU sink as
+    * already allocated GPU storage. Keep start/end for suballocated streams. */
+   cs->cur = cs->reserved_end = cs->start;
+
    if (cs->read_write.bo_count) {
       cs->read_write.bos[0] = cs->read_write.bos[cs->read_write.bo_count - 1];
       cs->read_write.bo_count = 1;

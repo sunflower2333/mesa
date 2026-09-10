@@ -12,7 +12,7 @@
 using VkResult = int;
 constexpr VkResult VK_SUCCESS = 0;
 struct tu_device { unsigned property; };
-struct tu_bo { uint64_t iova; uint32_t *map; };
+struct tu_bo { uint64_t iova; uint32_t *map; uint32_t size; };
 struct tu_pkt;
 struct tu_crb;
 // PRODUCTION_CS_STRUCTS
@@ -20,10 +20,14 @@ struct tu_crb;
 uint32_t tu_cs_fail_sink[TU_CS_FAIL_SINK_SIZE];
 
 static uint32_t storage[256];
-static tu_bo backing{0x100000, storage};
+static tu_bo backing{0x100000, storage, sizeof(storage)};
 static tu_bo *backing_array[]{&backing};
 static VkResult allocation_result;
 static unsigned reserve_calls;
+static unsigned released_bos;
+#define TU_RMV(...) ((void)0)
+static void tu_bo_finish(tu_device *, tu_bo *) { ++released_bos; }
+static uint32_t tu_sanitize_ib_size(uint32_t size) { return size < 0xfffff ? size : 0xfffff; }
 static inline void tu_cs_fail(tu_cs *, VkResult);
 static uint32_t tu_cs_get_space(const tu_cs *cs) {
     return cs->cur && cs->end ? static_cast<uint32_t>(cs->end - cs->cur) : 0;
@@ -133,6 +137,39 @@ int main() {
         const auto entry = tu_cs_end_sub_stream(&cs, &child);
         check(entry.bo == &backing && entry.size == 64 && entry.offset == 32,
               "successful stream preserves real GPU storage");
+    }
+    for (VkResult error : errors) {
+        for (int route = 0; route < 3; ++route) {
+            tu_cs cs = parent(&device, false);
+            tu_bo *owned[]{&backing, &backing};
+            if (route != 0) {
+                cs.start = storage;
+                cs.cur = storage + 4;
+                cs.end = storage + ARRAY_SIZE(storage);
+                if (route == 1)
+                    cs.read_only = {owned, 2, 2, storage};
+                else
+                    cs.refcount_bo = &backing;
+            }
+            tu_cs_fail(&cs, error);
+            released_bos = 0;
+            tu_cs_reset(&cs);
+            check(cs.status == VK_SUCCESS && cs.cur == cs.start && cs.reserved_end == cs.start,
+                  "reset discards failed sink even before first BO");
+            check(cs.cur != tu_cs_fail_sink && cs.reserved_end == cs.start,
+                  "reset never exposes failure sink as successful storage");
+            check(released_bos == (route == 1 ? 1u : 0u) && cs.entry_count == 0,
+                  "reset retires only old BOs and entries");
+            check(route == 0 ? !cs.start && !cs.end : cs.start == storage &&
+                  cs.end == storage + ARRAY_SIZE(storage), "reset retains real backing bounds");
+            // Avoid invalid pointer arithmetic in the old-source negative control.
+            if (cs.cur != cs.start || cs.reserved_end != cs.start) continue;
+            tu_cs child{};
+            allocation_result = VK_SUCCESS;
+            check(tu_cs_begin_sub_stream_aligned(&cs, 2, 8, &child) == VK_SUCCESS &&
+                  child.start == storage && child.device == &device,
+                  "fresh recording after failure reset uses GPU backing");
+        }
     }
     std::printf("CS failure paths: %d/%d PASS\n", checks - failures, checks);
     return failures ? 1 : 0;
