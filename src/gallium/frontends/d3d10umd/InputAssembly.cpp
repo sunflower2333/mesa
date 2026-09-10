@@ -144,6 +144,9 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
       if (resource) {
          pDevice->vertex_strides[StartBuffer + i] = pStrides[i];
          vb->buffer_offset = pOffsets[i];
+         DebugPrintf("vertex bind: slot=%u resource=%p bytes=%u stride=%u offset=%u\n",
+                     StartBuffer + i, resource, resource->width0,
+                     pStrides[i], pOffsets[i]);
          if (vb->is_user_buffer) {
             vb->buffer.resource = NULL;
             vb->is_user_buffer = false;
@@ -297,6 +300,11 @@ CreateElementLayout(
       ve->src_offset          = pVertexElement->AlignedByteOffset;
       ve->vertex_buffer_index = pVertexElement->InputSlot;
       ve->src_format          = FormatTranslate(pVertexElement->Format, false);
+      DebugPrintf("vertex element: register=%u slot=%u offset=%u format=%u class=%u step=%u\n",
+                  pVertexElement->InputRegister, pVertexElement->InputSlot,
+                  pVertexElement->AlignedByteOffset, (unsigned)pVertexElement->Format,
+                  (unsigned)pVertexElement->InputSlotClass,
+                  pVertexElement->InstanceDataStepRate);
 
       switch (pVertexElement->InputSlotClass) {
       case D3D10_DDI_INPUT_PER_VERTEX_DATA:

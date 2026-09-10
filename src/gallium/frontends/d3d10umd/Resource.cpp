@@ -609,7 +609,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 {
    LOG_ENTRYPOINT();
 
-   if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) ||
+   if (pCreateResource->ResourceDimension == D3D10DDIRESOURCE_BUFFER ||
+       (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) ||
        (pCreateResource->pPrimaryDesc &&
         pCreateResource->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_OPTIONAL)) {
 
@@ -1255,6 +1256,10 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
    pMappedSubResource->pData = map;
    pMappedSubResource->RowPitch = pResource->transfers[SubResource]->stride;
    pMappedSubResource->DepthPitch = pResource->transfers[SubResource]->layer_stride;
+   if (pResource->buffer)
+      DebugPrintf("buffer map: res=%p mode=%u usage=%x bytes=%u map=%p layers=%u levels=%u\n",
+                  resource, (unsigned)DDIMap, usage, (unsigned)box.width,
+                  map, resource->array_size, resource->last_level + 1);
 }
 
 
@@ -1391,6 +1396,11 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    assert(dst_resource->array_size == src_resource->array_size);
 
    compatible = areResourcesCompatible(src_resource, dst_resource);
+   if (pSrcResource->buffer)
+      DebugPrintf("buffer copy: src=%p dst=%p bytes=%u layers=%u levels=%u compatible=%u\n",
+                  src_resource, dst_resource, dst_resource->width0,
+                  dst_resource->array_size, dst_resource->last_level + 1,
+                  (unsigned)compatible);
 
    /* could also use one 3d copy for arrays */
    for (unsigned layer = 0; layer < dst_resource->array_size; ++layer) {
