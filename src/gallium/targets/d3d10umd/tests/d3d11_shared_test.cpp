@@ -277,6 +277,74 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter)
    CheckDevice(consumer, "Reuse consumer final");
 }
 
+static const char bufferFetchVS[] =
+   "struct O{float4 p:SV_Position;float4 c:COLOR;};"
+   "O main(float4 c:POSITION,uint id:SV_VertexID){O o;"
+   "float2 p=float2((id<<1)&2,id&2);"
+   "o.p=float4(p*float2(2,-2)+float2(-1,1),0,1);o.c=c;return o;}";
+static const char bufferFetchPS[] =
+   // Keep the complete VS output layout, including the unused position.
+   // D3D stage linkage shares registers; COLOR alone would land in v0,
+   // while the VS writes COLOR to o1. User semantic names cannot fix that.
+   "struct O{float4 p:SV_Position;float4 c:COLOR;};"
+   "float4 main(O i):SV_Target{return i.c;}";
+
+static bool BufferSignaturesCompatible(ID3DBlob *vsCode, ID3DBlob *psCode)
+{
+   ComPtr<ID3D11ShaderReflection> vs, ps;
+   Check(D3DReflect(vsCode->GetBufferPointer(), vsCode->GetBufferSize(),
+                    IID_PPV_ARGS(&vs)), "Reflect buffer VS");
+   Check(D3DReflect(psCode->GetBufferPointer(), psCode->GetBufferSize(),
+                    IID_PPV_ARGS(&ps)), "Reflect buffer PS");
+   D3D11_SHADER_DESC vsDesc = {}, psDesc = {};
+   Check(vs->GetDesc(&vsDesc), "Get buffer VS signature");
+   Check(ps->GetDesc(&psDesc), "Get buffer PS signature");
+   bool compatible = true;
+   for (UINT i = 0; i < psDesc.InputParameters; ++i) {
+      D3D11_SIGNATURE_PARAMETER_DESC input = {};
+      Check(ps->GetInputParameterDesc(i, &input), "Get buffer PS input");
+      bool matched = false;
+      for (UINT j = 0; j < vsDesc.OutputParameters; ++j) {
+         D3D11_SIGNATURE_PARAMETER_DESC output = {};
+         Check(vs->GetOutputParameterDesc(j, &output), "Get buffer VS output");
+         if (!_stricmp(input.SemanticName, output.SemanticName) &&
+             input.SemanticIndex == output.SemanticIndex) {
+            printf("buffer linkage %s%u: VS=o%u mask=%x PS=v%u mask=%x\n",
+                   input.SemanticName, input.SemanticIndex, output.Register,
+                   output.Mask, input.Register, input.Mask);
+            matched = input.Register == output.Register &&
+               (input.Mask & output.Mask) == input.Mask &&
+               input.ComponentType == output.ComponentType &&
+               input.SystemValueType == output.SystemValueType;
+            break;
+         }
+      }
+      compatible &= matched;
+   }
+   return compatible;
+}
+
+static void BufferSignatureTest()
+{
+   // This SDK-only mode runs without a GPU in CI. The negative control must
+   // detect the old invalid pair; a positive result is not rendering proof.
+   const char invalidPS[] = "float4 main(float4 c:COLOR):SV_Target{return c;}";
+   ComPtr<ID3DBlob> vs, ps, invalid;
+   Check(D3DCompile(bufferFetchVS, strlen(bufferFetchVS), NULL, NULL, NULL,
+                    "main", "vs_4_1", D3DCOMPILE_ENABLE_STRICTNESS, 0, &vs, NULL),
+         "Compile signature VS");
+   Check(D3DCompile(bufferFetchPS, strlen(bufferFetchPS), NULL, NULL, NULL,
+                    "main", "ps_4_1", D3DCOMPILE_ENABLE_STRICTNESS, 0, &ps, NULL),
+         "Compile signature PS");
+   Check(D3DCompile(invalidPS, strlen(invalidPS), NULL, NULL, NULL,
+                    "main", "ps_4_1", D3DCOMPILE_ENABLE_STRICTNESS, 0, &invalid, NULL),
+         "Compile invalid signature control");
+   Check(BufferSignaturesCompatible(vs.Get(), ps.Get()) ? S_OK : E_FAIL,
+         "Matching full signature");
+   Check(!BufferSignaturesCompatible(vs.Get(), invalid.Get()) ? S_OK : E_FAIL,
+         "Reject old mismatched signature");
+}
+
 static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
 {
    const bool rebind = !strcmp(mode, "--buffer-rebind");
@@ -312,11 +380,8 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
    if (fetch) {
       // Generate coverage independently, but pass real VB data through the
       // VS/PS interface. This separates vertex fetching from position output.
-      vsSource = "struct O{float4 p:SV_Position;float4 c:COLOR;};"
-         "O main(float4 c:POSITION,uint id:SV_VertexID){O o;"
-         "float2 p=float2((id<<1)&2,id&2);"
-         "o.p=float4(p*float2(2,-2)+float2(-1,1),0,1);o.c=c;return o;}";
-      psSource = "float4 main(float4 c:COLOR):SV_Target{return c;}";
+      vsSource = bufferFetchVS;
+      psSource = bufferFetchPS;
    }
    ComPtr<ID3DBlob> vsCode, psCode, errors;
    Check(D3DCompile(vsSource, strlen(vsSource), NULL, NULL, NULL, "main", "vs_4_1",
@@ -324,6 +389,8 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
    errors.Reset();
    Check(D3DCompile(psSource, strlen(psSource), NULL, NULL, NULL, "main", "ps_4_1",
                     D3DCOMPILE_ENABLE_STRICTNESS, 0, &psCode, &errors), "Compile buffer PS");
+   Check(BufferSignaturesCompatible(vsCode.Get(), psCode.Get()) ? S_OK : E_FAIL,
+         "Buffer shader linkage");
    ComPtr<ID3D11VertexShader> vs;
    ComPtr<ID3D11PixelShader> ps;
    ComPtr<ID3D11InputLayout> layout;
@@ -1000,17 +1067,23 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
        strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
        strcmp(mode, "--buffer-fetch") && strcmp(mode, "--buffer-large") && strcmp(mode, "--buffer-fetch-large") &&
+       strcmp(mode, "--buffer-signatures") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
-      printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large\n");
+      printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large|--buffer-signatures\n");
       return 2;
    }
    DWORD session;
    ProcessIdToSessionId(GetCurrentProcessId(), &session);
    printf("mode=%s session=%lu pid=%lu\n", mode, session, GetCurrentProcessId());
    try {
+      if (!strcmp(mode, "--buffer-signatures")) {
+         BufferSignatureTest();
+         printf("RESULT: PASS compiled signatures only; no GPU rendering tested\n");
+         return 0;
+      }
       ComPtr<IDXGIFactory1> factory;
       Check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "CreateDXGIFactory1");
       ComPtr<IDXGIAdapter1> adapter;

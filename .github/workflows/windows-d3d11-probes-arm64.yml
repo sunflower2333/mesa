@@ -13,6 +13,24 @@ permissions:
   contents: read
 
 jobs:
+  signatures:
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Validate compiled shader linkage with positive and negative controls
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path signatures | Out-Null
+          cl /nologo /std:c++17 /EHsc /W4 /WX /MT `
+            src/gallium/targets/d3d10umd/tests/d3d11_shared_test.cpp `
+            /Fe:signatures/check.exe /Fo:signatures/ `
+            /link d3d11.lib dxgi.lib dcomp.lib user32.lib d3dcompiler.lib
+          if ($LASTEXITCODE -ne 0) { throw 'Signature test compilation failed' }
+          & ./signatures/check.exe --buffer-signatures
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled shader signatures failed' }
   build:
     runs-on: windows-2025-vs2026
     steps:
