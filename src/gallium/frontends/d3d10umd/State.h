@@ -172,6 +172,7 @@ SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
 {
    if (FAILED(hr)) {
       Device *pDevice = CastDevice(hDevice);
+      DebugPrintf("SetError: device=%p hr=0x%08lx\n", pDevice, (unsigned long)hr);
       pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
    }
 }

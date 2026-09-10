@@ -102,6 +102,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
              __in D3D10DDIARG_CREATEDEVICE *pCreateData) // IN
 {
    LOG_ENTRYPOINT();
+   DebugPrintf("CreateDevice: interface=0x%08x version=0x%08x private_size=%zu\n",
+               pCreateData->Interface, pCreateData->Version, sizeof(Device));
 
    if (0) {
       DebugPrintf("hAdapter = %p\n", hAdapter);
@@ -357,9 +359,11 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    {
       char buf[8];
       if (GetEnvironmentVariableA("VIOGPU_DXGI_REDIRECTION", buf, sizeof buf) > 0 &&
-          buf[0] == '0') {
+         buf[0] == '0') {
+         DebugPrintf("CreateDevice: returning DXGI_STATUS_NO_REDIRECTION\n");
          return DXGI_STATUS_NO_REDIRECTION;
       }
+      DebugPrintf("CreateDevice: returning S_OK\n");
       return S_OK;
    }
 }
@@ -562,6 +566,7 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
    enum pipe_format format = FormatTranslate(Format, false);
    if (format == PIPE_FORMAT_NONE) {
       *pFormatCaps = D3D10_DDI_FORMAT_SUPPORT_NOT_SUPPORTED;
+      DebugPrintf("CheckFormatSupport: format=%u caps=0x%08x\n", Format, *pFormatCaps);
       return;
    }
 
@@ -570,6 +575,7 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
        * We only need to support creation.
        * http://msdn.microsoft.com/en-us/library/windows/hardware/ff552818.aspx
        */
+      DebugPrintf("CheckFormatSupport: format=%u caps=0x%08x\n", Format, *pFormatCaps);
       return;
    }
 
@@ -602,6 +608,7 @@ CheckFormatSupport(D3D10DDI_HDEVICE hDevice, // IN
             *pFormatCaps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
       }
    }
+   DebugPrintf("CheckFormatSupport: format=%u caps=0x%08x\n", Format, *pFormatCaps);
 }
 
 
@@ -627,18 +634,19 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
 
    /* The DDI requires one quality level for single-sample resources. */
    *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
-   if (SampleCount != 2 && SampleCount != 4)
-      return;
-
-   struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
-   enum pipe_format format = FormatTranslate(Format, false);
-   if (format == PIPE_FORMAT_NONE || util_format_is_pure_integer(format))
-      return;
-   const unsigned bind = util_format_is_depth_or_stencil(format) ?
-                            PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
-   if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
-                                    SampleCount, SampleCount, bind))
-      *pNumQualityLevels = 1;
+   if (SampleCount == 2 || SampleCount == 4) {
+      struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
+      enum pipe_format format = FormatTranslate(Format, false);
+      if (format != PIPE_FORMAT_NONE && !util_format_is_pure_integer(format)) {
+         const unsigned bind = util_format_is_depth_or_stencil(format) ?
+                                  PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
+         if (screen->is_format_supported(screen, format, PIPE_TEXTURE_2D,
+                                          SampleCount, SampleCount, bind))
+            *pNumQualityLevels = 1;
+      }
+   }
+   DebugPrintf("CheckMultisampleQualityLevels: format=%u samples=%u quality_levels=%u\n",
+               Format, SampleCount, *pNumQualityLevels);
 }
 
 
