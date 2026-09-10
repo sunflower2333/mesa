@@ -1197,6 +1197,9 @@ bool
 zink_batch_usage_unflushed_wait(struct zink_context *ctx, struct zink_batch_usage *u, unsigned submit_count, bool trywait)
 {
    MESA_TRACE_FUNC();
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
+   if (screen->device_lost)
+      return false;
    if (!zink_batch_usage_exists(u))
       return true;
    /* this batch state was already completed and reset */
@@ -1205,18 +1208,30 @@ zink_batch_usage_unflushed_wait(struct zink_context *ctx, struct zink_batch_usag
    if (zink_batch_usage_is_unflushed(u)) {
       if (likely(u == &ctx->bs->usage)) {
          ctx->base.flush(&ctx->base, NULL, PIPE_FLUSH_HINT_FINISH);
-         return true;
+         return !screen->device_lost;
       } else { //multi-context
          mtx_lock(&u->mtx);
-         if (trywait) {
-            struct timespec ts = {0, 10000};
+         /* Device loss can abandon this batch before submit_queue runs, so
+          * no flush notification will ever arrive. Recheck the predicate
+          * after locking and periodically observe loss on the shared screen.
+          * A timeout alone never makes unfinished GPU work safe to access. */
+         while (!screen->device_lost && zink_batch_usage_is_unflushed(u) &&
+                zink_batch_submit_count_diff(u->submit_count, submit_count) <= 1) {
+            struct timespec ts;
+            timespec_get(&ts, TIME_UTC);
+            ts.tv_nsec += trywait ? 10000 : 100000000;
+            if (ts.tv_nsec >= 1000000000) {
+               ts.tv_sec++;
+               ts.tv_nsec -= 1000000000;
+            }
             cnd_timedwait(&u->flush, &u->mtx, &ts);
-         } else
-            cnd_wait(&u->flush, &u->mtx);
+            if (trywait)
+               break;
+         }
          mtx_unlock(&u->mtx);
       }
    }
-   return !u->unflushed;
+   return !screen->device_lost && !u->unflushed;
 }
 
 static void

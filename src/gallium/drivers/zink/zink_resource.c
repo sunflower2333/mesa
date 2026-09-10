@@ -2831,6 +2831,8 @@ zink_image_map(struct pipe_context *pctx,
    MESA_TRACE_FUNC();
    struct zink_context *ctx = zink_context(pctx);
    struct zink_screen *screen = zink_screen(pctx->screen);
+   if (screen->device_lost)
+      return NULL;
    struct zink_resource *res = zink_resource(pres);
    if (res->unflushed_transient)
       res = res->transient;
@@ -2886,11 +2888,15 @@ zink_image_map(struct pipe_context *pctx,
          /* force multi-context sync */
          if (zink_resource_usage_is_unflushed_write(res))
             zink_resource_usage_wait(ctx, res, ZINK_RESOURCE_ACCESS_WRITE);
+         if (screen->device_lost)
+            goto fail;
          zink_transfer_copy_bufimage(ctx, staging_res, res, trans);
          /* need to wait for rendering to finish */
          zink_fence_wait(pctx);
       }
 
+      if (screen->device_lost)
+         goto fail;
       ptr = map_resource(screen, staging_res);
    } else {
       assert(res->linear);
@@ -2913,9 +2919,6 @@ zink_image_map(struct pipe_context *pctx,
           */
          zink_fence_wait(pctx);
       }
-      ptr = map_resource(screen, res);
-      if (!ptr)
-         goto fail;
       if (zink_resource_has_usage(res)) {
          assert(!(usage & PIPE_MAP_UNSYNCHRONIZED));
          if (usage & PIPE_MAP_WRITE)
@@ -2923,6 +2926,11 @@ zink_image_map(struct pipe_context *pctx,
          else
             zink_resource_usage_wait(ctx, res, ZINK_RESOURCE_ACCESS_WRITE);
       }
+      if (screen->device_lost)
+         goto fail;
+      ptr = map_resource(screen, res);
+      if (!ptr)
+         goto fail;
       VkImageSubresource isr = {
          res->modifiers ? res->obj->modifier_aspect : res->aspect,
          level,
