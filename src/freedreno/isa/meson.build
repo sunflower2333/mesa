@@ -56,7 +56,7 @@ idep_libir3decode = declare_dependency(
 ir3disasm = executable(
   'ir3-disasm',
   ['ir3-disasm.c'],
-  dependencies: [idep_libir3decode, idep_libfreedreno_common],
+  dependencies: [idep_libir3decode, idep_libfreedreno_common, idep_getopt],
   build_by_default: with_tools.contains('freedreno'),
   include_directories: [
     inc_src,

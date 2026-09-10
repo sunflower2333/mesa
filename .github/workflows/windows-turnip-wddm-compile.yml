@@ -349,6 +349,34 @@ jobs:
             throw 'Linked Turnip DLL must retain CodeView and matching PDB'
           }
 
+      - name: Build ARM64 shader disassembler for guest-side fault analysis
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP 'mesa-turnip-wddm-arm64'
+          meson compile -C $buildDir ir3-disasm
+          if ($LASTEXITCODE -ne 0) { throw 'Shader disassembler build failed' }
+          $tool = Join-Path $buildDir 'src\freedreno\isa\ir3-disasm.exe'
+          $headers = & dumpbin /headers $tool 2>&1
+          if ($LASTEXITCODE -ne 0 -or -not ($headers -match 'AA64 machine')) {
+            throw 'Expected ARM64 shader disassembler'
+          }
+          $stage = Join-Path $env:RUNNER_TEMP 'ir3-disasm-arm64'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -LiteralPath $tool -Destination $stage
+          Get-ChildItem -LiteralPath $buildDir -Recurse -File -Filter 'z-1.dll' |
+            Copy-Item -Destination $stage
+          Get-ChildItem -LiteralPath $stage -File | Get-FileHash -Algorithm SHA256 |
+            Select-Object Hash,@{Name='File';Expression={Split-Path -Leaf $_.Path}} |
+            ConvertTo-Json | Set-Content (Join-Path $stage 'hashes.json')
+
+      - name: Upload ARM64 shader disassembler
+        uses: actions/upload-artifact@v7
+        with:
+          name: ir3-disasm-arm64
+          path: ${{ runner.temp }}/ir3-disasm-arm64
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Verify WDDM Win32 CPU/GDI WSI policy
         shell: pwsh
         run: |
