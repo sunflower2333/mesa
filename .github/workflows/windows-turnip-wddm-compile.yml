@@ -269,8 +269,9 @@ jobs:
           if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
           $mesonOptions = @(
             '--backend=ninja',
-            '--buildtype=release',
-            '-Ddebug=true',
+            '--buildtype=debugoptimized',
+            '-Doptimization=3',
+            '-Db_ndebug=true',
             '-Dplatforms=windows',
             '-Dvulkan-drivers=freedreno',
             '-Dfreedreno-kmds=wddm',
@@ -317,12 +318,19 @@ jobs:
           $setupArgs += $mesonOptions
           & meson @setupArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $options = & meson introspect --buildoptions $buildDir | ConvertFrom-Json
+          if (!(($options | Where-Object name -eq 'debug').value) -or
+              ($options | Where-Object name -eq 'optimization').value -ne '3' -or
+              ($options | Where-Object name -eq 'b_ndebug').value -ne 'true') {
+            throw 'Turnip symbols require optimized code with debug data and release assertions policy'
+          }
 
       - name: Compile and link full Turnip target
         shell: pwsh
         run: |
           $buildDir = Join-Path $env:RUNNER_TEMP "mesa-turnip-wddm-arm64"
           meson compile -C $buildDir --ninja-args=-k0 vulkan_freedreno freedreno_icd
+          if ($LASTEXITCODE -ne 0) { throw 'Turnip compile/link failed' }
           $library = Get-ChildItem -Path $buildDir -Recurse -File -Filter "vulkan_freedreno.dll" |
             Select-Object -First 1
           if ($null -eq $library) {
@@ -335,6 +343,10 @@ jobs:
           $expectedMachine = "AA64 machine"
           if (-not ($headers -match $expectedMachine)) {
             throw "linked target machine type does not match ARM64"
+          }
+          $pdb = Join-Path $library.DirectoryName 'vulkan_freedreno.pdb'
+          if (!(Test-Path -LiteralPath $pdb) -or !($headers -match 'RSDS')) {
+            throw 'Linked Turnip DLL must retain CodeView and matching PDB'
           }
 
       - name: Verify WDDM Win32 CPU/GDI WSI policy
