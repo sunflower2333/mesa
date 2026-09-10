@@ -1,4 +1,4 @@
-name: Windows D3D11 shared resource probes (ARM64)
+name: Windows graphics probes (ARM64)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/gallium/targets/d3d10umd/tests/d3d11_shared_test.cpp'
       - 'src/gallium/targets/d3d10umd/tests/d3d11_present_test.cpp'
+      - 'src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp'
       - '.github/workflows/windows-d3d11-probes-arm64.yml'
 
 permissions:
@@ -49,6 +50,25 @@ jobs:
             throw 'Present probe is not ARM64'
           }
           Get-FileHash probes/d3d11_present_test.exe | Format-List
+      - name: Build native ARM64 Vulkan compute and buffer-copy probe
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++17 /EHsc /W4 /WX /MT /I include `
+            src/freedreno/vulkan/tests/tu_wddm_vulkan_compute_probe.cpp `
+            /Fe:probes/tu_wddm_vulkan_compute_probe_arm64.exe /Fo:probes/
+          if ($LASTEXITCODE -ne 0) { throw 'Vulkan probe compilation failed' }
+          $bytes = [IO.File]::ReadAllBytes('probes/tu_wddm_vulkan_compute_probe_arm64.exe')
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0xaa64) {
+            throw 'Vulkan probe is not ARM64'
+          }
+          Get-FileHash probes/tu_wddm_vulkan_compute_probe_arm64.exe | Format-List
+          Write-Host 'Use the matching tu_wddm_compute.spv from the full Turnip workload artifact.'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tu-wddm-compute-probe-arm64
+          path: probes/tu_wddm_vulkan_compute_probe_arm64.exe
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: d3d11-shared-probe-arm64
