@@ -2906,8 +2906,8 @@ zink_image_map(struct pipe_context *pctx,
             access |= VK_ACCESS_HOST_READ_BIT;
          if (usage & PIPE_MAP_WRITE)
             access |= VK_ACCESS_HOST_WRITE_BIT;
-         zink_resource_image_barrier(ctx, res, VK_IMAGE_LAYOUT_GENERAL,
-                                     access, VK_PIPELINE_STAGE_HOST_BIT);
+         screen->image_barrier(ctx, res, VK_IMAGE_LAYOUT_GENERAL,
+                               access, VK_PIPELINE_STAGE_HOST_BIT);
          /* Include the new barrier in the wait, even if the image's previous
           * resource usage already completed before this map.
           */

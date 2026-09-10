@@ -243,7 +243,9 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter)
       D3D11_VIEWPORT viewport = {(float)(frame * 64), 0, 64, 64, 0, 1};
       consumer.context->RSSetViewports(1, &viewport);
       consumer.context->Draw(3, 0);
+      CheckDevice(consumer, "Reuse consumer after Draw");
       consumer.context->Flush();
+      CheckDevice(consumer, "Reuse consumer after Flush");
       Check(consumerMutex->ReleaseSync(0), "Reuse consumer release");
    }
    desc.Usage = D3D11_USAGE_STAGING;
