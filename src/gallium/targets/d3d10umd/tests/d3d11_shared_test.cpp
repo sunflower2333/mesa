@@ -277,10 +277,16 @@ static void SharedSampleReuseTest(IDXGIAdapter *adapter)
    CheckDevice(consumer, "Reuse consumer final");
 }
 
-static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool single,
-                                   bool immutable = false, bool vertexId = false,
-                                   bool noCull = false)
+static void DynamicBufferReuseTest(IDXGIAdapter *adapter, const char *mode)
 {
+   const bool rebind = !strcmp(mode, "--buffer-rebind");
+   const bool single = strcmp(mode, "--buffer-reuse") && !rebind;
+   const bool immutable = !strcmp(mode, "--buffer-static");
+   const bool vertexId = !strcmp(mode, "--buffer-vertexid");
+   const bool noCull = !strcmp(mode, "--buffer-nocull");
+   const bool arrays = !strcmp(mode, "--buffer-arrays");
+   const bool zeroOffset = !strcmp(mode, "--buffer-zero-offset");
+   const unsigned indexPadding = zeroOffset ? 0 : 2;
    // Keep bindings fixed while DISCARD replaces vertex/constant storage and
    // NO_OVERWRITE appends indices. No intermediate readbacks may serialize
    // the draws or hide stale buffer descriptors after a rename.
@@ -331,12 +337,13 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
    Check(d.device->CreateBuffer(&bd, NULL, &constant), "Create dynamic CB");
    ID3D11RenderTargetView *rtv = target.Get();
    ID3D11Buffer *vb = vertex.Get(), *cb = constant.Get();
-   const UINT stride = 16, offset = 16;
+   const UINT stride = 16, offset = zeroOffset ? 0 : 16;
    d.context->OMSetRenderTargets(1, &rtv, NULL);
    d.context->IASetInputLayout(layout.Get());
    d.context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
-   d.context->IASetIndexBuffer(index.Get(), DXGI_FORMAT_R16_UINT, 4);
-   d.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   d.context->IASetIndexBuffer(index.Get(), DXGI_FORMAT_R16_UINT, indexPadding * 2);
+   d.context->IASetPrimitiveTopology(arrays ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP
+                                          : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
    d.context->VSSetShader(vs.Get(), NULL, 0);
    d.context->PSSetShader(ps.Get(), NULL, 0);
    d.context->PSSetConstantBuffers(0, 1, &cb);
@@ -386,19 +393,22 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
       } else {
          D3D11_MAPPED_SUBRESOURCE map = {};
          CheckDeviceCall(d, d.context->Map(vertex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map), "Discard VB");
-         memcpy(map.pData, vertices, sizeof vertices);
+         if (zeroOffset)
+            memcpy(map.pData, vertices + 1, 4 * sizeof vertices[0]);
+         else
+            memcpy(map.pData, vertices, sizeof vertices);
          d.context->Unmap(vertex.Get(), 0);
          CheckDeviceCall(d, d.context->Map(constant.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map), "Discard CB");
          memcpy(map.pData, colors[stripe], sizeof colors[0]);
          d.context->Unmap(constant.Get(), 0);
          CheckDeviceCall(d, d.context->Map(index.Get(), 0,
             stripe ? D3D11_MAP_WRITE_NO_OVERWRITE : D3D11_MAP_WRITE_DISCARD, 0, &map), "Append IB");
-         memcpy((uint16_t *)map.pData + 2 + stripe * 6, indices, sizeof indices);
+         memcpy((uint16_t *)map.pData + indexPadding + stripe * 6, indices, sizeof indices);
          d.context->Unmap(index.Get(), 0);
       }
       if (rebind || immutable) {
          d.context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
-         d.context->IASetIndexBuffer(index.Get(), DXGI_FORMAT_R16_UINT, 4);
+         d.context->IASetIndexBuffer(index.Get(), DXGI_FORMAT_R16_UINT, indexPadding * 2);
          d.context->PSSetConstantBuffers(0, 1, &cb);
       }
       if (vertexId) {
@@ -406,6 +416,8 @@ static void DynamicBufferReuseTest(IDXGIAdapter *adapter, bool rebind, bool sing
          viewport.Width = 16;
          d.context->RSSetViewports(1, &viewport);
          d.context->Draw(3, 0);
+      } else if (arrays) {
+         d.context->Draw(4, 0);
       } else {
          d.context->DrawIndexed(6, stripe * 6, 0);
       }
@@ -954,10 +966,11 @@ int main(int argc, char **argv)
        strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") && strcmp(mode, "--buffer-reuse") &&
        strcmp(mode, "--buffer-rebind") && strcmp(mode, "--buffer-first") &&
        strcmp(mode, "--buffer-static") && strcmp(mode, "--buffer-vertexid") && strcmp(mode, "--buffer-nocull") &&
+       strcmp(mode, "--buffer-arrays") && strcmp(mode, "--buffer-zero-offset") &&
        strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
-      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
+      printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       return 2;
    }
    DWORD session;
@@ -996,11 +1009,8 @@ int main(int argc, char **argv)
          ShaderLifetimeTest(adapter.Get());
       else if (!strcmp(mode, "--sample-reuse"))
          SharedSampleReuseTest(adapter.Get());
-      else if (!strcmp(mode, "--buffer-reuse") || !strcmp(mode, "--buffer-rebind") || !strcmp(mode, "--buffer-first"))
-         DynamicBufferReuseTest(adapter.Get(), !strcmp(mode, "--buffer-rebind"), !strcmp(mode, "--buffer-first"));
-      else if (!strcmp(mode, "--buffer-static") || !strcmp(mode, "--buffer-vertexid") || !strcmp(mode, "--buffer-nocull"))
-         DynamicBufferReuseTest(adapter.Get(), false, true, !strcmp(mode, "--buffer-static"),
-                               !strcmp(mode, "--buffer-vertexid"), !strcmp(mode, "--buffer-nocull"));
+      else if (!strncmp(mode, "--buffer-", 9))
+         DynamicBufferReuseTest(adapter.Get(), mode);
       else if (!strcmp(mode, "--timestamp"))
          TimestampTest(adapter.Get());
       else if (!strcmp(mode, "--query-poll"))
