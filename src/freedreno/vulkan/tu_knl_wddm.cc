@@ -84,15 +84,21 @@ private:
    bool initialized = false;
 };
 
-void
-tu_wddm_diag(const char *format, ...)
+static bool
+tu_wddm_diag_enabled()
 {
    /* GetEnvironmentVariableA, not getenv(): this transport is compiled with
     * /W4 /WX and MSVC deprecates getenv as C4996, which fails the build. */
    char enabled[4] = {};
    const DWORD enabled_len =
       GetEnvironmentVariableA("TU_WDDM_DIAGNOSTICS", enabled, sizeof(enabled));
-   if (format == NULL || enabled_len != 1 || enabled[0] != '1')
+   return enabled_len == 1 && enabled[0] == '1';
+}
+
+void
+tu_wddm_diag(const char *format, ...)
+{
+   if (format == NULL || !tu_wddm_diag_enabled())
       return;
 
    va_list args;
@@ -2122,6 +2128,34 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
       tu_wddm_diag("bo_init KMT allocation failed status=0x%08x handle=%u size=%llu iova=0x%llx name=%s",
                    allocation->last_create_status, (unsigned)allocation->handle,
                    (unsigned long long)size, (unsigned long long)iova, name ? name : "");
+      if (tu_wddm_diag_enabled()) {
+         /* Sample at the failure, before application exception cleanup changes
+          * memory pressure. AvailPageFile is the remaining commitment available
+          * to this process, not the amount of unused pagefile storage. Live BO
+          * bytes describe this device's published KMT owners, not residency. */
+         MEMORYSTATUSEX memory = {};
+         memory.dwLength = sizeof(memory);
+         const BOOL memory_valid = GlobalMemoryStatusEx(&memory);
+         uint64_t live_bytes = 0;
+         uint32_t live_count = 0;
+         mtx_lock(&dev->bo_mutex);
+         for (uint32_t i = 0; i < dev->wddm_bo_count; i++) {
+            const struct tu_bo *live_bo = dev->wddm_bos[i];
+            if (live_bo->wddm_allocation != NULL) {
+               live_bytes += live_bo->wddm_allocation->vma_size;
+               live_count++;
+            }
+         }
+         mtx_unlock(&dev->bo_mutex);
+         tu_wddm_diag("bo_init pressure tick_ms=%llu pid=%lu memory_valid=%u avail_commit=%llu total_commit=%llu avail_phys=%llu total_phys=%llu live_bo_count=%u live_bo_bytes=%llu",
+                      (unsigned long long)GetTickCount64(),
+                      (unsigned long)GetCurrentProcessId(), (unsigned)memory_valid,
+                      (unsigned long long)memory.ullAvailPageFile,
+                      (unsigned long long)memory.ullTotalPageFile,
+                      (unsigned long long)memory.ullAvailPhys,
+                      (unsigned long long)memory.ullTotalPhys, live_count,
+                      (unsigned long long)live_bytes);
+      }
       if (allocation->handle != 0) {
          /* CreateAllocation returned a handle and its compensating destroy
           * failed.  Keep the sparse-array slot, VMA, and final BO reference as
