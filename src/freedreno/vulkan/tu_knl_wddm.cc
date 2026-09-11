@@ -1327,6 +1327,11 @@ tu_wddm_context_render(struct tu_wddm_context *context,
                        const struct tu_wddm_render_reference *references,
                        uint32_t reference_count)
 {
+   auto rejected = [&](const char *reason) {
+      tu_wddm_diag("render rejected reason=%s packet_bytes=%u references=%u",
+                   reason, command_stream_size, reference_count);
+      return false;
+   };
    if (context == NULL || context->device == NULL || context->handle == 0 ||
        context->device->adapter.runtime == NULL || context->command_buffer == NULL ||
        context->allocation_list == NULL || context->patch_location_list == NULL ||
@@ -1334,14 +1339,14 @@ tu_wddm_context_render(struct tu_wddm_context *context,
        command_stream_size > TU_WDDM_MAX_RENDER_COMMAND_SIZE || references == NULL ||
        reference_count == 0 || reference_count > TU_WDDM_MAX_RENDER_ALLOCATIONS ||
        !tu_wddm_validate_context_info(&context->info, context->device->adapter.private_info.ResetGeneration))
-      return false;
+      return rejected("arguments-or-context");
 
    /* Render is the only path that can publish a new Host submission.  Keep
     * the execution-state check adjacent to the context/epoch validation so a
     * reset or stopped device cannot consume a DMA buffer or mutate the KMT
     * replacement lists before the KMD reset gate rejects it. */
    if (!tu_wddm_device_execution_active(context->device))
-      return false;
+      return rejected("execution-state");
 
    const uint64_t references_size = static_cast<uint64_t>(reference_count) *
                                     sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE);
@@ -1351,29 +1356,29 @@ tu_wddm_context_render(struct tu_wddm_context *context,
        command_length > context->command_buffer_size ||
        reference_count > context->allocation_list_size ||
        reference_count > context->patch_location_list_size)
-      return false;
+      return rejected("replacement-capacity");
 
    for (uint32_t i = 0; i < reference_count; i++) {
       if (!tu_wddm_render_reference_valid(context, &references[i], command_stream_size))
-         return false;
+         return rejected("reference");
       for (uint32_t j = 0; j < i; j++) {
          if (references[i].allocation->handle == references[j].allocation->handle)
-            return false;
+            return rejected("allocation-alias");
 
          const uint32_t a = references[i].patch_offset;
          const uint32_t b = references[j].patch_offset;
          if (a < b + sizeof(uint64_t) && b < a + sizeof(uint64_t))
-            return false;
+            return rejected("patch-overlap");
       }
    }
 
    uint32_t submitted_fence = 0;
    if (!tu_wddm_native_submit_valid(command_stream, command_stream_size, references, reference_count,
                                     context->info.SubmitQueueId, &submitted_fence))
-      return false;
+      return rejected("native-packet");
    if (context->last_submitted_fence != 0 &&
        !tu_wddm_fence_after(submitted_fence, context->last_submitted_fence))
-      return false;
+      return rejected("fence-order");
 
    BYTE *packet = static_cast<BYTE *>(context->command_buffer);
    memset(packet, 0, static_cast<size_t>(command_length));
@@ -1436,6 +1441,13 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
 
    const bool replacements_valid = tu_wddm_render_replacements_valid(&render);
+   if (!NT_SUCCESS(status) || !replacements_valid)
+      tu_wddm_diag("render KMT failed context=%u fence=%u status=0x%08x replacements=%u"
+                   " command_capacity=%u allocation_capacity=%u patch_capacity=%u",
+                   static_cast<unsigned>(context->handle), submitted_fence,
+                   static_cast<unsigned>(status), static_cast<unsigned>(replacements_valid),
+                   render.NewCommandBufferSize, render.NewAllocationListSize,
+                   render.NewPatchLocationListSize);
    if (!replacements_valid) {
       /* The KMT contract promises a replacement set after every call.  A
        * partial or out-of-range set cannot be safely owned, so disable the
@@ -2363,6 +2375,7 @@ tu_wddm_submit_add_reference(struct tu_device *device,
    if (!tu_wddm_bo_valid_for_device(device, bo) || access == 0 ||
        (access & ~(TU_SUBMIT_BO_ACCESS_READ | TU_SUBMIT_BO_ACCESS_WRITE)) != 0 ||
        ((access & TU_SUBMIT_BO_ACCESS_WRITE) != 0 && bo->gpu_read_only)) {
+      tu_wddm_diag("submit reference failed reason=invalid-bo-or-access access=%u", access);
       submit->failed = true;
       return false;
    }
@@ -2377,6 +2390,7 @@ tu_wddm_submit_add_reference(struct tu_device *device,
    const uint32_t reference_count = util_dynarray_num_elements(
       &submit->references, struct tu_wddm_submit_reference);
    if (reference_count >= TU_WDDM_MAX_SUBMIT_REFERENCES) {
+      tu_wddm_diag("submit reference failed reason=capacity count=%u", reference_count);
       submit->failed = true;
       return false;
    }
@@ -2384,6 +2398,7 @@ tu_wddm_submit_add_reference(struct tu_device *device,
    struct tu_wddm_submit_reference *ref = (struct tu_wddm_submit_reference *)
       util_dynarray_grow(&submit->references, struct tu_wddm_submit_reference, 1);
    if (ref == NULL) {
+      tu_wddm_diag("submit reference failed reason=allocation count=%u", reference_count);
       submit->failed = true;
       return false;
    }
@@ -2431,6 +2446,10 @@ tu_wddm_submit_add_entries(struct tu_device *device, void *_submit,
           TU_WDDM_MAX_SUBMIT_COMMANDS ||
        num_entries > TU_WDDM_MAX_SUBMIT_COMMANDS -
           util_dynarray_num_elements(&submit->entries, struct tu_wddm_submit_entry)) {
+      tu_wddm_diag("submit entries failed reason=arguments-or-capacity added=%u current=%u limit=%u",
+                   num_entries, submit != NULL ?
+                      util_dynarray_num_elements(&submit->entries, struct tu_wddm_submit_entry) : 0,
+                   TU_WDDM_MAX_SUBMIT_COMMANDS);
       if (submit != NULL)
          submit->failed = true;
       return;
@@ -2443,6 +2462,8 @@ tu_wddm_submit_add_entries(struct tu_device *device, void *_submit,
           entry->size > entry->bo->size - entry->offset ||
           !tu_wddm_submit_add_reference(device, submit, (struct tu_bo *)entry->bo,
                                         TU_SUBMIT_BO_ACCESS_READ)) {
+         tu_wddm_diag("submit entries failed reason=invalid-entry index=%u offset=%u size=%u",
+                      i, entry->offset, entry->size);
          submit->failed = true;
          return;
       }
@@ -2451,6 +2472,7 @@ tu_wddm_submit_add_entries(struct tu_device *device, void *_submit,
    struct tu_wddm_submit_entry *out = (struct tu_wddm_submit_entry *)
       util_dynarray_grow(&submit->entries, struct tu_wddm_submit_entry, num_entries);
    if (out == NULL) {
+      tu_wddm_diag("submit entries failed reason=allocation added=%u", num_entries);
       submit->failed = true;
       return;
    }
@@ -2614,6 +2636,8 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
          &submit->entries, struct tu_wddm_submit_entry, i);
       int ref_index = tu_wddm_submit_reference_index(submit, entry->bo);
       if (ref_index < 0) {
+         tu_wddm_diag("submit render failed reason=missing-reference entry=%u references=%u",
+                      i, reference_count);
          vk_free(&device->vk.alloc, render_refs);
          vk_free(&device->vk.alloc, packet);
          return VK_ERROR_DEVICE_LOST;
@@ -2695,8 +2719,12 @@ tu_wddm_wait_submission_slot(struct tu_device *device)
       uint32_t pending = 0;
       if (!tu_wddm_pending_fence_count(
              device->wddm_context.last_submitted_fence, completed, &pending) ||
-          pending > device->wddm_pending_submission_upper_bound)
+          pending > device->wddm_pending_submission_upper_bound) {
+         tu_wddm_diag("submit slot failed submitted=%u completed=%u pending=%u upper_bound=%u",
+                      device->wddm_context.last_submitted_fence, completed, pending,
+                      device->wddm_pending_submission_upper_bound);
          return VK_ERROR_DEVICE_LOST;
+      }
 
       device->wddm_pending_submission_upper_bound = pending;
       if (pending >= TU_WDDM_MAX_PENDING_SUBMISSIONS)
@@ -2787,12 +2815,18 @@ tu_wddm_queue_submit(struct tu_queue *queue,
    (void) u_trace_submission_data;
    struct tu_device *device = queue->device;
    struct tu_wddm_submit *submit = (struct tu_wddm_submit *) _submit;
-   if (submit == NULL || submit->failed || !device->wddm_initialized)
+   if (submit == NULL || submit->failed || !device->wddm_initialized) {
+      tu_wddm_diag("queue submit failed prepared=%u initialized=%u",
+                   static_cast<unsigned>(submit != NULL && !submit->failed),
+                   static_cast<unsigned>(device->wddm_initialized));
       return VK_ERROR_DEVICE_LOST;
+   }
 
    for (uint32_t i = 0; i < signal_count; i++) {
-      if (!tu_wddm_sync_signal_valid(signals[i].sync, &device->wddm_context))
+      if (!tu_wddm_sync_signal_valid(signals[i].sync, &device->wddm_context)) {
+         tu_wddm_diag("queue submit failed reason=signal-ownership index=%u", i);
          return VK_ERROR_DEVICE_LOST;
+      }
    }
 
    /* The pre-v1 private ABI has no scheduler wait list.  Resolve waits through
@@ -2811,6 +2845,11 @@ tu_wddm_queue_submit(struct tu_queue *queue,
     * without making generic BO release recursively acquire submit_mutex. */
    mtx_lock(&device->wddm_mutex);
    VkResult result = tu_wddm_queue_submit_locked(queue, submit, signals, signal_count);
+   if (result != VK_SUCCESS)
+      tu_wddm_diag("queue submit failed result=%d entries=%u references=%u next_fence=%u last_fence=%u",
+                   result, util_dynarray_num_elements(&submit->entries, struct tu_wddm_submit_entry),
+                   util_dynarray_num_elements(&submit->references, struct tu_wddm_submit_reference),
+                   device->wddm_next_fence, device->wddm_context.last_submitted_fence);
    mtx_unlock(&device->wddm_mutex);
    return result;
 }

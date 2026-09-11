@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <initializer_list>
 
+static void tu_wddm_diag(const char *, ...) {}
+
 enum VkResult { VK_SUCCESS, VK_TIMEOUT, VK_ERROR_DEVICE_LOST };
 enum vk_sync_wait_flags { VK_SYNC_WAIT_COMPLETE = 0, VK_SYNC_WAIT_PENDING = 1 };
 constexpr uint64_t OS_TIMEOUT_INFINITE = UINT64_MAX;
