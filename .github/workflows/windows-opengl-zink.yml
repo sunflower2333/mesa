@@ -1,0 +1,126 @@
+name: Windows OpenGL ES Zink architecture candidates
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [viogpu-opengl-arches-20260911]
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            msvc: x64_arm64
+            triple: aarch64
+            family: aarch64
+            cmake: ARM64
+          - arch: x64
+            msvc: x64
+            triple: x86_64
+            family: x86_64
+            cmake: x64
+          - arch: x86
+            msvc: x64_x86
+            triple: i686
+            family: x86
+            cmake: Win32
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/Vulkan-Loader
+          ref: vulkan-sdk-1.4.304.0
+          path: external/vulkan-loader
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: vulkan-sdk-1.4.304.0
+          path: external/vulkan-headers
+          fetch-depth: 1
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install build generators
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check 'meson==1.9.1' mako packaging pyyaml ninja
+          if ($LASTEXITCODE) { throw 'Python build tools failed' }
+          choco install winflexbison3 --yes --no-progress
+          if ($LASTEXITCODE) { throw 'WinFlexBison failed' }
+          $flex = Get-ChildItem C:\ProgramData\chocolatey\lib -Recurse -Filter win_flex.exe | Select-Object -First 1
+          if (!$flex) { throw 'Missing win_flex.exe' }
+          Add-Content $env:GITHUB_PATH $flex.DirectoryName
+          $version = '1.4.304.0'
+          $installer = Join-Path $env:RUNNER_TEMP vulkan-sdk.exe
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
+          $proc = Start-Process $installer -ArgumentList '--am --al -c in' -Wait -PassThru
+          if ($proc.ExitCode) { throw 'Vulkan SDK installation failed' }
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\$version\Bin"
+      - name: Build architecture-matched Vulkan loader
+        shell: pwsh
+        run: |
+          cmake -S external/vulkan-headers -B loader-headers -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/vulkan-headers"
+          if ($LASTEXITCODE) { throw 'Vulkan headers configuration failed' }
+          cmake --install loader-headers
+          if ($LASTEXITCODE) { throw 'Vulkan headers installation failed' }
+          cmake -S external/vulkan-loader -B loader-build -A '${{ matrix.cmake }}' `
+            -DVULKAN_HEADERS_INSTALL_DIR="$env:RUNNER_TEMP/vulkan-headers" `
+            -DBUILD_TESTS=OFF -DUSE_MASM=OFF -DUSE_GAS=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          if ($LASTEXITCODE) { throw 'Vulkan loader configuration failed' }
+          cmake --build loader-build --config Release --parallel
+          if ($LASTEXITCODE) { throw 'Vulkan loader build failed' }
+      - name: Build Zink WGL EGL GLES and Turnip
+        shell: pwsh
+        run: |
+          $cross = Join-Path $env:RUNNER_TEMP opengl-cross.ini
+          @(
+            '[binaries]'
+            "c = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "cpp = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "ar = 'llvm-lib'"
+            '[host_machine]'
+            "system = 'windows'"
+            "cpu_family = '${{ matrix.family }}'"
+            "cpu = '${{ matrix.family }}'"
+            "endian = 'little'"
+            '[properties]'
+            'needs_exe_wrapper = true'
+            '[built-in options]'
+            "c_link_args = ['/DEBUG']"
+            "cpp_link_args = ['/DEBUG']"
+          ) | Set-Content $cross -Encoding ascii
+          meson setup gl-build . --cross-file $cross --backend=ninja `
+            --buildtype=debugoptimized -Doptimization=3 -Db_ndebug=true `
+            -Dplatforms=windows -Dvulkan-drivers=freedreno -Dfreedreno-kmds=wddm `
+            -Dgallium-drivers=zink -Dopengl=true -Dgles1=enabled -Dgles2=enabled `
+            -Degl=enabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled `
+            -Dshader-cache=disabled -Dzlib=enabled -Dzstd=disabled `
+            -Db_vscrt=static_from_buildtype '-Dtools=[]' -Dbuild-tests=false -Dwerror=false
+          if ($LASTEXITCODE) { throw 'OpenGL Meson configuration failed' }
+          meson compile -C gl-build
+          if ($LASTEXITCODE) { throw 'OpenGL compile/link failed' }
+      - name: Stage and validate complete candidate
+        shell: pwsh
+        run: |
+          ./bin/stage-windows-opengl.ps1 -Architecture '${{ matrix.arch }}' -Build gl-build -LoaderBuild loader-build -Stage opengl-candidate
+          if ($LASTEXITCODE) { throw 'Candidate validation failed' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: opengl-zink-${{ matrix.arch }}-candidate
+          path: opengl-candidate
+          if-no-files-found: error
+          retention-days: 7
