@@ -1,0 +1,145 @@
+name: Windows Turnip WDDM x86 candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [viogpu-cs-failure-20260911]
+    paths:
+      - .github/workflows/windows-turnip-wddm-x86.yml
+      - src/freedreno/vulkan/**
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64_x86
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check 'meson==1.9.1' mako packaging pyyaml ninja
+          if ($LASTEXITCODE) { throw 'Python build tool installation failed' }
+          choco install winflexbison3 --yes --no-progress
+          if ($LASTEXITCODE) { throw 'WinFlexBison installation failed' }
+          $flex = Get-ChildItem C:\ProgramData\chocolatey\lib -Recurse -Filter win_flex.exe | Select-Object -First 1
+          if (!$flex) { throw 'Cannot locate win_flex.exe' }
+          Add-Content $env:GITHUB_PATH $flex.DirectoryName
+          $version = '1.4.304.0'
+          $installer = Join-Path $env:RUNNER_TEMP vulkan-sdk.exe
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
+          $install = Start-Process $installer -ArgumentList '--am --al -c in' -Wait -PassThru
+          if ($install.ExitCode) { throw 'Vulkan SDK installation failed' }
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\$version\Bin"
+      - name: Validate 32-bit private ABI and transport
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++17 /W4 /WX /EHsc /MT `
+            src/freedreno/vulkan/tests/tu_wddm_abi_manifest.cpp /Fe:abi-x86.exe
+          if ($LASTEXITCODE) { throw 'x86 ABI compile failed' }
+          $actual = & .\abi-x86.exe
+          if ($LASTEXITCODE) { throw 'x86 ABI execution failed' }
+          $expected = Get-Content src/freedreno/vulkan/tests/tu_wddm_abi_expected.txt
+          if (Compare-Object $expected $actual) { throw 'x86 ABI differs from the KMD contract' }
+          cl /nologo /std:c++17 /W4 /WX /EHsc /MT `
+            /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C `
+            /I src/freedreno/vulkan src/freedreno/vulkan/tu_knl_wddm.cc `
+            src/freedreno/vulkan/tests/tu_wddm_render_test.cpp /Fe:transport-x86.exe
+          if ($LASTEXITCODE) { throw 'x86 transport fixture compile failed' }
+          & .\transport-x86.exe
+          if ($LASTEXITCODE) { throw 'x86 fake-dispatch fixture failed' }
+          python src/freedreno/vulkan/tests/check_tu_wddm_policy.py
+          if ($LASTEXITCODE) { throw 'WDDM residency policy failed' }
+      - name: Build full x86 ICD
+        shell: pwsh
+        run: |
+          $cross = Join-Path $env:RUNNER_TEMP turnip-x86.ini
+          @(
+            '[binaries]'
+            "c = ['clang-cl', '--target=i686-pc-windows-msvc']"
+            "cpp = ['clang-cl', '--target=i686-pc-windows-msvc']"
+            "ar = 'llvm-lib'"
+            '[host_machine]'
+            "system = 'windows'"
+            "cpu_family = 'x86'"
+            "cpu = 'x86'"
+            "endian = 'little'"
+            '[properties]'
+            'needs_exe_wrapper = true'
+          ) | Set-Content $cross -Encoding ascii
+          $build = Join-Path $env:RUNNER_TEMP turnip-wddm-x86
+          meson setup $build . --cross-file $cross --backend=ninja `
+            --buildtype=debugoptimized -Doptimization=3 -Db_ndebug=true `
+            -Dplatforms=windows -Dvulkan-drivers=freedreno -Dfreedreno-kmds=wddm `
+            '-Dgallium-drivers=[]' -Dopengl=false -Dgles1=disabled -Dgles2=disabled `
+            -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled `
+            -Dshader-cache=disabled -Dzlib=enabled -Dzstd=disabled `
+            -Db_vscrt=static_from_buildtype '-Dtools=[]' -Dbuild-tests=false -Dwerror=false
+          if ($LASTEXITCODE) { throw 'x86 Meson configuration failed' }
+          meson compile -C $build vulkan_freedreno freedreno_icd
+          if ($LASTEXITCODE) { throw 'Full x86 ICD compile/link failed' }
+      - name: Build x86 device and compute probes
+        shell: pwsh
+        run: |
+          foreach ($probe in @('tu_wddm_vulkan_probe','tu_wddm_vulkan_compute_probe')) {
+            cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
+              "src/freedreno/vulkan/tests/$probe.cpp" "/Fe:${probe}_x86.exe"
+            if ($LASTEXITCODE) { throw "x86 probe failed: $probe" }
+          }
+          glslangValidator -V --target-env vulkan1.1 -S comp -o tu_wddm_compute.spv `
+            src/freedreno/vulkan/tests/tu_wddm_compute.comp
+          if ($LASTEXITCODE) { throw 'Compute shader compilation failed' }
+      - name: Verify and stage process-local candidate
+        shell: pwsh
+        run: |
+          $build = Join-Path $env:RUNNER_TEMP turnip-wddm-x86
+          $stage = Join-Path $env:RUNNER_TEMP turnip-wddm-x86-candidate
+          New-Item -ItemType Directory $stage | Out-Null
+          foreach ($name in @('vulkan_freedreno.dll','z-1.dll','vulkan_freedreno.pdb')) {
+            $files = @(Get-ChildItem $build -Recurse -Filter $name -File)
+            if ($files.Count -ne 1) { throw "Ambiguous/missing payload: $name" }
+            Copy-Item $files[0].FullName $stage
+          }
+          Copy-Item tu_wddm_vulkan_probe_x86.exe,tu_wddm_vulkan_compute_probe_x86.exe,tu_wddm_compute.spv $stage
+          foreach ($pe in Get-ChildItem $stage -File | Where-Object {$_.Extension -in '.dll','.exe'}) {
+            $headers = & dumpbin /headers $pe.FullName
+            if ($LASTEXITCODE -or !($headers -match '14C machine')) { throw "Not x86: $($pe.Name)" }
+            $imports = & dumpbin /dependents $pe.FullName
+            if ($LASTEXITCODE -or $imports -match '(?i)\b(?:msvcp|vcruntime)[0-9_]*\.dll\b') {
+              throw "Undeclared runtime dependency: $($pe.Name)"
+            }
+          }
+          $exports = (& dumpbin /exports "$stage\vulkan_freedreno.dll") -join "`n"
+          if ($LASTEXITCODE) { throw 'ICD exports could not be read' }
+          foreach ($symbol in @('vk_icdNegotiateLoaderICDInterfaceVersion','vk_icdGetInstanceProcAddr','vk_icdGetPhysicalDeviceProcAddr')) {
+            if ($exports -notmatch ('(?m)\s' + $symbol + '\s*$')) { throw "Missing undecorated loader export: $symbol" }
+          }
+          python src/vulkan/util/vk_icd_gen.py --api-version 1.4 --xml src/vulkan/registry/vk.xml `
+            --icd-lib-path . --icd-filename vulkan_freedreno.dll --sizeof-pointer 4 --use-backslash `
+            --out "$stage\freedreno_icd.x86.json"
+          if ($LASTEXITCODE) { throw 'x86 ICD manifest generation failed' }
+          $icd = Get-Content "$stage\freedreno_icd.x86.json" -Raw | ConvertFrom-Json
+          if ($icd.ICD.library_arch -ne '32' -or $icd.ICD.library_path -ne '.\vulkan_freedreno.dll') {
+            throw 'Incorrect x86 manifest'
+          }
+          git rev-parse HEAD | Set-Content "$stage\source-commit.txt"
+          Get-ChildItem $stage -File | Sort-Object Name | ForEach-Object {
+            (Get-FileHash $_.FullName).Hash.ToLowerInvariant() + '  ' + $_.Name
+          } | Set-Content "$stage\SHA256SUMS.txt" -Encoding ascii
+          Write-Host 'Build/ABI validation only. Device enumeration, compute and FurMark x86 remain untested.'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: turnip-wddm-x86-candidate
+          path: ${{ runner.temp }}/turnip-wddm-x86-candidate
+          if-no-files-found: error
+          retention-days: 7
