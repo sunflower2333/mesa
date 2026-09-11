@@ -92,6 +92,9 @@ tu_suballoc_bo_alloc(struct tu_suballoc_bo *suballoc_bo,
    VkResult result = tu_bo_map(suballoc->dev, suballoc->bo, NULL);
    if (result != VK_SUCCESS) {
       tu_bo_finish(suballoc->dev, suballoc->bo);
+      /* The allocator dropped its reference. A retry or device teardown must
+       * not reuse or release this BO again after a failed CPU mapping. */
+      suballoc->bo = NULL;
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
