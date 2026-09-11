@@ -32,6 +32,7 @@
 #include "vk_android.h"
 #include "vk_debug_utils.h"
 #include "vk_physical_device.h"
+#include "vk_common_entrypoints.h"
 #include "vk_shader_module.h"
 #include "vk_util.h"
 #include "vk_sampler.h"
@@ -2914,6 +2915,18 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    struct tu_device *device;
    bool border_color_without_format = false;
    bool autotune_disable_preempt_optimize = false;
+#ifdef TU_HAS_WDDM
+   const mwd_device_create_info *runtime_info = NULL;
+   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
+      if (ext->sType == MWD_STYPE_DEVICE) {
+         if (runtime_info || !is_wddm(physical_device->instance))
+            return VK_ERROR_INITIALIZATION_FAILED;
+         runtime_info = reinterpret_cast<const mwd_device_create_info *>(ext);
+         if (!runtime_info->owner || !mwd_callbacks_valid(runtime_info->callbacks))
+            return VK_ERROR_INITIALIZATION_FAILED;
+      }
+   }
+#endif
 
    vk_foreach_struct_const (ext, pCreateInfo->pNext) {
       switch (ext->sType) {
@@ -2982,6 +2995,12 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    device->device_idx = device->physical_device->device_count++;
    device->va_start = physical_device->va_start;
    device->va_size = physical_device->va_size;
+#ifdef TU_HAS_WDDM
+   if (runtime_info) {
+      device->wddm_callbacks = *runtime_info->callbacks;
+      device->wddm_runtime_owner = runtime_info->owner;
+   }
+#endif
 
    result = tu_drm_device_init(device);
    if (result != VK_SUCCESS) {
@@ -3668,6 +3687,26 @@ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
 static VkResult
 tu_add_to_heap(struct tu_device *dev, struct tu_bo *bo)
 {
+#ifdef TU_HAS_WDDM
+   if (bo && bo->wddm_allocation && bo->wddm_allocation->runtime_token) {
+      // All VkDeviceMemory wrappers of one imported token share one BO and
+      // one heap-accounting owner. Serialize the first publication.
+      mtx_lock(&dev->wddm_mutex);
+      if (bo->heap_accounted) { mtx_unlock(&dev->wddm_mutex); return VK_SUCCESS; }
+      auto *heap = &dev->physical_device->heap;
+      const uint64_t size = bo->wddm_allocation->vma_size;
+      const uint64_t used = p_atomic_add_return(&heap->used, size);
+      if (!size || used < size || used > heap->size) {
+         p_atomic_add(&heap->used, -size);
+         mtx_unlock(&dev->wddm_mutex);
+         tu_bo_finish(dev, bo);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+      bo->heap_accounted_size = size; bo->heap_accounted = true;
+      mtx_unlock(&dev->wddm_mutex);
+      return VK_SUCCESS;
+   }
+#endif
    if (bo == NULL || bo->heap_accounted)
       return vk_error(dev, VK_ERROR_UNKNOWN);
 
@@ -3907,6 +3946,33 @@ tu_AllocateMemory(VkDevice _device,
    const VkImportMemoryFdInfoKHR *fd_info =
       vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
 
+#ifdef TU_HAS_WDDM
+   const mwd_import_memory_info *runtime_import = NULL;
+   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
+      if (ext->sType == MWD_STYPE_IMPORT) {
+         if (runtime_import) { result = VK_ERROR_INVALID_EXTERNAL_HANDLE; goto fail; }
+         runtime_import = reinterpret_cast<const mwd_import_memory_info *>(ext);
+      }
+   }
+   if (runtime_import) {
+      if (!is_wddm(device->instance) || fd_info || mem->vk.ahardware_buffer ||
+          alloc_flags != TU_BO_ALLOC_NO_FLAGS ||
+          vk_find_struct_const(pAllocateInfo->pNext, EXPORT_MEMORY_ALLOCATE_INFO) ||
+          vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO)) {
+         result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+         goto fail;
+      }
+      result = tu_wddm_bo_import_runtime(device, &mem->bo, mem->size,
+                                          runtime_import->owner, runtime_import->token);
+      if (result == VK_SUCCESS &&
+          (device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex] & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+          !(mem->bo->wddm_allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE)) {
+         tu_bo_finish(device, mem->bo); mem->bo = NULL;
+         result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+   } else
+#endif
+
    if (fd_info && fd_info->handleType) {
       assert(fd_info->handleType ==
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
@@ -4037,6 +4103,26 @@ fail:
 
    return VK_SUCCESS;
 }
+
+#ifdef TU_HAS_WDDM
+VKAPI_ATTR void VKAPI_CALL
+tu_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
+                                 VkPhysicalDeviceProperties2 *properties)
+{
+   vk_common_GetPhysicalDeviceProperties2(physicalDevice, properties);
+   VK_FROM_HANDLE(tu_physical_device, physical, physicalDevice);
+   vk_foreach_struct(ext, properties->pNext) {
+      if (ext->sType == MWD_STYPE_SUPPORT) {
+         auto *reply = reinterpret_cast<mwd_support *>(ext);
+         reply->magic = reply->version = reply->size = reply->flags = 0;
+         if (is_wddm(physical->instance)) {
+            reply->magic = MWD_RUNTIME_MAGIC; reply->version = MWD_RUNTIME_ABI_VERSION;
+            reply->size = sizeof(mwd_callbacks); reply->flags = 1;
+         }
+      }
+   }
+}
+#endif
 
 VkResult
 tu_allocate_lazy_memory(struct tu_device *dev,

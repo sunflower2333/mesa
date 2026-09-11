@@ -54,6 +54,13 @@ jobs:
       - name: Execute production substream failure paths
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_cs_failure_test.py
+      - name: Execute actual WDDM direct and shared runtime transport
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++17 /W4 /WX /EHsc /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C /I src/freedreno/vulkan src/freedreno/vulkan/tu_knl_wddm.cc src/freedreno/vulkan/tests/tu_wddm_render_test.cpp /Fe:tu_wddm_render_test_x64.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./tu_wddm_render_test_x64.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Execute empty-submit queue ordering regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_wddm_empty_submit_test.py

@@ -298,6 +298,8 @@ VkResult tu_knl_kgsl_load(struct tu_instance *instance, int fd);
 
 #ifdef TU_HAS_WDDM
 VkResult tu_knl_wddm_load(struct tu_instance *instance);
+VkResult tu_wddm_bo_import_runtime(struct tu_device *dev, struct tu_bo **out_bo,
+                                    uint64_t size, void *owner, void *token);
 #endif
 
 struct _drmVersion;

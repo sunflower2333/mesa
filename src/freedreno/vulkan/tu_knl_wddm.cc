@@ -669,6 +669,8 @@ tu_wddm_device_close(struct tu_wddm_device *device)
 bool
 tu_wddm_device_execution_active(struct tu_wddm_device *device)
 {
+   if (device && device->runtime_owner)
+      return device->callbacks.status(device->runtime_owner) >= 0;
    if (device == NULL || device->adapter.runtime == NULL ||
        device->adapter.runtime->dispatch.GetDeviceState == NULL ||
        device->handle == 0)
@@ -748,6 +750,25 @@ tu_wddm_context_open(struct tu_wddm_device *device,
 bool
 tu_wddm_context_get_info(struct tu_wddm_context *context)
 {
+   if (tu_wddm_shared_context(context)) {
+      auto *device = context->device;
+      mwd_context_info reply = {};
+      if (device->callbacks.context(device->runtime_owner, &reply) < 0 ||
+          memcmp(reply.luid, &device->adapter.luid, sizeof(reply.luid)) ||
+          reply.generation != device->adapter.private_info.ResetGeneration)
+         return false;
+      VIOGPU_WDDM_CONTEXT_INFO info = {};
+      tu_wddm_init_header(&info.Header, tu_wddm_sizeof<VIOGPU_WDDM_CONTEXT_INFO>());
+      info.Opcode = VIOGPU_WDDM_ESCAPE_GET_CONTEXT_INFO;
+      info.ExpectedResetGeneration = info.ResetGeneration = reply.generation;
+      info.VaStart = reply.va_start; info.VaSize = reply.va_size;
+      info.ContextId = reply.context_id; info.SubmitQueueId = reply.queue_id;
+      if (!tu_wddm_validate_context_info(&info, reply.generation) ||
+          (context->info.ContextId && memcmp(&context->info, &info, sizeof(info))))
+         return false;
+      context->info = info;
+      return true;
+   }
    if (context == NULL || context->device == NULL || context->handle == 0 ||
        context->device->adapter.runtime == NULL)
       return false;
@@ -781,6 +802,9 @@ tu_wddm_context_get_completed_fence(struct tu_wddm_context *context,
 {
    if (completed_fence != NULL)
       *completed_fence = 0;
+   if (tu_wddm_shared_context(context))
+      return completed_fence && tu_wddm_context_get_info(context) &&
+         context->device->callbacks.completed(context->device->runtime_owner, completed_fence) >= 0;
    if (context == NULL || context->device == NULL || context->handle == 0 || completed_fence == NULL ||
        context->device->adapter.runtime == NULL ||
        !tu_wddm_validate_context_info(&context->info,
@@ -871,6 +895,10 @@ tu_wddm_context_wait_submissions(struct tu_wddm_context *context,
 bool
 tu_wddm_context_close(struct tu_wddm_context *context)
 {
+   if (tu_wddm_shared_context(context)) {
+      memset(context, 0, sizeof(*context));
+      return true; // The runtime owns the actual context handle.
+   }
    if (context == NULL || context->device == NULL || context->handle == 0 ||
        context->device->adapter.runtime == NULL)
       return false;
@@ -1051,6 +1079,65 @@ tu_wddm_destroy_allocation_handle(struct tu_wddm_context *context,
    return context->device->adapter.runtime->dispatch.DestroyAllocation2(&destroy);
 }
 
+/* No KMT handle is fabricated to enter shared mode. The callback returns the
+ * runtime's actual allocation, and a separate token retains its backing. */
+bool
+tu_wddm_runtime_device_open(struct tu_wddm_runtime *runtime,
+                            const struct tu_wddm_adapter_info *identity,
+                            const struct mwd_callbacks *callbacks, void *owner,
+                            struct tu_wddm_device *device,
+                            struct tu_wddm_context *context)
+{
+   if (!runtime || !identity || !device || !context || !owner || !mwd_callbacks_valid(callbacks))
+      return false;
+   memset(device, 0, sizeof(*device));
+   memset(context, 0, sizeof(*context));
+   device->callbacks = *callbacks; device->runtime_owner = owner;
+   device->adapter.runtime = runtime; device->adapter.luid = identity->luid;
+   device->adapter.private_info = identity->private_info;
+   context->device = device;
+   if (!tu_wddm_context_get_info(context)) {
+      memset(context, 0, sizeof(*context));
+      memset(device, 0, sizeof(*device));
+      return false;
+   }
+   return true;
+}
+
+static bool
+tu_wddm_shared_allocation(struct tu_wddm_context *context, const mwd_allocation *reply,
+                           uint64_t size, struct tu_wddm_allocation *allocation)
+{
+   if (!reply->token || !reply->handle || reply->size < size || !reply->size ||
+       reply->size > UINT32_MAX || reply->size % 4096 || reply->address % 4096 ||
+       reply->generation != context->info.ResetGeneration || (reply->flags & ~14u) || !(reply->flags & 4u) ||
+       reply->address < context->info.VaStart || reply->size > context->info.VaSize ||
+       reply->address > context->info.VaStart + context->info.VaSize - reply->size)
+      return false;
+   allocation->context = context; allocation->runtime_token = reply->token;
+   allocation->handle = reply->handle; allocation->vma_size = reply->size;
+   auto *info = &allocation->private_info;
+   tu_wddm_init_header(&info->Header, tu_wddm_sizeof<VIOGPU_WDDM_ALLOCATION_INFO>());
+   info->Size = reply->size; info->Alignment = 4096; info->RequestedIova = reply->address;
+   info->Flags = reply->flags; info->ExpectedResetGeneration = reply->generation;
+   info->ContextId = context->info.ContextId;
+   return true;
+}
+
+bool
+tu_wddm_allocation_import(struct tu_wddm_context *context, void *token,
+                           uint64_t size, struct tu_wddm_allocation *allocation)
+{
+   if (!allocation || !token || !size || !tu_wddm_shared_context(context)) return false;
+   memset(allocation, 0, sizeof(*allocation));
+   mwd_allocation reply = {};
+   auto *device = context->device;
+   if (device->callbacks.retain(device->runtime_owner, token, &reply) < 0) return false;
+   if (reply.token == token && tu_wddm_shared_allocation(context, &reply, size, allocation)) return true;
+   device->callbacks.release(device->runtime_owner, token);
+   return false;
+}
+
 bool
 tu_wddm_allocation_create(struct tu_wddm_context *context,
                           const struct tu_wddm_allocation_desc *desc,
@@ -1060,6 +1147,22 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
       return false;
 
    memset(allocation, 0, sizeof(*allocation));
+   if (tu_wddm_shared_context(context)) {
+      if (!desc || !desc->size || desc->alignment != 4096 || desc->format || desc->width ||
+          desc->height || desc->pitch || desc->refresh_rate_numerator || desc->refresh_rate_denominator ||
+          (desc->flags & ~14u) || !(desc->flags & 4u)) return false;
+      mwd_allocation reply = {};
+      auto *device = context->device;
+      int32_t hr = device->callbacks.allocate(device->runtime_owner, desc->size, desc->alignment,
+                                               desc->requested_iova, desc->flags, &reply);
+      allocation->last_create_status = static_cast<uint32_t>(hr);
+      if (hr < 0) return false;
+      if ((!desc->requested_iova || reply.address == desc->requested_iova) &&
+          reply.flags == desc->flags && tu_wddm_shared_allocation(context, &reply, desc->size, allocation))
+         return true;
+      if (reply.token) device->callbacks.release(device->runtime_owner, reply.token);
+      return false;
+   }
    if (!tu_wddm_allocation_desc_valid(context, desc))
       return false;
 
@@ -1134,6 +1237,16 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
 bool
 tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
 {
+   if (allocation && allocation->runtime_token && tu_wddm_shared_context(allocation->context)) {
+      auto *device = allocation->context->device;
+      if (allocation->locked) return false;
+      int32_t hr = device->callbacks.release(device->runtime_owner, allocation->runtime_token);
+      allocation->last_destroy_status = static_cast<uint32_t>(hr);
+      if (hr < 0) return false;
+      free(allocation->metadata);
+      memset(allocation, 0, sizeof(*allocation));
+      return true;
+   }
    if (allocation == NULL || allocation->context == NULL || allocation->handle == 0 ||
        allocation->locked || allocation->context->device == NULL ||
        allocation->context->device->adapter.runtime == NULL ||
@@ -1194,6 +1307,16 @@ tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation, void **map)
 {
    if (map != NULL)
       *map = NULL;
+   if (allocation && allocation->runtime_token && tu_wddm_shared_context(allocation->context)) {
+      if (!map || allocation->locked) return false;
+      auto *device = allocation->context->device;
+      uint32_t handle = 0;
+      if (device->callbacks.map(device->runtime_owner, allocation->runtime_token, map, &handle) < 0)
+         return false;
+      allocation->locked = true; allocation->map = *map;
+      if (handle) allocation->handle = handle;
+      return *map && handle;
+   }
    if (allocation == NULL || allocation->context == NULL || allocation->handle == 0 ||
        allocation->locked || allocation->context->device == NULL ||
        allocation->context->device->adapter.runtime == NULL || map == NULL ||
@@ -1236,6 +1359,13 @@ tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation, void **map)
 bool
 tu_wddm_allocation_unlock(struct tu_wddm_allocation *allocation)
 {
+   if (allocation && allocation->runtime_token && tu_wddm_shared_context(allocation->context)) {
+      if (!allocation->locked) return false;
+      auto *device = allocation->context->device;
+      if (device->callbacks.unmap(device->runtime_owner, allocation->runtime_token) < 0) return false;
+      allocation->locked = false; allocation->map = NULL;
+      return true;
+   }
    if (allocation == NULL || allocation->context == NULL || allocation->handle == 0 ||
        !allocation->locked || allocation->context->device == NULL ||
        allocation->context->device->adapter.runtime == NULL)
@@ -1421,6 +1551,29 @@ tu_wddm_context_render(struct tu_wddm_context *context,
                        const struct tu_wddm_render_reference *references,
                        uint32_t reference_count)
 {
+   if (tu_wddm_shared_context(context)) {
+      uint32_t fence = 0;
+      if (!command_stream || command_stream_size > TU_WDDM_MAX_RENDER_COMMAND_SIZE ||
+          !references || !reference_count || reference_count > TU_WDDM_MAX_RENDER_ALLOCATIONS ||
+          uint64_t(command_stream_size) + sizeof(VIOGPU_WDDM_RENDER_COMMAND) +
+             uint64_t(reference_count) * sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) > TU_WDDM_MAX_RENDER_COMMAND_SIZE ||
+          !tu_wddm_context_get_info(context) || !tu_wddm_device_execution_active(context->device)) return false;
+      mwd_reference shared[TU_WDDM_MAX_RENDER_ALLOCATIONS] = {};
+      for (uint32_t i = 0; i < reference_count; ++i) {
+         if (!tu_wddm_render_reference_valid(context, &references[i], command_stream_size) ||
+             !references[i].allocation->runtime_token) return false;
+         shared[i] = {references[i].allocation->runtime_token, references[i].allocation_offset,
+                      references[i].length, references[i].flags, references[i].patch_offset};
+      }
+      if (!tu_wddm_render_references_unique(references, reference_count) ||
+          !tu_wddm_native_submit_valid(command_stream, command_stream_size, references, reference_count,
+                                       context->info.SubmitQueueId, &fence) ||
+          (context->last_submitted_fence && !tu_wddm_fence_after(fence, context->last_submitted_fence))) return false;
+      if (context->device->callbacks.submit(context->device->runtime_owner, command_stream,
+                                             command_stream_size, shared, reference_count) < 0) return false;
+      context->last_submitted_fence = fence;
+      return true;
+   }
    auto rejected = [&](const char *reason) {
       tu_wddm_diag("render rejected reason=%s packet_bytes=%u references=%u",
                    reason, command_stream_size, reference_count);
@@ -1643,7 +1796,7 @@ tu_wddm_sync_is_current(const struct tu_wddm_sync *sync)
    return sync != NULL && sync->owner != NULL && sync->owner->wddm_initialized &&
           sync->context != NULL && sync->context == &sync->owner->wddm_context &&
           sync->context->device != NULL &&
-          sync->context->handle != 0 && sync->reset_generation != 0 &&
+          (sync->context->handle != 0 || tu_wddm_shared_context(sync->context)) && sync->reset_generation != 0 &&
           sync->reset_generation == sync->context->info.ResetGeneration &&
           sync->reset_generation ==
              sync->context->device->adapter.private_info.ResetGeneration;
@@ -1921,6 +2074,17 @@ tu_wddm_device_init(struct tu_device *dev)
    dev->wddm_bo_count = 0;
    dev->wddm_bo_capacity = 0;
 
+   if (dev->wddm_runtime_owner) {
+      if (!tu_wddm_runtime_device_open(&instance->wddm_runtime, &physical->wddm_adapter,
+                                       &dev->wddm_callbacks, dev->wddm_runtime_owner,
+                                       &dev->wddm_device, &dev->wddm_context))
+         return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "invalid runtime WDDM owner");
+      dev->va_start = dev->wddm_context.info.VaStart;
+      dev->va_size = dev->wddm_context.info.VaSize;
+      dev->wddm_initialized = true;
+      return VK_SUCCESS;
+   }
+
    if (!instance->wddm_runtime_initialized ||
        !tu_wddm_device_open(&instance->wddm_runtime, &physical->wddm_adapter,
                             &dev->wddm_device)) {
@@ -2023,9 +2187,11 @@ tu_wddm_device_finish(struct tu_device *dev)
       tu_bo_release_heap_accounting(dev, bo);
       tu_debug_bos_del(dev, bo);
       tu_dump_bo_del(dev, bo);
-      mtx_lock(&dev->vma_mutex);
-      util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
-      mtx_unlock(&dev->vma_mutex);
+      if (!dev->wddm_runtime_owner) {
+         mtx_lock(&dev->vma_mutex);
+         util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
+         mtx_unlock(&dev->vma_mutex);
+      }
       vk_free(&dev->vk.alloc, allocation);
       memset(bo, 0, sizeof(*bo));
       dev->wddm_bo_count--;
@@ -2087,7 +2253,7 @@ tu_wddm_device_get_suspend_count(struct tu_device *dev, uint64_t *suspend_count)
    if (suspend_count != NULL)
       *suspend_count = 0;
    if (dev == NULL || suspend_count == NULL || !dev->wddm_initialized ||
-       dev->wddm_context.handle == 0)
+       (dev->wddm_context.handle == 0 && !tu_wddm_shared_context(&dev->wddm_context)))
       return -EINVAL;
 
    /* The private endpoint has no separate suspend counter.  Refreshing the
@@ -2132,6 +2298,88 @@ tu_wddm_submitqueue_close(struct tu_device *dev, struct tu_queue *queue)
 }
 
 static VkResult
+tu_wddm_bo_shared(struct tu_device *dev, struct vk_object_base *base,
+                  struct tu_bo **out_bo, uint64_t size, uint64_t client_iova,
+                  enum tu_bo_alloc_flags flags, const char *name, void *import_token)
+{
+   *out_bo = NULL;
+   if (import_token) {
+      mtx_lock(&dev->bo_mutex);
+      for (uint32_t i = 0; i < dev->wddm_bo_count; ++i) {
+         auto *bo = dev->wddm_bos[i];
+         if (bo->wddm_allocation && bo->wddm_allocation->runtime_token == import_token) {
+            if (bo->size < size || p_atomic_read(&bo->refcnt) <= 0 || p_atomic_read(&bo->refcnt) == INT32_MAX) {
+               mtx_unlock(&dev->bo_mutex);
+               return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+            }
+            p_atomic_inc(&bo->refcnt);
+            *out_bo = bo;
+            mtx_unlock(&dev->bo_mutex);
+            return VK_SUCCESS;
+         }
+      }
+      mtx_unlock(&dev->bo_mutex);
+   }
+   auto *allocation = static_cast<tu_wddm_allocation *>(vk_zalloc(
+      &dev->vk.alloc, sizeof(tu_wddm_allocation), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE));
+   if (!allocation) return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   mtx_lock(&dev->bo_mutex);
+   uint32_t id = dev->wddm_bo_count < TU_WDDM_MAX_RENDER_ALLOCATIONS ? tu_wddm_alloc_token_locked(dev) : 0;
+   auto *bo = id ? tu_device_lookup_bo(dev, id) : NULL;
+   if (!bo || !tu_wddm_add_bo_locked(dev, bo)) {
+      mtx_unlock(&dev->bo_mutex);
+      vk_free(&dev->vk.alloc, allocation);
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
+   *bo = {};
+   bo->gem_handle = id; bo->base = base; bo->refcnt = 1;
+   // VkDeviceMemory aliases share a BO. Keep one backing map until the last
+   // BO owner dies so unmapping one wrapper cannot invalidate another.
+   bo->never_unmap = true;
+   mtx_unlock(&dev->bo_mutex);
+   tu_wddm_allocation_desc desc = {};
+   desc.size = size; desc.alignment = 4096; desc.requested_iova = client_iova;
+   desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE |
+      ((flags & TU_BO_ALLOC_GPU_READ_ONLY) ? VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY : 0);
+   bool ok = import_token ? tu_wddm_allocation_import(&dev->wddm_context, import_token, size, allocation) :
+                             tu_wddm_allocation_create(&dev->wddm_context, &desc, allocation);
+   mtx_lock(&dev->bo_mutex);
+   if (ok) {
+      bo->wddm_allocation = allocation;
+      bo->iova = allocation->private_info.RequestedIova;
+      bo->size = allocation->private_info.Size;
+      bo->gpu_read_only = (allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY) != 0;
+   } else {
+      tu_wddm_remove_bo_locked(dev, bo);
+      memset(bo, 0, sizeof(*bo));
+   }
+   mtx_unlock(&dev->bo_mutex);
+   if (!ok) {
+      vk_free(&dev->vk.alloc, allocation);
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
+   bo->name = tu_debug_bos_add(dev, bo->size, name);
+   tu_dump_bo_init(dev, bo);
+   *out_bo = bo;
+   return VK_SUCCESS;
+}
+
+VkResult
+tu_wddm_bo_import_runtime(struct tu_device *dev, struct tu_bo **out_bo,
+                           uint64_t size, void *owner, void *token)
+{
+   *out_bo = NULL;
+   if (!owner || owner != dev->wddm_runtime_owner || !token || !size ||
+       !tu_wddm_device_execution_active(&dev->wddm_device))
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   mtx_lock(&dev->wddm_mutex);
+   VkResult result = tu_wddm_bo_shared(dev, NULL, out_bo, size, 0,
+                                       TU_BO_ALLOC_NO_FLAGS, "runtime heap import", token);
+   mtx_unlock(&dev->wddm_mutex);
+   return result;
+}
+
+static VkResult
 tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
                 struct tu_bo **out_bo, uint64_t size, uint64_t client_iova,
                 VkMemoryPropertyFlags mem_property,
@@ -2147,6 +2395,9 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
 
    if ((mem_property & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) != 0)
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+
+   if (dev->wddm_runtime_owner)
+      return tu_wddm_bo_shared(dev, base, out_bo, size, client_iova, flags, name, NULL);
 
    if (size > UINT64_MAX - UINT64_C(4095))
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -2407,9 +2658,11 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
    memset(bo, 0, sizeof(*bo));
    mtx_unlock(&dev->bo_mutex);
 
-   mtx_lock(&dev->vma_mutex);
-   util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
-   mtx_unlock(&dev->vma_mutex);
+   if (!dev->wddm_runtime_owner) {
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
+      mtx_unlock(&dev->vma_mutex);
+   }
    vk_free(&dev->vk.alloc, allocation);
    mtx_unlock(&dev->wddm_mutex);
 }

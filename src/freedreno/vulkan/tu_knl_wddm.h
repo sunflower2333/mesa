@@ -16,6 +16,7 @@
 
 #include "tu_wddm_abi.h"
 #include "tu_wddm_dispatch.h"
+#include "mesa_wddm_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +42,8 @@ struct tu_wddm_adapter {
 };
 
 struct tu_wddm_device {
+   struct mwd_callbacks callbacks;
+   void *runtime_owner;
    struct tu_wddm_adapter adapter;
    D3DKMT_HANDLE handle;
    void *command_buffer;
@@ -97,6 +100,7 @@ struct tu_wddm_allocation_desc {
 };
 
 struct tu_wddm_allocation {
+   void *runtime_token;
    struct tu_wddm_context *context;
    D3DKMT_HANDLE handle;
    VIOGPU_WDDM_ALLOCATION_INFO private_info;
@@ -171,6 +175,13 @@ bool tu_wddm_device_open(struct tu_wddm_runtime *runtime,
                          const struct tu_wddm_adapter_info *identity,
                          struct tu_wddm_device *device);
 bool tu_wddm_device_execution_active(struct tu_wddm_device *device);
+bool tu_wddm_runtime_device_open(struct tu_wddm_runtime *runtime,
+                                const struct tu_wddm_adapter_info *identity,
+                                const struct mwd_callbacks *callbacks, void *owner,
+                                struct tu_wddm_device *device,
+                                struct tu_wddm_context *context);
+bool tu_wddm_allocation_import(struct tu_wddm_context *context, void *token,
+                               uint64_t size, struct tu_wddm_allocation *allocation);
 bool tu_wddm_device_close(struct tu_wddm_device *device);
 
 bool tu_wddm_context_open(struct tu_wddm_device *device,
@@ -184,6 +195,11 @@ bool tu_wddm_context_wait_fence(struct tu_wddm_context *context,
 bool tu_wddm_context_wait_submissions(struct tu_wddm_context *context,
                                       uint64_t timeout_ns);
 bool tu_wddm_context_close(struct tu_wddm_context *context);
+
+static inline bool tu_wddm_shared_context(const struct tu_wddm_context *context)
+{
+   return context && context->device && context->device->runtime_owner;
+}
 
 bool tu_wddm_allocation_create(struct tu_wddm_context *context,
                                const struct tu_wddm_allocation_desc *desc,
