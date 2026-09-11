@@ -1,5 +1,12 @@
 param([ValidateSet('load-only','wgl','gles2','gles1')][string]$Mode = 'load-only')
 $ErrorActionPreference = 'Stop'
+if ($Mode -ne 'load-only') {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Run the GPU probe as the normal interactive user: the Vulkan loader ignores candidate environment overrides in elevated processes'
+    }
+}
 $saved = @{}
 foreach ($name in @('VK_DRIVER_FILES','VK_ICD_FILENAMES','GALLIUM_DRIVER','LIBGL_ALWAYS_SOFTWARE','PATH')) {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')

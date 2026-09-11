@@ -50,7 +50,7 @@ python src/vulkan/util/vk_icd_gen.py --api-version 1.4 --xml src/vulkan/registry
     --icd-lib-path . --icd-filename vulkan_freedreno.dll --sizeof-pointer $pointerSize --use-backslash `
     --out "$Stage/freedreno_icd.json"
 if ($LASTEXITCODE) { throw 'ICD manifest generation failed' }
-Copy-Item bin/run-windows-opengl.ps1,bin/windows-opengl-candidate.md $Stage
+Copy-Item bin/run-windows-opengl.ps1,bin/verify-windows-opengl.ps1,bin/windows-opengl-snapshot.ps1,bin/windows-opengl-candidate.md $Stage
 git rev-parse HEAD | Set-Content "$Stage/source-commit.txt"
 git -C external/vulkan-loader rev-parse HEAD | Set-Content "$Stage/loader-source-commit.txt"
 if ($Architecture -ne 'arm64') {

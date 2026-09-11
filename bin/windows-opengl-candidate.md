@@ -6,10 +6,16 @@ mix DLLs across archives. This is Zink -> Vulkan -> Turnip, with no ANGLE,
 DirectX translation, or software Gallium driver compiled into the package.
 
 Extract to a new directory. Keep every DLL together. No global ICD registry
-change is required. `run-windows-opengl.ps1 -Mode load-only` checks DLL loading
+change is required. `verify-windows-opengl.ps1 -Architecture arm64` (or x64/x86)
+checks payload hashes and PE types without loading code.
+`run-windows-opengl.ps1 -Mode load-only` checks DLL loading
 and public entrypoints without creating a GPU device. On the target device,
 run `-Mode wgl`, `-Mode gles2`, and `-Mode gles1` separately in a coordinated
-test window. Each GPU probe renders and checks pixels and prints the actual
+test window from a normal, non-elevated interactive user session. Windows SSH
+commonly runs elevated; Vulkan ignores VK_DRIVER_FILES there. For remote GPU
+testing use an Interactive scheduled task with the same process environment.
+The launcher rejects elevated GPU runs to prevent testing a different ICD.
+Each GPU probe renders and checks pixels and prints the actual
 GL renderer; software renderers or a non-Turnip Zink renderer fail. A successful
 probe is bounded raster evidence, not prolonged FurMark or desktop acceptance.
 
