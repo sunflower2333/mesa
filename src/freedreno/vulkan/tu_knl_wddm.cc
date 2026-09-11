@@ -2404,7 +2404,12 @@ tu_wddm_submit_add_entries(struct tu_device *device, void *_submit,
 {
    (void)device;
    struct tu_wddm_submit *submit = (struct tu_wddm_submit *)_submit;
-   if (submit == NULL || entries == NULL || num_entries == 0 ||
+   /* A valid Vulkan command buffer may record no hardware commands. The
+    * common queue path still adds its zero-entry CS. Preserve the existing
+    * submit, including an earlier failure and its pending fence dependency. */
+   if (num_entries == 0)
+      return;
+   if (submit == NULL || entries == NULL ||
        util_dynarray_num_elements(&submit->entries, struct tu_wddm_submit_entry) >
           TU_WDDM_MAX_SUBMIT_COMMANDS ||
        num_entries > TU_WDDM_MAX_SUBMIT_COMMANDS -

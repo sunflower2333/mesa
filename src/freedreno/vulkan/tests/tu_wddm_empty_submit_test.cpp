@@ -31,9 +31,30 @@ struct tu_wddm_sync : vk_sync {
    explicit tu_wddm_sync(tu_wddm_context *ctx) : context(ctx) {}
 };
 struct vk_sync_signal { vk_sync *sync; };
-struct util_dynarray { uint32_t count; };
-struct tu_wddm_submit { util_dynarray entries; };
+constexpr unsigned TU_WDDM_MAX_SUBMIT_COMMANDS = 256;
+constexpr unsigned TU_SUBMIT_BO_ACCESS_READ = 1;
+struct tu_bo { uint64_t size = 4096; };
+struct tu_cs_entry { tu_bo *bo; uint32_t offset; uint32_t size; };
+struct tu_wddm_submit_entry { tu_bo *bo; uint32_t offset; uint32_t size; };
+struct util_dynarray {
+   uint32_t count = 0;
+   tu_wddm_submit_entry values[TU_WDDM_MAX_SUBMIT_COMMANDS]{};
+};
+struct tu_wddm_submit { util_dynarray entries; bool failed = false; };
 #define util_dynarray_num_elements(array, type) ((array)->count)
+static void *grow_entries(util_dynarray *array, unsigned count) {
+   if (count > TU_WDDM_MAX_SUBMIT_COMMANDS - array->count) return nullptr;
+   auto *out = &array->values[array->count];
+   array->count += count;
+   return out;
+}
+#define util_dynarray_grow(array, type, count) grow_entries(array, count)
+static bool tu_wddm_bo_valid_for_device(tu_device *device, tu_bo *bo) {
+   return device != nullptr && bo != nullptr;
+}
+static bool tu_wddm_submit_add_reference(tu_device *, tu_wddm_submit *, tu_bo *, uint32_t) {
+   return true; // This fixture controls valid ownership; entry range checks remain production code.
+}
 static bool vk_sync_type_is_dummy(const vk_sync_type *type) { return type == &dummy_type; }
 static tu_wddm_sync *tu_wddm_sync_from_vk(vk_sync *sync) { return static_cast<tu_wddm_sync *>(sync); }
 static bool tu_wddm_sync_is_current(const tu_wddm_sync *sync) { return sync->current; }
@@ -81,6 +102,31 @@ int main() {
    tu_wddm_submit empty{{0}}, work{{1}};
    {
       tu_device device;
+      tu_wddm_submit submit{};
+      tu_bo bo;
+      tu_cs_entry entry{&bo, 0, 4};
+      tu_wddm_submit_add_entries(&device, &submit, nullptr, 0);
+      check(!submit.failed && submit.entries.count == 0,
+            "valid empty command buffer leaves submission empty");
+      tu_wddm_submit_add_entries(&device, &submit, &entry, 0);
+      check(!submit.failed && submit.entries.count == 0,
+            "zero entries ignore unused backing pointer");
+      tu_wddm_submit_add_entries(&device, &submit, &entry, 1);
+      tu_wddm_submit_add_entries(&device, &submit, nullptr, 0);
+      check(!submit.failed && submit.entries.count == 1 &&
+            submit.entries.values[0].bo == &bo && submit.entries.values[0].size == 4,
+            "empty command buffer after real work preserves its commands");
+      tu_wddm_submit_add_entries(&device, &submit, nullptr, 1);
+      check(submit.failed, "nonzero count still requires entries");
+      tu_wddm_submit_add_entries(&device, &submit, nullptr, 0);
+      check(submit.failed, "empty command buffer cannot erase an earlier failure");
+      submit.failed = false;
+      entry.offset = 4096;
+      tu_wddm_submit_add_entries(&device, &submit, &entry, 1);
+      check(submit.failed, "out-of-range command remains rejected");
+   }
+   {
+      tu_device device;
       tu_queue queue{&device};
       tu_wddm_sync idle(&device.wddm_context);
       vk_sync_signal signal{&idle};
@@ -100,6 +146,8 @@ int main() {
       const unsigned calls = render_calls;
       tu_wddm_sync idle(&device.wddm_context), chained(&device.wddm_context);
       vk_sync_signal signals[] = {{&idle}, {&chained}};
+      tu_wddm_submit_add_entries(&device, &empty, nullptr, 0);
+      check(!empty.failed, "empty command buffer after pending work is valid");
       check(tu_wddm_queue_submit_locked(&queue, &empty, signals, 2) == VK_SUCCESS,
             "empty fence-only submit accepted after work");
       check(poll(device, idle) == VK_TIMEOUT,

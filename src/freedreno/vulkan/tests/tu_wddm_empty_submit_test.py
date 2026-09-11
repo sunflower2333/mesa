@@ -10,7 +10,7 @@ import tempfile
 
 
 def definition(source, name):
-    match = re.search(r"static\s+(?:bool|VkResult)\s+" + name + r"\([^;]*?\)\s*\{", source)
+    match = re.search(r"static\s+(?:bool|void|VkResult)\s+" + name + r"\([^;]*?\)\s*\{", source)
     if not match:
         raise ValueError(f"Missing production definition: {name}")
     depth = 0
@@ -32,7 +32,7 @@ def main():
     source = (subprocess.check_output(["git", "show", f"{args.revision}:{relative}"],
                                      cwd=root, text=True) if args.revision else
               (root / relative).read_text())
-    names = ["tu_wddm_sync_wait", "tu_wddm_sync_set_submit_fence",
+    names = ["tu_wddm_submit_add_entries", "tu_wddm_sync_wait", "tu_wddm_sync_set_submit_fence",
              "tu_wddm_queue_submit_locked"]
     fixture = (here / "tu_wddm_empty_submit_test.cpp").read_text().replace(
         "// PRODUCTION_FUNCTIONS", "\n\n".join(definition(source, name) for name in names))
