@@ -35,6 +35,7 @@ static HMODULE load(const char *name)
    char path[MAX_PATH];
    if (!GetModuleFileNameA(module, path, MAX_PATH)) fail("module path");
    std::printf("loaded %s\n", path);
+   if (_stricmp(path, absolute)) fail("module resolved outside candidate directory");
    return module;
 }
 

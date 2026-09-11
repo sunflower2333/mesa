@@ -11,8 +11,13 @@ try {
     $env:GALLIUM_DRIVER = 'zink'
     $env:LIBGL_ALWAYS_SOFTWARE = 'false'
     $env:PATH = "$PSScriptRoot;$env:PATH"
-    & ./opengl-probe.exe "--$Mode"
-    $result = $LASTEXITCODE
+    $process = Start-Process (Join-Path $PSScriptRoot opengl-probe.exe) -ArgumentList "--$Mode" -NoNewWindow -PassThru
+    if (!$process.WaitForExit(30000)) {
+        $process.Kill()
+        $process.WaitForExit()
+        throw 'OpenGL probe exceeded its 30 second bound'
+    }
+    $result = $process.ExitCode
 } finally {
     Pop-Location
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
