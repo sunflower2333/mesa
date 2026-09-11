@@ -3,13 +3,31 @@ name: Windows OpenGL ES Zink architecture candidates
 on:
   workflow_dispatch:
   push:
-    branches: [viogpu-opengl-arches-20260911]
+    branches: [viogpu-opengl-arches-20260911, viogpu-opengl-integrated-20260911]
 
 permissions:
   contents: read
 
 jobs:
+  source-regressions:
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Validate bounded render references and failed shader conversion
+        shell: pwsh
+        run: |
+          python src/freedreno/vulkan/tests/tu_wddm_reference_test.py
+          if ($LASTEXITCODE) { throw 'Render reference validation failed' }
+          python src/freedreno/vulkan/tests/tu_compute_compile_failure_test.py
+          if ($LASTEXITCODE) { throw 'Compute conversion failure regression failed' }
   candidate:
+    needs: source-regressions
     runs-on: windows-2025-vs2026
     timeout-minutes: 60
     strategy:
