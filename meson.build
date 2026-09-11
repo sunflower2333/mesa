@@ -586,8 +586,9 @@ if with_egl
     _platforms += 'drm'
   endif
 
-  # All the other platforms can be detected and cannot reach the native platform code
-  _undetectable_platforms = ['x11', 'haiku', 'android', 'surfaceless']
+  # Windows HDCs can be detected, but EGL_DEFAULT_DISPLAY has no HDC and
+  # must retain the Windows platform instead of falling back to surfaceless.
+  _undetectable_platforms = ['x11', 'haiku', 'android', 'windows', 'surfaceless']
 
   # Don't enforce the native platform if none of the undetectable platforms are enabled
   _undetectable_platforms_enabled = []
