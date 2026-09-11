@@ -18,6 +18,7 @@
 #include "tu_wddm_dispatch.h"
 #include "tu_wddm_lifetime.h"
 #include "tu_wddm_residency.h"
+#include "mesa_wddm_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,8 @@ struct tu_wddm_adapter {
 };
 
 struct tu_wddm_device {
+   struct mwd_callbacks callbacks;
+   void *runtime_owner;
    struct tu_wddm_adapter adapter;
    D3DKMT_HANDLE handle;
    void *command_buffer;
@@ -113,6 +116,7 @@ struct tu_wddm_allocation_desc {
 };
 
 struct tu_wddm_allocation {
+   void *runtime_token;
    struct tu_wddm_context *context;
    D3DKMT_HANDLE handle;
    VIOGPU_WDDM_ALLOCATION_INFO private_info;
@@ -216,6 +220,13 @@ bool tu_wddm_device_open(struct tu_wddm_runtime *runtime,
                          const struct tu_wddm_adapter_info *identity,
                          struct tu_wddm_device *device);
 bool tu_wddm_device_execution_active(struct tu_wddm_device *device);
+bool tu_wddm_runtime_device_open(struct tu_wddm_runtime *runtime,
+                                const struct tu_wddm_adapter_info *identity,
+                                const struct mwd_callbacks *callbacks, void *owner,
+                                struct tu_wddm_device *device,
+                                struct tu_wddm_context *context);
+bool tu_wddm_allocation_import(struct tu_wddm_context *context, void *token,
+                               uint64_t size, struct tu_wddm_allocation *allocation);
 bool tu_wddm_device_close(struct tu_wddm_device *device);
 
 /* Create the device paging queue on a WDDM 2.0 adapter; a no-op without any
@@ -243,10 +254,16 @@ bool tu_wddm_context_wait_submissions(struct tu_wddm_context *context,
                                       uint64_t timeout_ns);
 bool tu_wddm_context_close(struct tu_wddm_context *context);
 
+static inline bool tu_wddm_shared_context(const struct tu_wddm_context *context)
+{
+   return context && context->device && context->device->runtime_owner;
+}
+
 /* On a WDDM 2.0 adapter a successful create also holds one residency
  * reference (MakeResident, bounded over-budget retry); a create that cannot
  * make the allocation resident releases the handle and fails.  Destroy drops
- * that reference with Evict before DestroyAllocation2, exactly once. */
+ * that reference with Evict before DestroyAllocation2, exactly once.
+ * For shared runtime backing the runtime owns those residency references. */
 bool tu_wddm_allocation_create(struct tu_wddm_context *context,
                                const struct tu_wddm_allocation_desc *desc,
                                struct tu_wddm_allocation *allocation);
