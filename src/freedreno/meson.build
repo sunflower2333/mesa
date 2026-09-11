@@ -8,8 +8,10 @@ rnn_src_path = dir_source_root + '/src/freedreno/registers'
 rnn_install_path = get_option('datadir') + '/freedreno/registers'
 rnn_path = rnn_src_path + ':' + get_option('prefix') + '/' + rnn_install_path
 
-dep_libarchive = dependency('libarchive', allow_fallback: true, required: false, disabler : true)
-dep_libxml2 = dependency('libxml-2.0', allow_fallback: true, required: false)
+# These libraries are only consumed by the optional decode tools. Avoid
+# configuring and building their fallback subprojects in driver-only builds.
+dep_libarchive = dependency('libarchive', allow_fallback: with_tools.contains('freedreno'), required: false, disabler : true)
+dep_libxml2 = dependency('libxml-2.0', allow_fallback: with_tools.contains('freedreno'), required: false)
 prog_gzip = find_program('gzip', required: false)
 
 install_fd_decode_tools = dep_libxml2.found() and prog_gzip.found() and \
