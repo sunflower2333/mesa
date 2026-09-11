@@ -60,6 +60,9 @@ jobs:
       - name: Execute large command-buffer submission regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_queue_batch_test.py
+      - name: Execute allocation alias and patch overlap regression
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/tu_wddm_reference_test.py
       - name: Execute suballocator mapping failure regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_suballoc_failure_test.py

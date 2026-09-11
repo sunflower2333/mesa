@@ -10,6 +10,7 @@
 
 #include "tu_knl_wddm.h"
 
+#include <algorithm>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1285,6 +1286,36 @@ tu_wddm_render_reference_valid(const struct tu_wddm_context *context,
 }
 
 static bool
+tu_wddm_render_references_unique(const struct tu_wddm_render_reference *references,
+                                 uint32_t reference_count)
+{
+   if (references == NULL || reference_count == 0 ||
+       reference_count > TU_WDDM_MAX_RENDER_ALLOCATIONS)
+      return false;
+
+   /* GB7 keeps hundreds of allocations live. A pairwise alias/patch check
+    * dereferences that list O(n^2) times on every Render. Sort bounded scalar
+    * copies instead; retain both checks without allocating or changing the
+    * original allocation/patch order consumed by VidMm and the native packet. */
+   uint32_t handles[TU_WDDM_MAX_RENDER_ALLOCATIONS];
+   uint32_t offsets[TU_WDDM_MAX_RENDER_ALLOCATIONS];
+   for (uint32_t i = 0; i < reference_count; i++) {
+      if (references[i].allocation == NULL || references[i].allocation->handle == 0)
+         return false;
+      handles[i] = references[i].allocation->handle;
+      offsets[i] = references[i].patch_offset;
+   }
+   std::sort(handles, handles + reference_count);
+   std::sort(offsets, offsets + reference_count);
+   for (uint32_t i = 1; i < reference_count; i++) {
+      if (handles[i] == handles[i - 1] ||
+          offsets[i] - offsets[i - 1] < sizeof(uint64_t))
+         return false;
+   }
+   return true;
+}
+
+static bool
 tu_wddm_native_submit_valid(const void *command_stream,
                             uint32_t command_stream_size,
                             const struct tu_wddm_render_reference *references,
@@ -1420,16 +1451,9 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    for (uint32_t i = 0; i < reference_count; i++) {
       if (!tu_wddm_render_reference_valid(context, &references[i], command_stream_size))
          return rejected("reference");
-      for (uint32_t j = 0; j < i; j++) {
-         if (references[i].allocation->handle == references[j].allocation->handle)
-            return rejected("allocation-alias");
-
-         const uint32_t a = references[i].patch_offset;
-         const uint32_t b = references[j].patch_offset;
-         if (a < b + sizeof(uint64_t) && b < a + sizeof(uint64_t))
-            return rejected("patch-overlap");
-      }
    }
+   if (!tu_wddm_render_references_unique(references, reference_count))
+      return rejected("allocation-alias-or-patch-overlap");
 
    uint32_t submitted_fence = 0;
    if (!tu_wddm_native_submit_valid(command_stream, command_stream_size, references, reference_count,
