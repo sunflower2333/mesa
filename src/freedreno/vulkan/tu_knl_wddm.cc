@@ -138,10 +138,13 @@ public:
       if (!sample && ms < 50.0)
          return;
       fprintf(stderr, "TU_WDDM_PERF: pid=%lu tick_ms=%llu phase=%s wall_ms=%.3f"
-                      " bytes=%llu count=%u owner=%u fence=%u\n",
+                      " bytes=%llu count=%u owner=%u fence=%u"
+                      " qpc_ticks=%llu qpc_frequency=%llu\n",
               static_cast<unsigned long>(GetCurrentProcessId()),
               static_cast<unsigned long long>(GetTickCount64()), phase, ms,
-              static_cast<unsigned long long>(bytes), count, owner, fence);
+              static_cast<unsigned long long>(bytes), count, owner, fence,
+              static_cast<unsigned long long>(end.QuadPart),
+              static_cast<unsigned long long>(frequency.QuadPart));
       fflush(stderr);
    }
 
