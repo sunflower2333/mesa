@@ -3,7 +3,7 @@ name: Windows OpenGL ES Zink architecture candidates
 on:
   workflow_dispatch:
   push:
-    branches: [viogpu-opengl-arches-20260911, viogpu-opengl-integrated-20260911]
+    branches: [viogpu-opengl-arches-20260911, viogpu-opengl-integrated-20260911, viogpu-opengl-surface-20260911]
 
 permissions:
   contents: read
@@ -139,6 +139,11 @@ jobs:
             -Dshader-cache=disabled -Dzlib=enabled -Dzstd=disabled `
             -Db_vscrt=static_from_buildtype '-Dtools=[]' -Dbuild-tests=false -Dwerror=false
           if ($LASTEXITCODE) { throw 'OpenGL Meson configuration failed' }
+          # Validate the actual generated compiler configuration, not only the
+          # requested platform list. A surfaceless default rejects every HWND.
+          if (!(Select-String gl-build/build.ninja -SimpleMatch '_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_WINDOWS' -Quiet)) {
+            throw 'EGL_DEFAULT_DISPLAY does not select the native Windows platform'
+          }
           meson compile -C gl-build
           if ($LASTEXITCODE) { throw 'OpenGL compile/link failed' }
       - name: Stage and validate complete candidate
