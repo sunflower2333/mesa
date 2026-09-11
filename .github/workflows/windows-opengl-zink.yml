@@ -141,7 +141,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'OpenGL Meson configuration failed' }
           # Validate the actual generated compiler configuration, not only the
           # requested platform list. A surfaceless default rejects every HWND.
-          if (!(Select-String gl-build/build.ninja -SimpleMatch '_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_WINDOWS' -Quiet)) {
+          if (!(Select-String -LiteralPath gl-build/build.ninja -SimpleMatch -Pattern '_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_WINDOWS' -Quiet)) {
             throw 'EGL_DEFAULT_DISPLAY does not select the native Windows platform'
           }
           meson compile -C gl-build
