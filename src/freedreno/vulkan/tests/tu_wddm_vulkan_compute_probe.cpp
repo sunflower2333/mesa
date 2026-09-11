@@ -20,7 +20,9 @@
 namespace {
 
 constexpr uint32_t kDefaultElementCount = 256;
-constexpr uint32_t kMaxElementCount = 64 * 1024 * 1024;
+// Cover GB7's 547 MiB allocation failure and the paired 1 GiB backing limit.
+// The physical-device storage range and dispatch limits are checked below.
+constexpr uint32_t kMaxElementCount = 256 * 1024 * 1024;
 constexpr uint32_t kDefaultIterationCount = 1;
 constexpr uint32_t kMaxIterationCount = 16;
 constexpr uint64_t kFenceTimeoutNs = UINT64_C(10000000000);
