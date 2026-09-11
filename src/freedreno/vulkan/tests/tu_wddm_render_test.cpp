@@ -2062,6 +2062,7 @@ void test_shared_runtime() {
    tu_wddm_runtime runtime = {}; // No KMT dispatch: any accidental direct call fails this fixture.
    tu_wddm_adapter_info identity = {};
    identity.private_info = valid_adapter_info();
+   identity.private_info.ResetGeneration = kResetGeneration;
    identity.luid.LowPart = 31;
    memcpy(f.context.luid, &identity.luid, sizeof(identity.luid));
    f.context.generation = kResetGeneration; f.context.va_start = kVaStart; f.context.va_size = kVaSize;
