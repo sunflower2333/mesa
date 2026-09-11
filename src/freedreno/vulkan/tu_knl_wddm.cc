@@ -110,6 +110,50 @@ tu_wddm_diag(const char *format, ...)
    fflush(stderr);
 }
 
+/* Opt-in wall-time attribution for slow GB7 stages. Keep this separate from
+ * verbose allocation diagnostics and from GPU/fence execution timestamps.
+ * Only slow calls and explicitly sampled operations emit a line. */
+class tu_wddm_perf_scope {
+public:
+   tu_wddm_perf_scope(const char *phase, uint64_t bytes = 0,
+                     uint32_t count = 0, uint32_t owner = 0,
+                     uint32_t fence = 0, bool sample = false)
+      : bytes(bytes), phase(phase), count(count), owner(owner), fence(fence), sample(sample)
+   {
+      static const bool requested = []() {
+         char value[4] = {};
+         return GetEnvironmentVariableA("TU_WDDM_PERF", value, sizeof(value)) == 1 && value[0] == '1';
+      }();
+      enabled = requested && QueryPerformanceFrequency(&frequency) &&
+                frequency.QuadPart > 0 && QueryPerformanceCounter(&start);
+   }
+
+   ~tu_wddm_perf_scope()
+   {
+      LARGE_INTEGER end;
+      if (!enabled || !QueryPerformanceCounter(&end) || end.QuadPart < start.QuadPart)
+         return;
+      const double ms = static_cast<double>(end.QuadPart - start.QuadPart) *
+                        1000.0 / static_cast<double>(frequency.QuadPart);
+      if (!sample && ms < 50.0)
+         return;
+      fprintf(stderr, "TU_WDDM_PERF: pid=%lu tick_ms=%llu phase=%s wall_ms=%.3f"
+                      " bytes=%llu count=%u owner=%u fence=%u\n",
+              static_cast<unsigned long>(GetCurrentProcessId()),
+              static_cast<unsigned long long>(GetTickCount64()), phase, ms,
+              static_cast<unsigned long long>(bytes), count, owner, fence);
+      fflush(stderr);
+   }
+
+   uint64_t bytes;
+
+private:
+   const char *phase;
+   uint32_t count, owner, fence;
+   bool sample, enabled;
+   LARGE_INTEGER start = {}, frequency = {};
+};
+
 #ifdef TU_HAS_WDDM
 #include <errno.h>
 
@@ -1000,6 +1044,10 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
    if (!tu_wddm_allocation_desc_valid(context, desc))
       return false;
 
+   tu_wddm_perf_scope timing("allocation-create", desc->size, 1,
+                             static_cast<uint32_t>(context->handle), 0,
+                             desc->size >= UINT64_C(67108864));
+
    VIOGPU_WDDM_ALLOCATION_INFO private_data = {};
    tu_wddm_init_header(&private_data.Header, tu_wddm_sizeof<VIOGPU_WDDM_ALLOCATION_INFO>());
    private_data.Size = desc->size;
@@ -1136,6 +1184,10 @@ tu_wddm_allocation_lock(struct tu_wddm_allocation *allocation, void **map)
        allocation->context->device->adapter.runtime == NULL || map == NULL ||
        (allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE) == 0)
       return false;
+
+   tu_wddm_perf_scope timing("allocation-lock", allocation->private_info.Size, 1,
+                             static_cast<uint32_t>(allocation->handle), 0,
+                             allocation->private_info.Size >= UINT64_C(67108864));
 
    D3DKMT_LOCK lock = {};
    lock.hDevice = allocation->context->device->handle;
@@ -1342,6 +1394,9 @@ tu_wddm_context_render(struct tu_wddm_context *context,
        !tu_wddm_validate_context_info(&context->info, context->device->adapter.private_info.ResetGeneration))
       return rejected("arguments-or-context");
 
+   tu_wddm_perf_scope timing("render-total", 0, reference_count,
+                             static_cast<uint32_t>(context->handle));
+
    /* Render is the only path that can publish a new Host submission.  Keep
     * the execution-state check adjacent to the context/epoch validation so a
     * reset or stopped device cannot consume a DMA buffer or mutate the KMT
@@ -1418,6 +1473,7 @@ tu_wddm_context_render(struct tu_wddm_context *context,
          static_cast<UINT>(reference->allocation_offset);
       context->patch_location_list[i].PatchOffset =
          static_cast<UINT>(command_offset + reference->patch_offset);
+      timing.bytes += reference->length;
    }
 
    D3DKMT_RENDER render = {};
@@ -1439,7 +1495,13 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    render.pNewAllocationList = context->allocation_list;
    render.pNewPatchLocationList = context->patch_location_list;
 
-   NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
+   NTSTATUS status;
+   {
+      tu_wddm_perf_scope kmt_timing("render-kmt", timing.bytes, reference_count,
+                                  static_cast<uint32_t>(context->handle),
+                                  submitted_fence, (submitted_fence & 255) == 0);
+      status = context->device->adapter.runtime->dispatch.Render(&render);
+   }
 
    const bool replacements_valid = tu_wddm_render_replacements_valid(&render);
    if (!NT_SUCCESS(status) || !replacements_valid)
@@ -2822,6 +2884,11 @@ tu_wddm_queue_submit(struct tu_queue *queue,
                    static_cast<unsigned>(device->wddm_initialized));
       return VK_ERROR_DEVICE_LOST;
    }
+
+   tu_wddm_perf_scope timing("queue-submit", 0,
+                             util_dynarray_num_elements(&submit->entries, struct tu_wddm_submit_entry),
+                             static_cast<uint32_t>(device->wddm_context.handle),
+                             device->wddm_context.last_submitted_fence);
 
    for (uint32_t i = 0; i < signal_count; i++) {
       if (!tu_wddm_sync_signal_valid(signals[i].sync, &device->wddm_context)) {
