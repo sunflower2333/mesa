@@ -25,7 +25,16 @@ constexpr uint32_t kDefaultElementCount = 256;
 constexpr uint32_t kMaxElementCount = 256 * 1024 * 1024;
 constexpr uint32_t kDefaultIterationCount = 1;
 constexpr uint32_t kMaxIterationCount = 16;
-constexpr uint64_t kFenceTimeoutNs = UINT64_C(10000000000);
+constexpr uint32_t kDefaultFenceTimeoutMs = 10000;
+constexpr uint32_t kMaxFenceTimeoutMs = 60000;
+
+void
+stage(const char *name, ULONGLONG start, VkResult result = VK_SUCCESS)
+{
+   printf("COMPUTE_STAGE=%s elapsed_ms=%llu result=%d\n", name,
+          static_cast<unsigned long long>(GetTickCount64() - start), result);
+   fflush(stdout);
+}
 
 bool
 parse_positive_u32(const char *text, uint32_t maximum, uint32_t *value)
@@ -82,11 +91,14 @@ main(int argc, char **argv)
 {
    uint32_t element_count = kDefaultElementCount;
    uint32_t iteration_count = kDefaultIterationCount;
+   uint32_t fence_timeout_ms = kDefaultFenceTimeoutMs;
+   const ULONGLONG start = GetTickCount64();
    bool elements_seen = false;
    bool iterations_seen = false;
+   bool timeout_seen = false;
    bool copy_readback = false;
    if (argc < 2 || (argc % 2) != 0) {
-      fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1]\n", argv[0]);
+      fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1] [--fence-timeout-ms MS]\n", argv[0]);
       return 2;
    }
    for (int argument = 2; argument < argc; argument += 2) {
@@ -99,8 +111,11 @@ main(int argc, char **argv)
       } else if (strcmp(argv[argument], "--copy-readback") == 0 && !copy_readback &&
                  strcmp(argv[argument + 1], "1") == 0) {
          copy_readback = true;
+      } else if (strcmp(argv[argument], "--fence-timeout-ms") == 0 && !timeout_seen &&
+                 parse_positive_u32(argv[argument + 1], kMaxFenceTimeoutMs, &fence_timeout_ms)) {
+         timeout_seen = true;
       } else {
-         fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1]\n", argv[0]);
+         fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1] [--fence-timeout-ms MS]\n", argv[0]);
          return 2;
       }
    }
@@ -421,11 +436,14 @@ main(int argc, char **argv)
    allocation_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
    allocation_info.allocationSize = requirements.size;
    allocation_info.memoryTypeIndex = memory_type;
+   stage("allocate-begin", start);
    result = allocate_memory(device, &allocation_info, nullptr, &memory);
+   stage("allocate-end", start, result);
    if (result == VK_SUCCESS)
       result = bind_buffer_memory(device, buffer, memory, 0);
    if (result == VK_SUCCESS)
       result = map_memory(device, memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+   stage("bind-map-end", start, result);
    if (result != VK_SUCCESS) {
       cleanup();
       return report("host-visible buffer allocation failed", result);
@@ -434,6 +452,7 @@ main(int argc, char **argv)
     * result therefore proves the CPU-to-GPU handoff as well as readback. */
    for (uint32_t i = 0; i < element_count; i++)
       static_cast<uint32_t *>(mapped)[i] = UINT32_C(0x1000) + i * 5;
+   stage("seed-end", start);
    if ((memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
       VkMappedMemoryRange range = {};
       range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -644,10 +663,24 @@ main(int argc, char **argv)
          cleanup();
          return report("vkResetFences failed", result);
       }
-      if ((result = queue_submit(queue, 1, &submit_info, fence)) != VK_SUCCESS ||
-          (result = wait_for_fences(device, 1, &fence, VK_TRUE, kFenceTimeoutNs)) != VK_SUCCESS) {
+      stage("submit-begin", start);
+      result = queue_submit(queue, 1, &submit_info, fence);
+      stage("submit-end", start, result);
+      if (result != VK_SUCCESS) {
          cleanup();
-         return report("compute submission or fence wait failed", result);
+         return report("compute submission failed", result);
+      }
+      printf("COMPUTE_FENCE_TIMEOUT_MS=%u\n", fence_timeout_ms);
+      stage("wait-begin", start);
+      result = wait_for_fences(device, 1, &fence, VK_TRUE,
+                              static_cast<uint64_t>(fence_timeout_ms) * UINT64_C(1000000));
+      stage("wait-end", start, result);
+      if (result != VK_SUCCESS) {
+         /* A timeout does not retire GPU work. Let process teardown release
+          * ownership instead of destroying objects still used by the queue. */
+         if (result == VK_ERROR_DEVICE_LOST)
+            cleanup();
+         return report("compute fence wait failed", result);
       }
    }
    if ((memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
@@ -700,7 +733,9 @@ main(int argc, char **argv)
       }
    }
 
+   stage("verify-end", start);
    cleanup();
+   stage("cleanup-end", start);
    printf("tu WDDM Vulkan compute probe passed: %s, elements %u, checksum %llu\n", properties.deviceName, element_count,
           static_cast<unsigned long long>(checksum));
    if (element_count != kDefaultElementCount || iteration_count != kDefaultIterationCount) {
