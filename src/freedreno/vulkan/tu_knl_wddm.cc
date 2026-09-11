@@ -614,8 +614,14 @@ tu_wddm_device_execution_active(struct tu_wddm_device *device)
    state.hDevice = device->handle;
    state.StateType = D3DKMT_DEVICESTATE_EXECUTION;
    NTSTATUS status = device->adapter.runtime->dispatch.GetDeviceState(&state);
-   return NT_SUCCESS(status) &&
-          state.ExecutionState == D3DKMT_DEVICEEXECUTION_ACTIVE;
+   const bool active = NT_SUCCESS(status) &&
+                       state.ExecutionState == D3DKMT_DEVICEEXECUTION_ACTIVE;
+   if (!active)
+      tu_wddm_diag("device_execution inactive device=%u status=0x%08x state=%u",
+                   static_cast<unsigned>(device->handle),
+                   static_cast<unsigned>(status),
+                   static_cast<unsigned>(state.ExecutionState));
+   return active;
 }
 
 bool
@@ -734,8 +740,19 @@ tu_wddm_context_get_completed_fence(struct tu_wddm_context *context,
 
    NTSTATUS status = context->device->adapter.runtime->dispatch.Escape(&escape);
    if (!NT_SUCCESS(status) ||
-       !tu_wddm_validate_fence_info(&request, generation, context->info.ContextId))
+       !tu_wddm_validate_fence_info(&request, generation, context->info.ContextId)) {
+      tu_wddm_diag("completed_fence query failed context=%u id=%u status=0x%08x"
+                   " expected_generation=%llu returned_generation=%llu"
+                   " returned_id=%u completed=%llu submitted=%u",
+                   static_cast<unsigned>(context->handle), context->info.ContextId,
+                   static_cast<unsigned>(status),
+                   static_cast<unsigned long long>(generation),
+                   static_cast<unsigned long long>(request.ResetGeneration),
+                   request.ContextId,
+                   static_cast<unsigned long long>(request.CompletedFence),
+                   context->last_submitted_fence);
       return false;
+   }
 
    *completed_fence = static_cast<uint32_t>(request.CompletedFence);
    return true;
