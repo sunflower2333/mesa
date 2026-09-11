@@ -171,6 +171,68 @@ private:
 #include "tu_knl.h"
 #include "tu_queue.h"
 #include "tu_rmv.h"
+#include "tu_wddm_startup_perf.h"
+
+static bool
+tu_wddm_thread_cpu_time(uint64_t *ticks)
+{
+   FILETIME created, exited, kernel, user;
+   if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+      return false;
+   *ticks = (static_cast<uint64_t>(kernel.dwHighDateTime) << 32) +
+            kernel.dwLowDateTime +
+            (static_cast<uint64_t>(user.dwHighDateTime) << 32) +
+            user.dwLowDateTime;
+   return true;
+}
+
+tu_wddm_startup_scope::tu_wddm_startup_scope(const char *phase, uint32_t count,
+                                           bool sample)
+   : phase(phase), count(count), sample(sample)
+{
+   static const bool requested = []() {
+      char value[4] = {};
+      return GetEnvironmentVariableA("TU_WDDM_PERF", value, sizeof(value)) == 1 &&
+             value[0] == '1';
+   }();
+   LARGE_INTEGER qpc, hz;
+   if (!requested || !QueryPerformanceFrequency(&hz) || hz.QuadPart <= 0 ||
+       !QueryPerformanceCounter(&qpc) || qpc.QuadPart < 0)
+      return;
+   start = qpc.QuadPart;
+   frequency = hz.QuadPart;
+   cpu_valid = tu_wddm_thread_cpu_time(&cpu_start);
+   enabled = true;
+}
+
+tu_wddm_startup_scope::~tu_wddm_startup_scope()
+{
+   LARGE_INTEGER end;
+   if (!enabled || !QueryPerformanceCounter(&end) || end.QuadPart < 0 ||
+       static_cast<uint64_t>(end.QuadPart) < start)
+      return;
+   const double wall_ms =
+      static_cast<double>(static_cast<uint64_t>(end.QuadPart) - start) *
+      1000.0 / static_cast<double>(frequency);
+   if (!sample && wall_ms < 50.0)
+      return;
+   uint64_t cpu_end;
+   const double cpu_ms = cpu_valid && tu_wddm_thread_cpu_time(&cpu_end) &&
+                         cpu_end >= cpu_start
+                            ? static_cast<double>(cpu_end - cpu_start) / 10000.0
+                            : -1.0;
+   fprintf(stderr, "TU_WDDM_PERF: pid=%lu tick_ms=%llu phase=%s wall_ms=%.3f"
+                   " bytes=0 count=%u owner=0 fence=0"
+                   " qpc_ticks=%llu qpc_frequency=%llu"
+                   " qpc_start=%llu tid=%lu thread_cpu_ms=%.3f\n",
+           static_cast<unsigned long>(GetCurrentProcessId()),
+           static_cast<unsigned long long>(GetTickCount64()), phase, wall_ms,
+           count, static_cast<unsigned long long>(end.QuadPart),
+           static_cast<unsigned long long>(frequency),
+           static_cast<unsigned long long>(start),
+           static_cast<unsigned long>(GetCurrentThreadId()), cpu_ms);
+   fflush(stderr);
+}
 #endif
 
 template <typename T>

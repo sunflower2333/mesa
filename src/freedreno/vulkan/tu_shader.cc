@@ -4,6 +4,7 @@
  */
 
 #include "tu_shader.h"
+#include "tu_wddm_startup_perf.h"
 
 #include <initializer_list>
 
@@ -201,6 +202,7 @@ tu_spirv_to_nir(struct tu_device *dev,
                 const struct tu_shader_key *key,
                 mesa_shader_stage stage)
 {
+   tu_wddm_startup_scope timing("shader-spirv-to-nir");
    const nir_shader_compiler_options *nir_options =
       ir3_get_compiler_options(dev->compiler);
 
@@ -3201,6 +3203,7 @@ tu_lower_nir(struct tu_device *dev,
              const struct ir3_shader_key *ir3_key,
              struct tu_shader_info *info)
 {
+   tu_wddm_startup_scope timing("shader-lower-nir");
    const nir_opt_access_options access_options = {
       .is_vulkan = true,
    };
@@ -3362,6 +3365,7 @@ tu_shader_create(struct tu_device *dev,
                  struct tu_pipeline_layout *layout,
                  bool executable_info)
 {
+   tu_wddm_startup_scope timing("shader-create");
    struct tu_shader *shader = tu_shader_init(dev, key_data, key_size);
 
    if (!shader)
