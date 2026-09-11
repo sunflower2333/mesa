@@ -91,7 +91,7 @@ jobs:
       - name: Build x86 device and compute probes
         shell: pwsh
         run: |
-          foreach ($probe in @('tu_wddm_vulkan_probe','tu_wddm_vulkan_compute_probe')) {
+          foreach ($probe in @('tu_wddm_vulkan_probe','tu_wddm_vulkan_compute_probe','tu_wddm_vulkan_loader_probe')) {
             cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
               "src/freedreno/vulkan/tests/$probe.cpp" "/Fe:${probe}_x86.exe"
             if ($LASTEXITCODE) { throw "x86 probe failed: $probe" }
@@ -110,7 +110,7 @@ jobs:
             if ($files.Count -ne 1) { throw "Ambiguous/missing payload: $name" }
             Copy-Item $files[0].FullName $stage
           }
-          Copy-Item tu_wddm_vulkan_probe_x86.exe,tu_wddm_vulkan_compute_probe_x86.exe,tu_wddm_compute.spv $stage
+          Copy-Item tu_wddm_vulkan_probe_x86.exe,tu_wddm_vulkan_compute_probe_x86.exe,tu_wddm_vulkan_loader_probe_x86.exe,tu_wddm_compute.spv $stage
           foreach ($pe in Get-ChildItem $stage -File | Where-Object {$_.Extension -in '.dll','.exe'}) {
             $headers = & dumpbin /headers $pe.FullName
             if ($LASTEXITCODE -or !($headers -match '14C machine')) { throw "Not x86: $($pe.Name)" }
@@ -121,8 +121,20 @@ jobs:
           }
           $exports = (& dumpbin /exports "$stage\vulkan_freedreno.dll") -join "`n"
           if ($LASTEXITCODE) { throw 'ICD exports could not be read' }
+          Write-Host $exports
+          $exports | Set-Content "$stage\icd-exports.txt"
           foreach ($symbol in @('vk_icdNegotiateLoaderICDInterfaceVersion','vk_icdGetInstanceProcAddr','vk_icdGetPhysicalDeviceProcAddr')) {
-            if ($exports -notmatch ('(?m)\s' + $symbol + '\s*$')) { throw "Missing undecorated loader export: $symbol" }
+            # dumpbin may annotate an exported name with its decorated target.
+            # Match the name column exactly, never just a decorated alias.
+            $pattern = '(?m)^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+' + [regex]::Escape($symbol) + '(?:\s*=\s*\S+)?\s*$'
+            if ($exports -notmatch $pattern) { throw "Missing undecorated loader export: $symbol" }
+          }
+          Push-Location $stage
+          try {
+            & .\tu_wddm_vulkan_loader_probe_x86.exe
+            if ($LASTEXITCODE) { throw 'x86 ICD loader entrypoint execution failed' }
+          } finally {
+            Pop-Location
           }
           python src/vulkan/util/vk_icd_gen.py --api-version 1.4 --xml src/vulkan/registry/vk.xml `
             --icd-lib-path . --icd-filename vulkan_freedreno.dll --sizeof-pointer 4 --use-backslash `
