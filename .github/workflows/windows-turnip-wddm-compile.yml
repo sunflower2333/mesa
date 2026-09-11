@@ -60,6 +60,9 @@ jobs:
       - name: Execute suballocator mapping failure regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_suballoc_failure_test.py
+      - name: Execute command stream pooling and range ownership regression
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/tu_cs_pool_test.py
 
   compile:
     name: ARM64 SDK/WDK compile

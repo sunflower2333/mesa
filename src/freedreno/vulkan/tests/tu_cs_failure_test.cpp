@@ -22,6 +22,13 @@ uint32_t tu_cs_fail_sink[TU_CS_FAIL_SINK_SIZE];
 static uint32_t storage[256];
 static tu_bo backing{0x100000, storage, sizeof(storage)};
 static tu_bo *backing_array[]{&backing};
+static tu_bo_array owned_bos(tu_bo **bos, uint32_t count) {
+    tu_bo_array owned{};
+    owned.bos = bos;
+    owned.bo_count = owned.bo_capacity = count;
+    owned.start = storage;
+    return owned;
+}
 static VkResult allocation_result;
 static unsigned reserve_calls;
 static unsigned released_bos;
@@ -93,7 +100,7 @@ int main() {
                 if (route == 1) {
                     cs.start = cs.cur = storage + 1;
                     cs.end = storage + ARRAY_SIZE(storage);
-                    cs.read_only = {backing_array, 1, 1, storage};
+                    cs.read_only = owned_bos(backing_array, 1);
                 }
                 allocation_result = error;
                 VkResult result;
@@ -128,7 +135,7 @@ int main() {
         tu_cs cs = parent(&device, writeable), child{};
         cs.start = cs.cur = storage + 1;
         cs.end = storage + ARRAY_SIZE(storage);
-        cs.read_only = {backing_array, 1, 1, storage};
+        cs.read_only = owned_bos(backing_array, 1);
         const auto result = tu_cs_begin_sub_stream_aligned(&cs, 2, 8, &child);
         check(result == VK_SUCCESS && child.device == &device && child.start == storage + 8 &&
               child.reserved_end == storage + 24 && child.writeable == writeable,
@@ -147,7 +154,7 @@ int main() {
                 cs.cur = storage + 4;
                 cs.end = storage + ARRAY_SIZE(storage);
                 if (route == 1)
-                    cs.read_only = {owned, 2, 2, storage};
+                    cs.read_only = owned_bos(owned, 2);
                 else
                     cs.refcount_bo = &backing;
             }

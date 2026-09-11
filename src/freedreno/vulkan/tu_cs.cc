@@ -169,29 +169,55 @@ tu_cs_add_bo(struct tu_cs *cs, uint32_t size)
    }
 
    struct tu_bo *new_bo;
+   uint32_t *map;
+   bool pooled = false;
 
-   VkResult result =
-      tu_bo_init_new(cs->device, NULL, &new_bo, size * sizeof(uint32_t),
-                     (enum tu_bo_alloc_flags)(COND(!cs->writeable,
-                                                   TU_BO_ALLOC_GPU_READ_ONLY) |
-                                              TU_BO_ALLOC_ALLOW_DUMP),
-                     cs->name);
-   if (result != VK_SUCCESS) {
-      return result;
-   }
+#ifdef TU_HAS_WDDM
+   /* Small per-command-buffer IB/state BOs can exhaust the bounded WDDM
+    * all-live residency list even when their total byte size is small. Pack
+    * GPU-read-only streams into the existing, locked read-only device pool.
+    * Each CS owns its slice's BO reference until reset/finish; no live range
+    * is recycled. Keep writable/self-modifying streams in separate BOs.
+    * RMV expects standalone command-buffer resource create/destroy events. */
+   if (is_wddm(cs->device->physical_device->instance) && !cs->writeable &&
+       size <= 4096 && cs->device->pipeline_suballoc.dev != NULL &&
+       !(cs->device->instance->vk.trace_mode & VK_TRACE_MODE_RMV)) {
+      struct tu_suballoc_bo slice = {};
+      mtx_lock(&cs->device->pipeline_mutex);
+      VkResult result = tu_suballoc_bo_alloc(
+         &slice, &cs->device->pipeline_suballoc, size * sizeof(uint32_t), 64);
+      mtx_unlock(&cs->device->pipeline_mutex);
+      if (result != VK_SUCCESS)
+         return result;
+      new_bo = slice.bo;
+      map = (uint32_t *)tu_suballoc_bo_map(&slice);
+      pooled = true;
+   } else
+#endif
+   {
+      VkResult result = tu_bo_init_new(
+         cs->device, NULL, &new_bo, size * sizeof(uint32_t),
+         (enum tu_bo_alloc_flags)(COND(!cs->writeable, TU_BO_ALLOC_GPU_READ_ONLY) |
+                                  TU_BO_ALLOC_ALLOW_DUMP), cs->name);
+      if (result != VK_SUCCESS)
+         return result;
 
-   result = tu_bo_map(cs->device, new_bo, NULL);
-   if (result != VK_SUCCESS) {
-      tu_bo_finish(cs->device, new_bo);
-      return result;
+      result = tu_bo_map(cs->device, new_bo, NULL);
+      if (result != VK_SUCCESS) {
+         tu_bo_finish(cs->device, new_bo);
+         return result;
+      }
+      map = (uint32_t *)new_bo->map;
    }
 
    TU_RMV(cmd_buffer_bo_create, cs->device, new_bo);
 
    bos->bos[bos->bo_count++] = new_bo;
 
-   cs->start = cs->cur = cs->reserved_end = (uint32_t *) new_bo->map;
+   cs->start = cs->cur = cs->reserved_end = map;
    cs->end = cs->start + size;
+   bos->pooled_start = pooled ? cs->start : NULL;
+   bos->pooled_end = pooled ? cs->end : NULL;
 
    return VK_SUCCESS;
 }
@@ -321,8 +347,8 @@ tu_cs_set_writeable(struct tu_cs *cs, bool writeable)
       cs->start = cs->cur = cs->reserved_end = new_bos->start;
       if (new_bos->bo_count) {
          struct tu_bo *bo = new_bos->bos[new_bos->bo_count - 1];
-         cs->end = (uint32_t *) bo->map +
-                   tu_sanitize_ib_size(bo->size / sizeof(uint32_t));
+         cs->end = new_bos->pooled_end ? new_bos->pooled_end :
+            (uint32_t *) bo->map + tu_sanitize_ib_size(bo->size / sizeof(uint32_t));
       } else {
          cs->end = NULL;
       }
@@ -564,9 +590,10 @@ tu_cs_reset(struct tu_cs *cs)
       cs->read_only.bos[0] = cs->read_only.bos[cs->read_only.bo_count - 1];
       cs->read_only.bo_count = 1;
 
-      cs->start = cs->cur = cs->reserved_end = (uint32_t *) cs->read_only.bos[0]->map;
-      cs->end = cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size /
-                                                sizeof(uint32_t));
+      cs->start = cs->cur = cs->reserved_end = cs->read_only.pooled_start ?
+         cs->read_only.pooled_start : (uint32_t *)cs->read_only.bos[0]->map;
+      cs->end = cs->read_only.pooled_end ? cs->read_only.pooled_end :
+         cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size / sizeof(uint32_t));
    }
 
    /* An allocation failure may have redirected cur/reserved_end to the

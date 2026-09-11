@@ -76,6 +76,10 @@ struct tu_bo_array {
    uint32_t bo_count;
    uint32_t bo_capacity;
    uint32_t *start;
+   /* Bounds of the last pooled slice, if the BO is shared with other CSes.
+    * start above is a recording cursor and cannot serve as the reset bound. */
+   uint32_t *pooled_start;
+   uint32_t *pooled_end;
 };
 
 #define TU_COND_EXEC_STACK_SIZE 4
