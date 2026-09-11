@@ -27,7 +27,10 @@ template<typename T> static T symbol(HMODULE module, const char *name)
 
 static HMODULE load(const char *name)
 {
-   HMODULE module = LoadLibraryExA(name, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+   char absolute[MAX_PATH];
+   const DWORD length = GetFullPathNameA(name, MAX_PATH, absolute, nullptr);
+   if (!length || length >= MAX_PATH) fail("absolute module path");
+   HMODULE module = LoadLibraryExA(absolute, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
    if (!module) fail(name);
    char path[MAX_PATH];
    if (!GetModuleFileNameA(module, path, MAX_PATH)) fail("module path");
@@ -57,7 +60,7 @@ static void renderer(HMODULE gl)
    const char *version = reinterpret_cast<const char *>(getString(GL_VERSION));
    std::printf("GL_RENDERER=%s\nGL_VERSION=%s\n", name ? name : "null", version ? version : "null");
    if (!name || !std::strstr(name, "zink") ||
-       !(std::strstr(name, "Turnip") || std::strstr(name, "turnip")) ||
+       !(std::strstr(name, "Turnip") || std::strstr(name, "turnip") || std::strstr(name, "TURNIP")) ||
        std::strstr(name, "llvmpipe") || std::strstr(name, "softpipe"))
       fail("renderer is not accelerated Zink on Turnip");
 }
