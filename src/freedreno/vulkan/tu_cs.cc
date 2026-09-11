@@ -6,6 +6,7 @@
 #include "tu_cs.h"
 
 #include "tu_device.h"
+#include "tu_knl.h"
 #include "tu_rmv.h"
 #include "tu_suballoc.h"
 
@@ -179,7 +180,7 @@ tu_cs_add_bo(struct tu_cs *cs, uint32_t size)
     * Each CS owns its slice's BO reference until reset/finish; no live range
     * is recycled. Keep writable/self-modifying streams in separate BOs.
     * RMV expects standalone command-buffer resource create/destroy events. */
-   if (is_wddm(cs->device->physical_device->instance) && !cs->writeable &&
+   if (strcmp(cs->device->instance->knl->name, "wddm") == 0 && !cs->writeable &&
        size <= 4096 && cs->device->pipeline_suballoc.dev != NULL &&
        !(cs->device->instance->vk.trace_mode & VK_TRACE_MODE_RMV)) {
       struct tu_suballoc_bo slice = {};

@@ -20,10 +20,10 @@ enum tu_bo_alloc_flags { TU_BO_ALLOC_GPU_READ_ONLY = 1, TU_BO_ALLOC_ALLOW_DUMP =
 struct tu_device;
 struct tu_bo { uint64_t iova; uint32_t *map; uint32_t size; unsigned refs; bool readonly; };
 // PRODUCTION_SUB_STRUCTS
-struct instance { struct { unsigned trace_mode; } vk; bool wddm; };
+struct tu_knl { const char *name; };
+struct instance { struct { unsigned trace_mode; } vk; const tu_knl *knl; };
 struct physical { struct instance *instance; };
 struct tu_device { physical *physical_device; struct instance *instance; tu_suballocator pipeline_suballoc; std::mutex pipeline_mutex; };
-[[maybe_unused]] static bool is_wddm(const struct instance *instance) { return instance->wddm; }
 [[maybe_unused]] static void mtx_lock(std::mutex *mutex) { mutex->lock(); }
 [[maybe_unused]] static void mtx_unlock(std::mutex *mutex) { mutex->unlock(); }
 static uint32_t align(uint32_t n, uint32_t a) { return (n + a - 1) & ~(a - 1); }
@@ -64,7 +64,8 @@ static void init_pool(tu_device *device) {
                             TU_BO_ALLOC_GPU_READ_ONLY, "pool");
 }
 int main() {
-    struct instance instance{{0}, true};
+    const tu_knl wddm{"wddm"}, other{"drm"};
+    struct instance instance{{0}, &wddm};
     physical physical{&instance};
     tu_device device{};
     device.instance = &instance;
@@ -146,7 +147,7 @@ int main() {
     }
     for (int route = 0; route < 3; route++) {
         init_pool(&device);
-        instance.wddm = route != 0;
+        instance.knl = route != 0 ? &wddm : &other;
         instance.vk.trace_mode = route == 1 ? VK_TRACE_MODE_RMV : 0;
         if (route == 2) device.pipeline_suballoc.dev = nullptr;
         tu_cs_init(&cs, &device, TU_CS_MODE_SUB_STREAM, 2048, "fallback");
