@@ -8,6 +8,7 @@
  */
 
 #include "tu_device.h"
+#include "tu_wddm_startup_perf.h"
 
 #if DETECT_OS_WINDOWS
 #include <io.h>
@@ -2907,6 +2908,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                 const VkAllocationCallbacks *pAllocator,
                 VkDevice *pDevice)
 {
+   tu_wddm_startup_scope timing("device-create", 1, true);
    VK_FROM_HANDLE(tu_physical_device, physical_device, physicalDevice);
    VkResult result;
    struct tu_device *device;

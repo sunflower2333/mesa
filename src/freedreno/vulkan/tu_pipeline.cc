@@ -8,6 +8,7 @@
  */
 
 #include "tu_pipeline.h"
+#include "tu_wddm_startup_perf.h"
 
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
@@ -4874,6 +4875,7 @@ tu_CreateGraphicsPipelines(VkDevice device,
                            const VkAllocationCallbacks *pAllocator,
                            VkPipeline *pPipelines)
 {
+   tu_wddm_startup_scope timing("graphics-pipelines-create", count, true);
    MESA_TRACE_FUNC();
    VkResult final_result = VK_SUCCESS;
    uint32_t i = 0;
@@ -4976,6 +4978,7 @@ tu_compute_pipeline_create(VkDevice device,
    bool application_cache_hit = false;
 
    if (!executable_info) {
+      tu_wddm_startup_scope cache_timing("compute-pipeline-cache-lookup");
       shader =
          tu_pipeline_cache_lookup(cache, pipeline_blake3, sizeof(pipeline_blake3),
                                   &application_cache_hit);
@@ -5078,6 +5081,7 @@ tu_CreateComputePipelines(VkDevice device,
                           const VkAllocationCallbacks *pAllocator,
                           VkPipeline *pPipelines)
 {
+   tu_wddm_startup_scope timing("compute-pipelines-create", count, true);
    MESA_TRACE_FUNC();
    VkResult final_result = VK_SUCCESS;
    uint32_t i = 0;
