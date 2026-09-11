@@ -56,7 +56,7 @@ git -C external/vulkan-loader rev-parse HEAD | Set-Content "$Stage/loader-source
 if ($Architecture -ne 'arm64') {
     Push-Location $Stage
     try {
-        & ./opengl-probe.exe --load-only
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./run-windows-opengl.ps1 -Mode load-only
         if ($LASTEXITCODE) { throw 'Real architecture loader/export execution failed' }
     } finally { Pop-Location }
 }
