@@ -63,6 +63,9 @@ jobs:
       - name: Execute allocation alias and patch overlap regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_wddm_reference_test.py
+      - name: Execute compute shader conversion failure regression
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/tu_compute_compile_failure_test.py
       - name: Execute suballocator mapping failure regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_suballoc_failure_test.py

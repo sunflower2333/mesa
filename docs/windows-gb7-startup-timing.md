@@ -29,3 +29,16 @@ not change shader compilation, caching, resources, submission or fences.
 This branch is an independent depth-one clone of Mesa 6c3ddd22849. It retains
 the prior bounded command-buffer batching and reference validation repairs.
 Runtime startup attribution and any resulting optimization remain pending.
+
+The compiler audit also found a separate failure-path defect: a compute
+pipeline cache miss did not check a null result from `tu_spirv_to_nir`, unlike
+the graphics path. Conversion failure could reach disassembly or NIR lowering
+with a null pointer. The compute path now takes its existing failure cleanup,
+returns `VK_ERROR_OUT_OF_HOST_MEMORY` consistently with the graphics caller,
+and leaves the output pipeline null. The helper's pointer-only interface does
+not distinguish underlying conversion error codes; that convention is retained.
+
+The production cache-miss fault-injection regression covers failed conversion
+with and without executable capture, shader-create failure, cache hit,
+compile-required early return and successful compilation. Its pre-fix negative
+control must fail. This source defect is not yet tied to a captured GB7 crash.
