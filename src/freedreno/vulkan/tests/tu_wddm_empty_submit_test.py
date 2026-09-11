@@ -10,7 +10,7 @@ import tempfile
 
 
 def definition(source, name):
-    match = re.search(r"static\s+(?:bool|void|VkResult)\s+" + name + r"\([^;]*?\)\s*\{", source)
+    match = re.search(r"static\s+(?:bool|void|uint64_t|VkResult)\s+" + name + r"\([^;]*?\)\s*\{", source)
     if not match:
         raise ValueError(f"Missing production definition: {name}")
     depth = 0

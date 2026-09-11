@@ -173,6 +173,9 @@ struct tu_knl {
                            void *metadata, uint32_t metadata_size);
    int (*bo_get_metadata)(struct tu_device *dev, struct tu_bo *bo,
                           void *metadata, uint32_t metadata_size);
+   /* Zero leaves batching to the backend. Nonzero is the physical packet's
+    * CS entry budget, including command streams generated at submit time. */
+   uint32_t max_submit_entries;
    void *(*submit_create)(struct tu_device *device);
    void (*submit_finish)(struct tu_device *device, void *_submit);
    void (*submit_add_entries)(struct tu_device *device, void *_submit,

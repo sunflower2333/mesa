@@ -413,7 +413,7 @@ out:
 }
 
 static VkResult
-queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
+queue_submit_single(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 {
    MESA_TRACE_FUNC();
    struct tu_queue *queue = list_entry(_queue, struct tu_queue, vk);
@@ -631,6 +631,91 @@ fail_create_submit:
       vk_free(&queue->device->vk.alloc, cmd_buffers);
 
    return result;
+}
+
+/* The CS may acquire one GPU visibility-patching entry per simultaneous-use
+ * command buffer, plus one performance-counter entry. Concurrent-binning
+ * patchpoints are CPU writes, and the autotune fence needs one entry per
+ * physical submission (reserved separately below). */
+static uint64_t
+queue_submit_entry_cost(const struct tu_device *device,
+                         const struct tu_cmd_buffer *cmd)
+{
+   return (uint64_t)cmd->cs.entry_count +
+          !!(cmd->usage_flags & VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT) +
+          !!device->perfcntrs_pass_cs_entries;
+}
+
+static VkResult
+queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
+{
+   struct tu_queue *queue = list_entry(_queue, struct tu_queue, vk);
+   struct tu_device *device = queue->device;
+   const uint32_t limit = device->instance->knl->max_submit_entries;
+   const uint32_t count = vk_submit->command_buffer_count;
+   if (limit == 0 || count <= 1 || vk_queue_submit_has_bind(vk_submit))
+      return queue_submit_single(_queue, vk_submit);
+
+   struct tu_cmd_buffer **cmds =
+      (struct tu_cmd_buffer **)vk_submit->command_buffers;
+   uint64_t total = 1; /* Optional autotune fence CS. */
+   for (uint32_t i = 0; i < count; i++) {
+      /* Dynamic rendering inserts generated command buffers that inherit
+       * earlier hardware state. Keep the entire chain on the existing path.
+       * Trace-copy streams also have a budget known only after preparation.
+       * Neither may be split by counting raw IB entries. */
+      if (cmds[i]->state.suspend_resume != SR_NONE ||
+          u_trace_should_process(&device->trace_context))
+         return queue_submit_single(_queue, vk_submit);
+      total = MIN2(total + queue_submit_entry_cost(device, cmds[i]),
+                   (uint64_t)limit + 1);
+   }
+   if (total <= limit)
+      return queue_submit_single(_queue, vk_submit);
+
+   /* Preflight every indivisible command buffer before transferring any
+    * work. A single oversized CS still needs a separate transport solution. */
+   for (uint32_t i = 0; i < count; i++) {
+      if (queue_submit_entry_cost(device, cmds[i]) + 1 > limit)
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   uint32_t first = 0;
+   while (first < count) {
+      uint32_t end = first;
+      uint64_t entries = 1;
+      while (end < count &&
+             entries + queue_submit_entry_cost(device, cmds[end]) <= limit) {
+         entries += queue_submit_entry_cost(device, cmds[end]);
+         end++;
+      }
+
+      /* EndCommandBuffer flushes CCU, so full primary command buffers may
+       * cross physical submissions. Preparing each batch separately also
+       * terminates concurrent binning at its boundary. The original CS and
+       * its GPU-written patchpoints remain in place, with no extra IB level.
+       * Every batch retains the backend's complete residency/fence handling. */
+      struct vk_queue_submit batch = *vk_submit;
+      batch.command_buffers = vk_submit->command_buffers + first;
+      batch.command_buffer_count = end - first;
+      if (first != 0) {
+         batch.waits = NULL;
+         batch.wait_count = 0;
+      }
+      if (end != count) {
+         batch.signals = NULL;
+         batch.signal_count = 0;
+      }
+      VkResult result = queue_submit_single(_queue, &batch);
+      if (result != VK_SUCCESS) {
+         if (first != 0)
+            return vk_device_set_lost(
+               &device->vk, "Command-buffer batch failed after prior transfer");
+         return result;
+      }
+      first = end;
+   }
+   return VK_SUCCESS;
 }
 
 VkResult

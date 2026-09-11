@@ -91,14 +91,16 @@ main(int argc, char **argv)
 {
    uint32_t element_count = kDefaultElementCount;
    uint32_t iteration_count = kDefaultIterationCount;
+   uint32_t command_buffer_count = 1;
    uint32_t fence_timeout_ms = kDefaultFenceTimeoutMs;
    const ULONGLONG start = GetTickCount64();
    bool elements_seen = false;
    bool iterations_seen = false;
+   bool command_buffers_seen = false;
    bool timeout_seen = false;
    bool copy_readback = false;
    if (argc < 2 || (argc % 2) != 0) {
-      fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1] [--fence-timeout-ms MS]\n", argv[0]);
+      fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--command-buffers COUNT] [--copy-readback 1] [--fence-timeout-ms MS]\n", argv[0]);
       return 2;
    }
    for (int argument = 2; argument < argc; argument += 2) {
@@ -108,6 +110,9 @@ main(int argc, char **argv)
       } else if (strcmp(argv[argument], "--iterations") == 0 && !iterations_seen &&
                  parse_positive_u32(argv[argument + 1], kMaxIterationCount, &iteration_count)) {
          iterations_seen = true;
+      } else if (strcmp(argv[argument], "--command-buffers") == 0 && !command_buffers_seen &&
+                 parse_positive_u32(argv[argument + 1], 4096, &command_buffer_count)) {
+         command_buffers_seen = true;
       } else if (strcmp(argv[argument], "--copy-readback") == 0 && !copy_readback &&
                  strcmp(argv[argument + 1], "1") == 0) {
          copy_readback = true;
@@ -115,7 +120,7 @@ main(int argc, char **argv)
                  parse_positive_u32(argv[argument + 1], kMaxFenceTimeoutMs, &fence_timeout_ms)) {
          timeout_seen = true;
       } else {
-         fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--copy-readback 1] [--fence-timeout-ms MS]\n", argv[0]);
+         fprintf(stderr, "usage: %s compute.spv [--elements COUNT] [--iterations COUNT] [--command-buffers COUNT] [--copy-readback 1] [--fence-timeout-ms MS]\n", argv[0]);
          return 2;
       }
    }
@@ -584,69 +589,73 @@ main(int argc, char **argv)
       cleanup();
       return report("vkCreateCommandPool failed", result);
    }
-   VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+   std::vector<VkCommandBuffer> command_buffers(command_buffer_count);
    VkCommandBufferAllocateInfo command_buffer_info = {};
    command_buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
    command_buffer_info.commandPool = command_pool;
    command_buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-   command_buffer_info.commandBufferCount = 1;
-   if ((result = allocate_command_buffers(device, &command_buffer_info, &command_buffer)) != VK_SUCCESS) {
+   command_buffer_info.commandBufferCount = command_buffer_count;
+   if ((result = allocate_command_buffers(device, &command_buffer_info, command_buffers.data())) != VK_SUCCESS) {
       cleanup();
       return report("vkAllocateCommandBuffers failed", result);
    }
-   VkCommandBufferBeginInfo begin_info = {};
-   begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-   begin_info.flags = iteration_count == 1 ? VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT : 0;
-   if ((result = begin_command_buffer(command_buffer, &begin_info)) != VK_SUCCESS) {
-      cleanup();
-      return report("vkBeginCommandBuffer failed", result);
-   }
-   cmd_bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-   cmd_bind_descriptor_sets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1, &descriptor_set, 0,
-                            nullptr);
-   VkBufferMemoryBarrier to_compute = {};
-   to_compute.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-   to_compute.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-   to_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-   to_compute.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   to_compute.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   to_compute.buffer = buffer;
-   to_compute.size = VK_WHOLE_SIZE;
-   cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &to_compute, 0, nullptr);
-   cmd_dispatch(command_buffer, group_count_x, group_count_y, 1);
-   VkBufferMemoryBarrier to_host = {};
-   to_host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-   to_host.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-   to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-   to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   to_host.buffer = buffer;
-   to_host.size = VK_WHOLE_SIZE;
-   cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr,
-                        1, &to_host, 0, nullptr);
-   if (copy_readback) {
-      // Compare shader output in its original allocation with an independent
-      // GPU buffer copy. Image readback does not exercise this transfer path.
-      VkBufferMemoryBarrier barriers[2] = {to_host, to_host};
-      barriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-      barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-      barriers[1].buffer = copied_buffer;
-      barriers[1].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-      barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-      cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                           VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 2, barriers, 0, nullptr);
-      VkBufferCopy region = {0, 0, buffer_size};
-      cmd_copy_buffer(command_buffer, buffer, copied_buffer, 1, &region);
-      barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-      barriers[1].dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-      cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-                           0, 0, nullptr, 1, &barriers[1], 0, nullptr);
-   }
-   if ((result = end_command_buffer(command_buffer)) != VK_SUCCESS) {
-      cleanup();
-      return report("vkEndCommandBuffer failed", result);
+   for (VkCommandBuffer command_buffer : command_buffers) {
+      VkCommandBufferBeginInfo begin_info = {};
+      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      begin_info.flags = iteration_count == 1 ? VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT : 0;
+      if ((result = begin_command_buffer(command_buffer, &begin_info)) != VK_SUCCESS) {
+         cleanup();
+         return report("vkBeginCommandBuffer failed", result);
+      }
+      cmd_bind_pipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+      cmd_bind_descriptor_sets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1, &descriptor_set, 0,
+                               nullptr);
+      VkBufferMemoryBarrier to_compute = {};
+      to_compute.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+      to_compute.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                                 VK_ACCESS_TRANSFER_READ_BIT;
+      to_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+      to_compute.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      to_compute.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      to_compute.buffer = buffer;
+      to_compute.size = VK_WHOLE_SIZE;
+      cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &to_compute, 0, nullptr);
+      cmd_dispatch(command_buffer, group_count_x, group_count_y, 1);
+      VkBufferMemoryBarrier to_host = {};
+      to_host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+      to_host.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+      to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+      to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      to_host.buffer = buffer;
+      to_host.size = VK_WHOLE_SIZE;
+      cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr,
+                           1, &to_host, 0, nullptr);
+      if (copy_readback) {
+         // Compare shader output in its original allocation with an independent
+         // GPU buffer copy. Image readback does not exercise this transfer path.
+         VkBufferMemoryBarrier barriers[2] = {to_host, to_host};
+         barriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+         barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+         barriers[1].buffer = copied_buffer;
+         barriers[1].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+         barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+         cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                              VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 2, barriers, 0, nullptr);
+         VkBufferCopy region = {0, 0, buffer_size};
+         cmd_copy_buffer(command_buffer, buffer, copied_buffer, 1, &region);
+         barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+         barriers[1].dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+         cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                              0, 0, nullptr, 1, &barriers[1], 0, nullptr);
+      }
+      if ((result = end_command_buffer(command_buffer)) != VK_SUCCESS) {
+         cleanup();
+         return report("vkEndCommandBuffer failed", result);
+      }
    }
    VkFenceCreateInfo fence_info = {};
    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -656,8 +665,9 @@ main(int argc, char **argv)
    }
    VkSubmitInfo submit_info = {};
    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-   submit_info.commandBufferCount = 1;
-   submit_info.pCommandBuffers = &command_buffer;
+   submit_info.commandBufferCount = command_buffer_count;
+   submit_info.pCommandBuffers = command_buffers.data();
+   printf("COMPUTE_COMMAND_BUFFERS=%u\n", command_buffer_count);
    for (uint32_t iteration = 0; iteration < iteration_count; iteration++) {
       if (iteration != 0 && (result = reset_fences(device, 1, &fence)) != VK_SUCCESS) {
          cleanup();
@@ -703,7 +713,7 @@ main(int argc, char **argv)
    uint64_t checksum = 0;
    for (uint32_t i = 0; i < element_count; i++) {
       uint32_t expected = UINT32_C(0x1000) + i * 5;
-      for (uint32_t iteration = 0; iteration < iteration_count; iteration++)
+      for (uint32_t iteration = 0; iteration < iteration_count * command_buffer_count; iteration++)
          expected = expected * 3 + 7;
       const uint32_t actual = static_cast<uint32_t *>(mapped)[i];
       if (actual != expected) {

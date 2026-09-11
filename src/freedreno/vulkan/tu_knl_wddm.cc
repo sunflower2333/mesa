@@ -143,7 +143,8 @@ enum : uint32_t {
    TU_WDDM_MSM_SUBMIT_BO_NO_IMPLICIT = 0x0008,
    TU_WDDM_MSM_SUBMIT_CMD_BUF = 0x0001,
    TU_WDDM_MSM_SUBMIT_CMD_IB_TARGET_BUF = 0x0002,
-   /* Keep native-context command packets within the KMD's bounded ring. */
+   /* Physical packet budget; larger Vulkan submits are batched at complete
+    * primary command-buffer boundaries in tu_queue.cc. */
    TU_WDDM_MAX_SUBMIT_COMMANDS = 256,
    /* Must match VioGpuWddmContextFenceTrackerCapacity in the dedicated KMD. */
    TU_WDDM_MAX_PENDING_SUBMISSIONS = 4096,
@@ -2927,6 +2928,7 @@ static const struct tu_knl wddm_knl_funcs = {
    .bo_finish = tu_wddm_bo_finish,
    .bo_set_metadata = tu_wddm_bo_set_metadata,
    .bo_get_metadata = tu_wddm_bo_get_metadata,
+   .max_submit_entries = TU_WDDM_MAX_SUBMIT_COMMANDS,
    .submit_create = tu_wddm_submit_create,
    .submit_finish = tu_wddm_submit_finish,
    .submit_add_entries = tu_wddm_submit_add_entries,
