@@ -1197,7 +1197,7 @@ private:
    ir_variable *out_lowp_var(const glsl_type *type, const char *name);
    ir_variable *out_highp_var(const glsl_type *type, const char *name);
    ir_variable *as_highp(ir_factory &body, ir_variable *var);
-   ir_constant *imm(float16_t f16, unsigned vector_elements=1);
+   ir_constant *imm(mesa::float16_t f16, unsigned vector_elements=1);
    ir_constant *imm(float f, unsigned vector_elements=1);
    ir_constant *imm(bool b, unsigned vector_elements=1);
    ir_constant *imm(int i, unsigned vector_elements=1);
@@ -6318,7 +6318,7 @@ builtin_builder::as_highp(ir_factory &body, ir_variable *var)
 }
 
 ir_constant *
-builtin_builder::imm(float16_t f16, unsigned vector_elements)
+builtin_builder::imm(mesa::float16_t f16, unsigned vector_elements)
 {
    return new(linalloc) ir_constant(f16, vector_elements);
 }
@@ -6360,7 +6360,7 @@ builtin_builder::imm(const glsl_type *type, const ir_constant_data &data)
 }
 
 #define IMM_FP(type, val) (glsl_type_is_double(type)) ? imm(val) : \
-   (glsl_type_is_float_16(type)  ? imm((float16_t)val) : imm((float)val))
+   (glsl_type_is_float_16(type)  ? imm((mesa::float16_t)val) : imm((float)val))
 
 ir_dereference_variable *
 builtin_builder::var_ref(ir_variable *var)

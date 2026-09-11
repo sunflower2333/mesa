@@ -63,12 +63,22 @@ jobs:
           $flex = Get-ChildItem C:\ProgramData\chocolatey\lib -Recurse -Filter win_flex.exe | Select-Object -First 1
           if (!$flex) { throw 'Missing win_flex.exe' }
           Add-Content $env:GITHUB_PATH $flex.DirectoryName
-          $version = '1.4.304.0'
-          $installer = Join-Path $env:RUNNER_TEMP vulkan-sdk.exe
-          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
-          $proc = Start-Process $installer -ArgumentList '--am --al -c in' -Wait -PassThru
-          if ($proc.ExitCode) { throw 'Vulkan SDK installation failed' }
-          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\$version\Bin"
+          $shader = Get-Command glslangValidator.exe -ErrorAction SilentlyContinue
+          if (!$shader) {
+            $shader = Get-ChildItem C:\VulkanSDK -Filter glslangValidator.exe -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (!$shader) {
+            $version = '1.4.304.0'
+            $installer = Join-Path $env:RUNNER_TEMP vulkan-sdk.exe
+            Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
+            $proc = Start-Process $installer -ArgumentList '--am --al -c in' -Wait -PassThru
+            $shader = Get-Item "C:\VulkanSDK\$version\Bin\glslangValidator.exe" -ErrorAction SilentlyContinue
+            if (!$shader) { throw "Vulkan SDK installation failed: $($proc.ExitCode)" }
+          }
+          $shaderPath = if ($shader -is [System.IO.FileInfo]) { $shader.FullName } else { $shader.Source }
+          & $shaderPath --version
+          if ($LASTEXITCODE) { throw 'Host shader compiler execution failed' }
+          Add-Content $env:GITHUB_PATH (Split-Path -Parent $shaderPath)
       - name: Build architecture-matched Vulkan loader
         shell: pwsh
         run: |

@@ -2174,7 +2174,7 @@ ast_expression::do_hir(ir_exec_list *instructions,
       break;
 
    case ast_float16_constant:
-      result = new(linalloc) ir_constant(float16_t(this->primary_expression.float16_constant));
+      result = new(linalloc) ir_constant(mesa::float16_t(this->primary_expression.float16_constant));
       break;
 
    case ast_float_constant:
