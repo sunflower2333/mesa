@@ -71,12 +71,13 @@ struct tu_device {
 };
 struct state {
    uint32_t create_status, destroy_status, returned_handle;
-   bool context_active, execution_active, lose_during_create, local_alloc_fail;
+   bool context_active, execution_active, lose_during_create, lose_during_health_query, local_alloc_fail;
    uint32_t create_calls, destroy_calls, sleeps, context_queries, execution_queries;
    uint32_t allocations, frees, vmas, vma_frees, names;
    tu_bo slot;
 } current;
 static unsigned checks, failures;
+static tu_device *active_device;
 static void check(bool value, const char *label) {
    checks++;
    if (!value) { failures++; printf("FAIL %s\n", label); }
@@ -95,7 +96,9 @@ static bool tu_wddm_context_get_completed_fence(tu_wddm_context *, uint32_t *com
    current.context_queries++; *completed = 0; return current.context_active;
 }
 static bool tu_wddm_device_execution_active(tu_wddm_device *) {
-   current.execution_queries++; return current.execution_active;
+   current.execution_queries++;
+   if (current.lose_during_health_query) active_device->vk.lost = true;
+   return current.execution_active;
 }
 static void mtx_lock(int *mutex) { check((*mutex)++ == 0, "no recursive bookkeeping lock"); }
 static void mtx_unlock(int *mutex) { check(--(*mutex) == 0, "balanced bookkeeping lock"); }
@@ -122,7 +125,6 @@ struct MEMORYSTATUSEX {
 static BOOL GlobalMemoryStatusEx(MEMORYSTATUSEX *) { return 0; }
 static uint64_t GetTickCount64() { return 0; }
 static unsigned long GetCurrentProcessId() { return 0; }
-static tu_device *active_device;
 static NTSTATUS create_allocation(D3DKMT_CREATEALLOCATION *create) {
    current.create_calls++;
    check(active_device->bo_mutex == 0 && active_device->vma_mutex == 0,
@@ -205,6 +207,10 @@ int main() {
    init(&dev, 0xc0000017u); current.lose_during_create = true;
    check(allocate(&dev, &bo) == VK_ERROR_DEVICE_LOST && dev.vk.lost,
          "concurrent Vulkan device loss is not replaced with OOM");
+   no_owner(&dev, bo);
+   init(&dev, 0xc0000017u); current.lose_during_health_query = true;
+   check(allocate(&dev, &bo) == VK_ERROR_DEVICE_LOST && dev.vk.lost,
+         "concurrent loss during health query overrides allocation pressure");
    no_owner(&dev, bo);
    init(&dev); dev.vk.lost = true;
    check(allocate(&dev, &bo) == VK_ERROR_DEVICE_LOST && bo == nullptr &&

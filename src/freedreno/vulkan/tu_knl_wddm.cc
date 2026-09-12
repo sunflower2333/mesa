@@ -2156,7 +2156,8 @@ tu_wddm_allocation_error(struct tu_device *dev, uint32_t status)
    /* Check only on failure, through the same context/fence and OS execution
     * contract used by normal device status checks. A device can become lost
     * before a secondary allocation reports pressure or an unrelated status. */
-   if (tu_wddm_device_check_status(dev) != VK_SUCCESS)
+   if (tu_wddm_device_check_status(dev) != VK_SUCCESS ||
+       vk_device_is_lost(&dev->vk))
       return VK_ERROR_DEVICE_LOST;
 
    switch (status) {
