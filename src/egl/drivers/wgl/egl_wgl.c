@@ -46,6 +46,7 @@
 #include <pipe/p_state.h>
 
 #include "util/u_call_once.h"
+#include "util/format/u_format.h"
 #include "mesa/glapi/glapi/glapi.h"
 #include "dispatch.h"
 
@@ -86,6 +87,8 @@ wgl_add_config(_EGLDisplay *disp, const struct stw_pixelformat_info *stw_config,
    base.BlueSize = stw_config->pfd.cBlueBits;
    base.AlphaSize = stw_config->pfd.cAlphaBits;
    base.BufferSize = stw_config->pfd.cColorBits;
+   if (util_format_is_float(stw_config->stvis.color_format))
+      base.ComponentType = EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT;
 
    if (stw_config->pfd.cAccumBits) {
       /* Don't expose visuals with the accumulation buffer. */

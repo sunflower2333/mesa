@@ -3,7 +3,7 @@ name: Windows OpenGL ES Zink architecture candidates
 on:
   workflow_dispatch:
   push:
-    branches: [viogpu-opengl-arches-20260911, viogpu-opengl-integrated-20260911, viogpu-opengl-surface-20260911]
+    branches: [viogpu-opengl-arches-20260911, viogpu-opengl-integrated-20260911, viogpu-opengl-surface-20260911, work/egl-wgl-component-type-20260912]
 
 permissions:
   contents: read
