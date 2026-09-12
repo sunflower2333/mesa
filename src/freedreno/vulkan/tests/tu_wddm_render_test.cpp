@@ -1365,6 +1365,7 @@ test_failed_allocation_creation_compensates()
    CHECK(fixture.destroy_assume_not_in_use == 0);
    CHECK(allocation.handle == 0);
    CHECK(allocation.context == NULL);
+   CHECK(allocation.last_create_status == static_cast<uint32_t>(kStatusInvalidParameter));
 }
 
 void

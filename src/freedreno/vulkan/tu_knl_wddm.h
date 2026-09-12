@@ -108,7 +108,8 @@ struct tu_wddm_allocation {
    bool locked;
    void *metadata;
    uint32_t metadata_size;
-   /* Diagnostic breadcrumb for KMT probe failures; this is not part of the
+   /* Preserve the create result for BO error classification even after a
+    * successful compensating destroy. These fields are not part of the
     * WDDM private allocation ABI sent to the KMD. */
    uint32_t last_create_status;
    uint32_t last_destroy_status;

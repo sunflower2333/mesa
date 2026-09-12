@@ -1060,6 +1060,8 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
       return false;
 
    memset(allocation, 0, sizeof(*allocation));
+   /* A rejected local descriptor did not complete a successful KMT call. */
+   allocation->last_create_status = UINT32_C(0xc000000d); /* STATUS_INVALID_PARAMETER */
    if (!tu_wddm_allocation_desc_valid(context, desc))
       return false;
 
@@ -1118,8 +1120,11 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
          const NTSTATUS destroy_status =
             tu_wddm_destroy_allocation_handle(context, allocation_info.hAllocation);
          allocation->last_destroy_status = static_cast<uint32_t>(destroy_status);
-         if (destroy_status == TU_WDDM_STATUS_SUCCESS)
+         if (destroy_status == TU_WDDM_STATUS_SUCCESS) {
             memset(allocation, 0, sizeof(*allocation));
+            /* Drop ownership, not the initiating CreateAllocation result. */
+            allocation->last_create_status = static_cast<uint32_t>(status);
+         }
       }
       return false;
    }
@@ -2132,6 +2137,43 @@ tu_wddm_submitqueue_close(struct tu_device *dev, struct tu_queue *queue)
 }
 
 static VkResult
+tu_wddm_allocation_error(struct tu_device *dev, uint32_t status)
+{
+   if (vk_device_is_lost(&dev->vk))
+      return VK_ERROR_DEVICE_LOST;
+
+   /* These exact NTSTATUS values name loss or this backend's closed native
+    * context/reset admission gate. Available system memory cannot make that
+    * context usable again. Keep SDK status macros out of the UMD boundary. */
+   switch (status) {
+   case UINT32_C(0xc00000a3): /* STATUS_DEVICE_NOT_READY */
+   case UINT32_C(0xc00002b6): /* STATUS_DEVICE_REMOVED */
+   case UINT32_C(0xc01e0200): /* STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE */
+      return vk_device_set_lost(&dev->vk,
+                                "WDDM allocation rejected lost device/context: status=0x%08x", status);
+   }
+
+   /* Check only on failure, through the same context/fence and OS execution
+    * contract used by normal device status checks. A device can become lost
+    * before a secondary allocation reports pressure or an unrelated status. */
+   if (tu_wddm_device_check_status(dev) != VK_SUCCESS)
+      return VK_ERROR_DEVICE_LOST;
+
+   switch (status) {
+   case UINT32_C(0xc0000017): /* STATUS_NO_MEMORY */
+   case UINT32_C(0xc000009a): /* STATUS_INSUFFICIENT_RESOURCES */
+   case UINT32_C(0xc000012d): /* STATUS_COMMITMENT_LIMIT */
+   case UINT32_C(0xc01e0100): /* STATUS_GRAPHICS_NO_VIDEO_MEMORY */
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   default:
+      /* Invalid requests, exhausted busy retries and success-without-handle
+       * are not evidence of allocation pressure. Preserve the exact status. */
+      return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                       "unexpected WDDM CreateAllocation failure: status=0x%08x", status);
+   }
+}
+
+static VkResult
 tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
                 struct tu_bo **out_bo, uint64_t size, uint64_t client_iova,
                 VkMemoryPropertyFlags mem_property,
@@ -2144,6 +2186,9 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
        (flags & (TU_BO_ALLOC_DMABUF | TU_BO_ALLOC_SHAREABLE |
                  TU_BO_ALLOC_IMPLICIT_SYNC)) != 0)
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+
+   if (vk_device_is_lost(&dev->vk))
+      return VK_ERROR_DEVICE_LOST;
 
    if ((mem_property & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) != 0)
       return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -2279,11 +2324,12 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
          return vk_device_set_lost(
             &dev->vk, "failed to roll back partial WDDM allocation creation");
       }
+      const uint32_t create_status = allocation->last_create_status;
       vk_free(&dev->vk.alloc, allocation);
       mtx_lock(&dev->vma_mutex);
       util_vma_heap_free(&dev->vma, iova, vma_size);
       mtx_unlock(&dev->vma_mutex);
-      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return tu_wddm_allocation_error(dev, create_status);
    }
 
    bo->name = tu_debug_bos_add(dev, size, name);

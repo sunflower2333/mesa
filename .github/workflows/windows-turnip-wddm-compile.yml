@@ -63,6 +63,15 @@ jobs:
       - name: Execute allocation alias and patch overlap regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_wddm_reference_test.py
+      - name: Execute allocation status classification and rollback regression
+        shell: pwsh
+        run: |
+          python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-oom
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-rollback-status
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Execute compute shader conversion failure regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_compute_compile_failure_test.py
