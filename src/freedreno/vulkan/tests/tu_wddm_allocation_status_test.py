@@ -56,7 +56,10 @@ with tempfile.TemporaryDirectory(prefix='turnip-allocation-status-') as temporar
     compiler = shutil.which('clang-cl') if os.name == 'nt' else None
     binary = output / ('fixture.exe' if compiler else 'fixture')
     if compiler:
+        # Production intentionally zero-fills omitted designated members.
         command = [compiler, '/nologo', '/EHsc', '/W4', '/WX', '/std:c++20',
+                   '/clang:-Wno-missing-field-initializers',
+                   '/clang:-Wno-missing-designated-field-initializers',
                    '/I' + str(root / 'include'), '/I' + str(here.parent), str(unit), '/Fe' + str(binary)]
     else:
         command = ['c++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers',
