@@ -55,6 +55,9 @@ zink_nir_algebraic_c = custom_target(
 )
 
 zink_c_args = []
+if windows_private_gl_arch != ''
+  zink_c_args += '-DZINK_PRIVATE_VK_LIBNAME="viogpu_gl_loader_@0@.dll"'.format(windows_private_gl_arch)
+endif
 inc_zink_vk = []
 zink_link_args = []
 

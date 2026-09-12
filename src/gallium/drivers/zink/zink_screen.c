@@ -67,7 +67,12 @@ bool zink_tracing = false;
 
 #if DETECT_OS_WINDOWS
 #include <io.h>
+#ifdef ZINK_PRIVATE_VK_LIBNAME
+#include <windows.h>
+#define VK_LIBNAME ZINK_PRIVATE_VK_LIBNAME
+#else
 #define VK_LIBNAME "vulkan-1.dll"
+#endif
 #else
 #include <unistd.h>
 #if DETECT_OS_APPLE
@@ -78,6 +83,49 @@ bool zink_tracing = false;
 #else
 #define VK_LIBNAME "libvulkan.so.1"
 #endif
+#endif
+
+#ifdef ZINK_PRIVATE_VK_LIBNAME
+/* EGL/GLES can enter Gallium directly, without the system ICD proxy having
+ * preloaded Zink's private loader. Resolve it from this DLL, independent of
+ * the application's current directory and public Vulkan loader. */
+static struct util_dl_library *
+zink_open_private_loader(void)
+{
+   HMODULE self = NULL;
+   char *path = malloc(32768);
+   char *actual = malloc(32768);
+   struct util_dl_library *result = NULL;
+   if (!path || !actual)
+      goto done;
+   if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)&zink_tracing, &self))
+      goto done;
+   DWORD length = GetModuleFileNameA(self, path, 32768);
+   if (!length || length >= 32768)
+      goto done;
+   char *slash = strrchr(path, '\\');
+   if (!slash || (size_t)(slash + 1 - path) + sizeof(VK_LIBNAME) > 32768)
+      goto done;
+   memcpy(slash + 1, VK_LIBNAME, sizeof(VK_LIBNAME));
+   HMODULE existing = GetModuleHandleA(VK_LIBNAME);
+   if (existing && (!GetModuleFileNameA(existing, actual, 32768) ||
+                    _stricmp(path, actual)))
+      goto done;
+   HMODULE module = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+   if (module) {
+      length = GetModuleFileNameA(module, actual, 32768);
+      if (!length || length >= 32768 || _stricmp(path, actual))
+         FreeLibrary(module);
+      else
+         result = (struct util_dl_library *)module;
+   }
+done:
+   free(actual);
+   free(path);
+   return result;
+}
 #endif
 
 #ifdef __APPLE__
@@ -3436,7 +3484,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    u_trace_state_init();
 
+#ifdef ZINK_PRIVATE_VK_LIBNAME
+   screen->loader_lib = zink_open_private_loader();
+#else
    screen->loader_lib = util_dl_open(VK_LIBNAME);
+#endif
    if (!screen->loader_lib) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to load "VK_LIBNAME);

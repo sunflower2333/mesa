@@ -23,7 +23,7 @@ gles1_def = custom_target(
 )
 
 libglesv1_cm = shared_library(
-  'GLESv1_CM' + get_option('gles-lib-suffix'),
+  windows_private_gl_arch != '' ? 'viogpu_gles1_' + windows_private_gl_arch : 'GLESv1_CM' + get_option('gles-lib-suffix'),
   ['libgles1_public.c', es1_glapi_mapi_tmp_h],
   vs_module_defs : gles1_def,
   c_args : [
@@ -39,7 +39,7 @@ libglesv1_cm = shared_library(
   soversion : host_machine.system() == 'windows' ? '' : '1',
   version : '1.1.0',
   darwin_versions  : '3.0.0',
-  name_prefix : host_machine.system() == 'windows' ? 'lib' : [],  # always use lib, but avoid warnings on !windows
+  name_prefix : windows_gl_name_prefix,
   install : true,
 )
 

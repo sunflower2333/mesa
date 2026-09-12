@@ -11,6 +11,9 @@ wgl_def = custom_target(
 )
 
 gallium_wgl_name = get_option('gallium-wgl-dll-name')
+if windows_private_gl_arch != ''
+  gallium_wgl_name = 'viogpu_gl_' + windows_private_gl_arch
+endif
 libgallium_wgl = shared_library(
   gallium_wgl_name,
   ['wgl.c'],

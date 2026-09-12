@@ -8,9 +8,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 New-Item -ItemType Directory -Path $Stage | Out-Null
 $Stage = (Resolve-Path $Stage).Path
-$payload = @('opengl32.dll','libgallium_wgl.dll','libEGL.dll','libGLESv1_CM.dll','libGLESv2.dll','vulkan_freedreno.dll','z-1.dll')
-foreach ($name in $payload + @('vulkan-1.dll')) {
-    $root = if ($name -eq 'vulkan-1.dll') { $LoaderBuild } else { $Build }
+$payload = @('opengl32.dll',"viogpu_gl_$Architecture.dll","viogpu_egl_$Architecture.dll","viogpu_gles1_$Architecture.dll","viogpu_gles2_$Architecture.dll","viogpu_gl_vk_$Architecture.dll")
+$loaderName = "viogpu_gl_loader_$Architecture.dll"
+foreach ($name in $payload + @($loaderName)) {
+    $root = if ($name -eq $loaderName) { $LoaderBuild } else { $Build }
     $found = @(Get-ChildItem $root -Recurse -File -Filter $name)
     if ($found.Count -ne 1) { throw "Missing/ambiguous payload $name : $($found.Count)" }
     Copy-Item $found[0].FullName $Stage
@@ -25,16 +26,22 @@ foreach ($file in Get-ChildItem $Stage -File | Where-Object {$_.Extension -in '.
     if ($LASTEXITCODE -or $headers -notmatch "(?im)^\s*$machine machine") { throw "Wrong architecture: $($file.Name)" }
     $imports = (& dumpbin /dependents $file.FullName) -join "`n"
     if ($LASTEXITCODE -or $imports -match '(?i)\b(?:msvcp|vcruntime)[0-9_]*\.dll\b') { throw "Undeclared CRT import: $($file.Name)" }
+    if ($imports -match '(?im)^\s*(?:z-1|libgallium_wgl|libEGL|libGLESv1_CM|libGLESv2|vulkan_freedreno|vulkan-1)\.dll\s*$') {
+        throw "Generic private dependency remains: $($file.Name)"
+    }
+    if ($file.Name -match '^viogpu_(?:egl|gles[12])_') {
+        if ($imports -notmatch [regex]::Escape("viogpu_gl_$Architecture.dll")) { throw "Missing actual private Gallium import: $($file.Name)" }
+    }
     $imports | Set-Content "$Stage/$($file.Name).imports.txt"
 }
 $required = @{
     'opengl32.dll' = @('wglCreateContext','wglMakeCurrent','wglGetProcAddress','glGetString','glReadPixels')
-    'libgallium_wgl.dll' = @('DrvCreateContext','DrvGetProcAddress','DrvSetContext','DrvSwapBuffers')
-    'libEGL.dll' = @('eglGetDisplay','eglInitialize','eglCreateContext','eglMakeCurrent','eglGetProcAddress')
-    'libGLESv1_CM.dll' = @('glGetString','glDrawArrays','glReadPixels')
-    'libGLESv2.dll' = @('glGetString','glCreateShader','glDrawArrays','glReadPixels')
-    'vulkan_freedreno.dll' = @('vk_icdNegotiateLoaderICDInterfaceVersion','vk_icdGetInstanceProcAddr','vk_icdGetPhysicalDeviceProcAddr')
-    'vulkan-1.dll' = @('vkGetInstanceProcAddr','vkGetDeviceProcAddr')
+    "viogpu_gl_$Architecture.dll" = @('DrvCreateContext','DrvGetProcAddress','DrvSetContext','DrvSwapBuffers')
+    "viogpu_egl_$Architecture.dll" = @('eglGetDisplay','eglInitialize','eglCreateContext','eglMakeCurrent','eglGetProcAddress')
+    "viogpu_gles1_$Architecture.dll" = @('glGetString','glDrawArrays','glReadPixels')
+    "viogpu_gles2_$Architecture.dll" = @('glGetString','glCreateShader','glDrawArrays','glReadPixels')
+    "viogpu_gl_vk_$Architecture.dll" = @('vk_icdNegotiateLoaderICDInterfaceVersion','vk_icdGetInstanceProcAddr','vk_icdGetPhysicalDeviceProcAddr')
+    $loaderName = @('vkGetInstanceProcAddr','vkGetDeviceProcAddr')
 }
 foreach ($dll in $required.Keys) {
     $exports = (& dumpbin /exports "$Stage/$dll") -join "`n"
@@ -47,7 +54,7 @@ foreach ($dll in $required.Keys) {
 }
 $pointerSize = if ($Architecture -eq 'x86') { 4 } else { 8 }
 python src/vulkan/util/vk_icd_gen.py --api-version 1.4 --xml src/vulkan/registry/vk.xml `
-    --icd-lib-path . --icd-filename vulkan_freedreno.dll --sizeof-pointer $pointerSize --use-backslash `
+    --icd-lib-path . --icd-filename "viogpu_gl_vk_$Architecture.dll" --sizeof-pointer $pointerSize --use-backslash `
     --out "$Stage/freedreno_icd.json"
 if ($LASTEXITCODE) { throw 'ICD manifest generation failed' }
 Copy-Item bin/run-windows-opengl.ps1,bin/verify-windows-opengl.ps1,bin/windows-opengl-snapshot.ps1,bin/windows-opengl-candidate.md $Stage

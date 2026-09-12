@@ -209,7 +209,7 @@ if cpp.get_id() == 'gcc'
 endif
 
 libvulkan_freedreno = shared_library(
-  'vulkan_freedreno',
+  windows_private_gl_arch != '' ? 'viogpu_gl_vk_' + windows_private_gl_arch : 'vulkan_freedreno',
   [libtu_files, tu_drirc, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h, bvh_spv],
   vs_module_defs : vulkan_api_def,
   include_directories : libtu_includes,

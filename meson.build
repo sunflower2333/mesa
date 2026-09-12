@@ -86,6 +86,15 @@ endif
 # Arguments for the preprocessor, put these in a separate array from the C and
 # C++ (cpp in meson terminology) arguments since they need to be added to the
 # default arguments for both C and C++.
+windows_private_gl_arch = get_option('windows-private-gl-arch')
+windows_gl_name_prefix = host_machine.system() == 'windows' ? 'lib' : []
+if windows_private_gl_arch != '' and host_machine.system() != 'windows'
+  error('windows-private-gl-arch requires a Windows target')
+endif
+if windows_private_gl_arch != ''
+  windows_gl_name_prefix = ''
+endif
+
 pre_args = [
   '-D__STDC_CONSTANT_MACROS',
   '-D__STDC_FORMAT_MACROS',

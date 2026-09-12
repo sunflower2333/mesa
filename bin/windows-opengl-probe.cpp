@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <viogpu_private_gl.h>
 
 static void fail(const char *message)
 {
@@ -188,11 +189,11 @@ int main(int argc, char **argv)
 {
    if (argc != 2) fail("usage: opengl-probe --load-only|--wgl|--gles2|--gles1");
    HMODULE gl = load(".\\opengl32.dll");
-   HMODULE egl = load(".\\libEGL.dll");
-   HMODULE es1 = load(".\\libGLESv1_CM.dll");
-   HMODULE es2 = load(".\\libGLESv2.dll");
-   HMODULE vk = load(".\\vulkan-1.dll");
-   HMODULE icd = load(".\\vulkan_freedreno.dll");
+   HMODULE egl = load(".\\" VIOGPU_EGL_DLL);
+   HMODULE es1 = load(".\\" VIOGPU_GLES1_DLL);
+   HMODULE es2 = load(".\\" VIOGPU_GLES2_DLL);
+   HMODULE vk = load(".\\" VIOGPU_GL_LOADER_DLL);
+   HMODULE icd = load(".\\" VIOGPU_GL_VK_DLL);
    symbol<PROC>(gl, "wglGetProcAddress");
    symbol<PROC>(egl, "eglGetProcAddress");
    symbol<PROC>(es1, "glDrawArrays");

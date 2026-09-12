@@ -204,6 +204,10 @@ if egl_native_platform != ''
   c_args_for_egl += '-D_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_@0@'.format(egl_native_platform.to_upper())
 endif
 
+if windows_private_gl_arch != ''
+  egl_lib_name = 'viogpu_egl_' + windows_private_gl_arch
+endif
+
 libegl = shared_library(
   egl_lib_name,
   files_egl,
@@ -220,7 +224,7 @@ libegl = shared_library(
   install : true,
   version : egl_lib_version,
   soversion : egl_lib_soversion,
-  name_prefix : host_machine.system() == 'windows' ? 'lib' : [],  # always use lib, but avoid warnings on !windows
+  name_prefix : windows_gl_name_prefix,
   vs_module_defs : egl_def
 )
 

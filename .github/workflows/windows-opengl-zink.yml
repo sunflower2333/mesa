@@ -104,6 +104,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'Vulkan headers configuration failed' }
           cmake --install loader-headers
           if ($LASTEXITCODE) { throw 'Vulkan headers installation failed' }
+          ./bin/configure-private-vulkan-loader.ps1 -Architecture '${{ matrix.arch }}' -Source external/vulkan-loader
           cmake -S external/vulkan-loader -B loader-build -A '${{ matrix.cmake }}' `
             -DVULKAN_HEADERS_INSTALL_DIR="$env:RUNNER_TEMP/vulkan-headers" `
             -DBUILD_TESTS=OFF -DUSE_MASM=OFF -DUSE_GAS=OFF `
@@ -136,7 +137,8 @@ jobs:
             -Dplatforms=windows -Dvulkan-drivers=freedreno -Dfreedreno-kmds=wddm `
             -Dgallium-drivers=zink -Dopengl=true -Dgles1=enabled -Dgles2=enabled `
             -Degl=enabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled `
-            -Dshader-cache=disabled -Dzlib=enabled -Dzstd=disabled `
+            -Dshader-cache=disabled -Dzlib=enabled -Dzlib:default_library=static -Dzstd=disabled `
+            -Dwindows-private-gl-arch='${{ matrix.arch }}' `
             -Db_vscrt=static_from_buildtype '-Dtools=[]' -Dbuild-tests=false -Dwerror=false
           if ($LASTEXITCODE) { throw 'OpenGL Meson configuration failed' }
           # Validate the actual generated compiler configuration, not only the

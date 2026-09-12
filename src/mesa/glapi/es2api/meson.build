@@ -23,7 +23,7 @@ gles2_def = custom_target(
 )
 
 libgles2 = shared_library(
-  'GLESv2' + get_option('gles-lib-suffix'),
+  windows_private_gl_arch != '' ? 'viogpu_gles2_' + windows_private_gl_arch : 'GLESv2' + get_option('gles-lib-suffix'),
   ['libgles2_public.c', es2_glapi_mapi_tmp_h],
   vs_module_defs : gles2_def,
   c_args : [
@@ -39,7 +39,7 @@ libgles2 = shared_library(
   soversion : host_machine.system() == 'windows' ? '' : '2',
   version : '2.0.0',
   darwin_versions : '3.0.0',
-  name_prefix : host_machine.system() == 'windows' ? 'lib' : [],  # always use lib, but avoid warnings on !windows
+  name_prefix : windows_gl_name_prefix,
   install : true,
 )
 

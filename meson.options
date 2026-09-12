@@ -170,6 +170,14 @@ option(
 )
 
 option(
+  'windows-private-gl-arch',
+  type : 'combo',
+  choices : ['', 'arm64', 'x64', 'x86'],
+  value : '',
+  description : 'Link the Windows GL/EGL/GLES/Turnip runtime with architecture-specific private DLL names.',
+)
+
+option(
   'gallium-d3d10-dll-name',
   type : 'string',
   value : 'libgallium_d3d10',
