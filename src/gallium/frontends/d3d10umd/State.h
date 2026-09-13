@@ -50,6 +50,9 @@
 struct Adapter
 {
    struct pipe_screen *screen;
+   /* D3DKMT_DRIVERVERSION of the DroidVM adapter, or zero when no DroidVM
+    * adapter reports WDDM 2.0 (the WDDM 1.x path makes no residency calls). */
+   UINT kmt_driver_version;
 };
 
 
@@ -124,6 +127,17 @@ struct Device
    D3DDDICB_CREATECONTEXT shared_copy_context;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;
    DXGI_DDI_BASE_CALLBACKS *pDXGIBaseCallbacks;
+
+   /* WDDM 2.0 residency (Residency.cpp).  All zero on WDDM 1.x adapters.
+    * The runtime serializes this device's DDI and DXGI entry points, so these
+    * fields need no lock. */
+   UINT kmt_driver_version;
+   D3DKMT_HANDLE paging_queue;
+   D3DKMT_HANDLE paging_queue_sync_object;
+   const UINT64 *paging_fence_cpu_address;
+   UINT64 pending_paging_fence;
+   HRESULT last_residency_hr;
+   UINT residency_attempts;
 
    INT LastEmittedQuerySeqNo;
    INT LastFinishedQuerySeqNo;
@@ -210,6 +224,14 @@ struct Resource
    // Only a CPU-visible allocation created by this device can be locked
    // directly. Opened handles and primaries use scheduled private staging.
    bool allocation_lockable;
+   /* WDDM 2.0: this device holds one residency reference on hAllocation /
+    * shared_staging_allocation.  The flag travels with its handle. */
+   bool allocation_resident;
+   bool staging_resident;
+   /* The staging allocation has no scheduled copy that has not been observed
+    * complete, so residency trimming may release and later recreate it. */
+   bool staging_idle;
+   UINT64 shared_staging_size;
 
    DXGI_FORMAT Format;
    UINT MipLevels;

@@ -33,6 +33,7 @@
 #include <stdio.h>
 
 #include "DxgiFns.h"
+#include "Residency.h"
 #include "Resource.h"
 #include "util/u_memory.h"
 #ifndef UMDF_USING_NTSTATUS
@@ -415,6 +416,13 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "prepare", hr, started);
 
+      // WDDM 2.0: the present packet names both allocations; they are resident
+      // since creation/open, but a pending paging operation must finish first.
+      hr = ResidencyPrepareSubmission(device);
+      if (FAILED(hr))
+         return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
+                                     "residency", hr, started);
+
       DXGIDDICB_PRESENT present = {};
       present.hSrcAllocation = pSrcResource->hAllocation;
       present.hDstAllocation = pDstResource ? pDstResource->hAllocation : 0;
@@ -557,9 +565,13 @@ _SetDisplayMode( DXGI_DDI_ARG_SETDISPLAYMODE *SetDisplayMode )
    if (!device || !resource || !resource->scanout_primary || !resource->hAllocation ||
        !device->KTCallbacks.pfnSetDisplayModeCb)
       return DXGI_DDI_ERR_UNSUPPORTED;
+   // WDDM 2.0: the primary must have finished paging in before it is scanned out.
+   HRESULT hr = ResidencyPrepareSubmission(device);
+   if (FAILED(hr))
+      return hr;
    D3DDDICB_SETDISPLAYMODE mode = {};
    mode.hPrimaryAllocation = resource->hAllocation;
-   HRESULT hr = device->KTCallbacks.pfnSetDisplayModeCb(device->hDevice, &mode);
+   hr = device->KTCallbacks.pfnSetDisplayModeCb(device->hDevice, &mode);
    static volatile LONG modeCount;
    if (InterlockedIncrement(&modeCount) <= 16) {
       HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
@@ -748,6 +760,8 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    const D3DKMT_HANDLE firstKMResource = first->hKMResource;
    const bool firstDirty = first->shared_dirty;
    const bool firstLockable = first->allocation_lockable;
+   // A residency reference belongs to the allocation handle, not the Resource.
+   const bool firstResident = first->allocation_resident;
    // The copied GPU contents and the kernel allocation rotate together. A
    // clean source already matches that allocation; copying it into another
    // cache is not a new write to publish back through VidSch. Pending writes
@@ -760,12 +774,14 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
       current->hKMResource = next->hKMResource;
       current->shared_dirty = next->shared_dirty;
       current->allocation_lockable = next->allocation_lockable;
+      current->allocation_resident = next->allocation_resident;
    }
    Resource *last = CastResource(RotateResourceIdentities->pResources[RotateResourceIdentities->Resources - 1]);
    last->hAllocation = firstAllocation;
    last->hKMResource = firstKMResource;
    last->shared_dirty = firstDirty;
    last->allocation_lockable = firstLockable;
+   last->allocation_resident = firstResident;
 
    static volatile LONG rotations;
    const LONG rotation = InterlockedIncrement(&rotations);

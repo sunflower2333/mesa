@@ -37,6 +37,7 @@
 #include "InputAssembly.h"
 #include "OutputMerger.h"
 #include "Query.h"
+#include "Residency.h"
 #include "Rasterizer.h"
 #include "Resource.h"
 #include "Shader.h"
@@ -146,6 +147,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       return E_OUTOFMEMORY;
 
    pDevice->pipe = pipe;
+   /* Selects the WDDM 2.0 residency contract; zero keeps WDDM 1.x behaviour. */
+   pDevice->kmt_driver_version = pAdapter->kmt_driver_version;
    pDevice->d3d10_rasterization =
       pCreateData->Interface == D3D10_0_DDI_INTERFACE_VERSION ||
       pCreateData->Interface == D3D10_0_x_DDI_INTERFACE_VERSION ||
@@ -461,6 +464,9 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       if (FAILED(hr))
          DebugPrintf("DestroyDevice: shared copy context failed hr=0x%08lx\n", (unsigned long)hr);
    }
+   /* The runtime has destroyed every resource, so no residency reference of
+    * this device remains; release its paging queue. */
+   ResidencyDestroyDevice(pDevice);
    pipe->destroy(pipe);
 }
 

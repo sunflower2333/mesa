@@ -32,6 +32,7 @@
 
 
 #include "Resource.h"
+#include "Residency.h"
 #include "tu_wddm_abi.h"
 #include "Format.h"
 #include "State.h"
@@ -155,6 +156,28 @@ EnsureSharedCopy(Device *device, Resource *resource)
       if (!allocation.hAllocation)
          return E_FAIL;
       resource->shared_staging_allocation = allocation.hAllocation;
+      resource->shared_staging_size = info.Size;
+      resource->staging_resident = false;
+      resource->staging_idle = true;
+   }
+   // WDDM 2.0: staging is referenced by the scheduled copy, so it must be on
+   // the residency list before SubmitSharedCopy. A handle that is not resident
+   // (new, or kept after a failed trim) is admitted here; if it cannot be, it
+   // is released and the transfer fails instead of submitting it.
+   if (resource->shared_staging_allocation && !resource->staging_resident) {
+      HRESULT hr = ResidencyMakeResident(device, resource, resource->shared_staging_allocation,
+                                         &resource->staging_resident);
+      LogSharedCopyFailure("residency-staging", hr);
+      if (FAILED(hr)) {
+         D3DDDICB_DEALLOCATE deallocate = {};
+         deallocate.NumAllocations = 1;
+         deallocate.HandleList = &resource->shared_staging_allocation;
+         if (SUCCEEDED(device->KTCallbacks.pfnDeallocateCb(device->hDevice, &deallocate))) {
+            resource->shared_staging_allocation = 0;
+            resource->shared_staging_size = 0;
+         }
+         return hr;
+      }
    }
    return S_OK;
 }
@@ -189,7 +212,15 @@ SubmitSharedCopy(Device *device, Resource *resource, bool publish)
    render.NewCommandBufferSize = context->CommandBufferSize;
    render.NewAllocationListSize = context->AllocationListSize;
    render.NewPatchLocationListSize = context->PatchLocationListSize;
-   HRESULT hr = device->KTCallbacks.pfnRenderCb(device->hDevice, &render);
+   // WDDM 2.0: both allocations must have finished paging in before a DMA
+   // buffer references them. Until the copy is observed complete the staging
+   // allocation is not eligible for residency trimming.
+   HRESULT hr = ResidencyPrepareSubmission(device);
+   LogSharedCopyFailure("residency-wait", hr);
+   if (FAILED(hr))
+      return hr;
+   resource->staging_idle = false;
+   hr = device->KTCallbacks.pfnRenderCb(device->hDevice, &render);
    LogSharedCopyFailure(publish ? "submit-publish" : "submit-refresh", hr);
    if (SUCCEEDED(hr)) {
       context->pCommandBuffer = render.pNewCommandBuffer;
@@ -339,6 +370,11 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
       hr = E_FAIL;
    if (reset_status != PIPE_NO_RESET)
       hr = D3DDDIERR_DEVICEREMOVED;
+   // Every scheduled copy of this transfer was followed by a completed lock
+   // wait, so the staging allocation is idle again. After a failure it stays
+   // busy and residency trimming leaves it alone.
+   if (SUCCEEDED(hr))
+      resource->staging_idle = true;
    {
       LARGE_INTEGER transferEnd;
       QueryPerformanceCounter(&transferEnd);
@@ -903,6 +939,18 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       pResource->hKMResource = allocate.hKMResource;
       pResource->hAllocation = allocationInfo.hAllocation;
       pResource->hRTResourceHandle = allocate.hResource;
+      // WDDM 2.0: residency is controlled only by the device residency list.
+      // Admit the allocation before any RenderCb/PresentCb can name it; a
+      // resource whose allocation cannot be made resident is refused.
+      HRESULT rhr = ResidencyAdmitCreatedAllocation(pDevice, pResource);
+      if (FAILED(rhr)) {
+         DebugPrintf("%s: residency failed hr=0x%08lx\n", __func__, (unsigned long)rhr);
+         pipe_resource_reference(&pResource->resource, NULL);
+         free(pResource->transfers);
+         pResource->transfers = NULL;
+         SetError(hDevice, rhr);
+         return;
+      }
       pResource->allocation_lockable = !pResource->scanout_primary;
       pResource->shared_pitch = shared_pitch;
       pResource->shared_next = pDevice->shared_resources;
@@ -1115,6 +1163,19 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
     * view, so destruction here must not deallocate it. */
    pResource->hRTResourceHandle = NULL;
    Device *device = CastDevice(hDevice);
+   /* The opened handle is local to this device and needs this device's own
+    * residency reference (WDDM 2.0) before it can be copied or presented. */
+   HRESULT rhr = ResidencyMakeResident(device, pResource, pResource->hAllocation,
+                                       &pResource->allocation_resident);
+   if (FAILED(rhr)) {
+      DebugPrintf("%s: residency failed hr=0x%08lx\n", __func__, (unsigned long)rhr);
+      pResource->hAllocation = 0;
+      free(pResource->transfers);
+      pResource->transfers = NULL;
+      pipe_resource_reference(&pResource->resource, NULL);
+      SetError(hDevice, rhr);
+      return;
+   }
    pResource->shared_pitch = info.Pitch;
    pResource->shared_next = device->shared_resources;
    device->shared_resources = pResource;
@@ -1161,32 +1222,9 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       if (*entry)
          *entry = pResource->shared_next;
    }
-   if (pResource->shared_staging_allocation) {
-      D3DDDICB_DEALLOCATE deallocate = {};
-      deallocate.NumAllocations = 1;
-      deallocate.HandleList = &pResource->shared_staging_allocation;
-      HRESULT hr = device->KTCallbacks.pfnDeallocateCb(device->hDevice, &deallocate);
-      if (FAILED(hr))
-         DebugPrintf("DestroyResource: staging deallocation failed hr=0x%08lx\n", (unsigned long)hr);
-      pResource->shared_staging_allocation = 0;
-   }
-
-   /* Only free an allocation this device created. An opened resource holds a
-    * view of another process's allocation and must not deallocate it. */
-   if (pResource->hAllocation != 0 && pResource->hRTResourceHandle != NULL) {
-      Device *pDevice = CastDevice(hDevice);
-      D3DDDICB_DEALLOCATE deallocate;
-      memset(&deallocate, 0, sizeof deallocate);
-      /* With a resource handle set, the runtime frees the resource and every
-       * allocation under it, so no handle list is passed. */
-      deallocate.hResource = pResource->hRTResourceHandle;
-      deallocate.NumAllocations = 0;
-      deallocate.HandleList = NULL;
-      pDevice->KTCallbacks.pfnDeallocateCb(pDevice->hDevice, &deallocate);
-      pResource->hAllocation = 0;
-      pResource->hKMResource = 0;
-      pResource->hRTResourceHandle = NULL;
-   }
+   /* WDDM 2.0: evict each held residency reference exactly once, then
+    * release the staging allocation and any allocation this device created. */
+   ReleaseResourceAllocations(device, pResource);
 
    if (pResource->so_target) {
       pipe_so_target_reference(&pResource->so_target, NULL);

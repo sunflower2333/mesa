@@ -28,6 +28,7 @@ libd3d10umd = static_library(
     'OutputMerger.cpp',
     'Query.cpp',
     'Rasterizer.cpp',
+    'Residency.cpp',
     'Resource.cpp',
     'Shader.cpp',
     'ShaderDump.cpp',

@@ -33,6 +33,7 @@
 
 #include "DriverIncludes.h"
 #include "Device.h"
+#include "Residency.h"
 #include "State.h"
 
 #include "Debug.h"
@@ -84,6 +85,10 @@ OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
       --numAdapters;
       return E_OUTOFMEMORY;
    }
+
+   /* WDDM 2.0 requires explicit residency for every kernel allocation; the
+    * WDDM 1.x allocation-list model must keep working unchanged. */
+   pAdaptor->kmt_driver_version = ResidencyQueryAdapterDriverVersion();
 
    pOpenData->hAdapter.pDrvPrivate = pAdaptor;
 
