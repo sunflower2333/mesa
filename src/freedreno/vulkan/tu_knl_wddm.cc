@@ -1451,6 +1451,7 @@ tu_wddm_context_render(struct tu_wddm_context *context,
  * packet here keeps the UMD from constructing a request the KMD cannot own. */
 enum {
    TU_WDDM_MAX_SUBMIT_REFERENCES = TU_WDDM_MAX_RENDER_ALLOCATIONS,
+   TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE = 2048,
 };
 
 static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) +
@@ -1463,6 +1464,11 @@ static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) +
                        sizeof(tu_wddm_msm_submit_command) <=
                  TU_WDDM_MAX_RENDER_COMMAND_SIZE,
               "maximum WDDM submit no longer fits the DMA buffer");
+static_assert((TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE &
+               (TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE - 1)) == 0,
+              "submit reference index must be a power of two");
+static_assert(TU_WDDM_MAX_SUBMIT_REFERENCES < UINT16_MAX,
+              "submit reference index encoding overflow");
 
 struct tu_wddm_sync {
    struct vk_sync base;
@@ -1506,8 +1512,49 @@ struct tu_wddm_submit_reference {
 struct tu_wddm_submit {
    struct util_dynarray entries;
    struct util_dynarray references;
+   uint16_t reference_index[TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE];
    bool failed;
 };
+
+/* Hash a BO pointer for the submit-local open-addressing table. */
+static uint32_t
+tu_wddm_submit_reference_hash(const struct tu_bo *bo)
+{
+   uintptr_t key = reinterpret_cast<uintptr_t>(bo) >> 4;
+   key ^= key >> 17;
+   return static_cast<uint32_t>(key * 2654435761u);
+}
+
+/* Look up one BO and optionally return the first empty slot for insertion. */
+static int
+tu_wddm_submit_reference_lookup(const struct tu_wddm_submit *submit,
+                                const struct tu_bo *bo,
+                                uint32_t *empty_slot)
+{
+   const uint32_t mask = TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE - 1;
+   uint32_t slot = tu_wddm_submit_reference_hash(bo) & mask;
+   const struct tu_wddm_submit_reference *refs =
+      static_cast<const struct tu_wddm_submit_reference *>(submit->references.data);
+
+   for (uint32_t probe = 0; probe < TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE; probe++) {
+      const uint16_t encoded_index = submit->reference_index[slot];
+      if (encoded_index == 0) {
+         if (empty_slot != NULL)
+            *empty_slot = slot;
+         return -1;
+      }
+
+      const uint32_t index = static_cast<uint32_t>(encoded_index) - 1;
+      if (refs[index].bo == bo)
+         return static_cast<int>(index);
+
+      slot = (slot + 1) & mask;
+   }
+
+   if (empty_slot != NULL)
+      *empty_slot = UINT32_MAX;
+   return -1;
+}
 
 static inline struct tu_wddm_sync *
 tu_wddm_sync_from_vk(struct vk_sync *sync)
@@ -2306,11 +2353,18 @@ tu_wddm_submit_add_reference(struct tu_device *device,
       return false;
    }
 
-   util_dynarray_foreach(&submit->references, struct tu_wddm_submit_reference, ref) {
-      if (ref->bo == bo) {
-         ref->access |= access;
-         return true;
-      }
+   uint32_t index_slot = UINT32_MAX;
+   const int existing_index =
+      tu_wddm_submit_reference_lookup(submit, bo, &index_slot);
+   if (existing_index >= 0) {
+      struct tu_wddm_submit_reference *refs =
+         static_cast<struct tu_wddm_submit_reference *>(submit->references.data);
+      refs[existing_index].access |= access;
+      return true;
+   }
+   if (index_slot == UINT32_MAX) {
+      submit->failed = true;
+      return false;
    }
 
    const uint32_t reference_count = util_dynarray_num_elements(
@@ -2328,6 +2382,7 @@ tu_wddm_submit_add_reference(struct tu_device *device,
    }
    ref->bo = bo;
    ref->access = access;
+   submit->reference_index[index_slot] = static_cast<uint16_t>(reference_count + 1);
    return true;
 }
 
@@ -2456,13 +2511,7 @@ static int
 tu_wddm_submit_reference_index(const struct tu_wddm_submit *submit,
                                const struct tu_bo *bo)
 {
-   unsigned i = 0;
-   util_dynarray_foreach(&submit->references, struct tu_wddm_submit_reference, ref) {
-      if (ref->bo == bo)
-         return (int)i;
-      i++;
-   }
-   return -1;
+   return tu_wddm_submit_reference_lookup(submit, bo, NULL);
 }
 
 static VkResult
