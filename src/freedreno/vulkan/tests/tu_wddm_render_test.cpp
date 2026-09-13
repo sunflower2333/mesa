@@ -2065,6 +2065,156 @@ test_completed_fence_identity_rejected()
    CHECK(completed == 0);
 }
 
+struct shared_fixture {
+   mwd_context_info context = {};
+   mwd_allocation allocation = {};
+   unsigned creates = 0, refs = 0, maps = 0, submits = 0;
+   int32_t status = 0, allocate_status = 0, release_status = 0, unmap_status = 0;
+   uint64_t expected_alignment = 4096;
+   bool null_map = false, zero_map_handle = false;
+   unsigned char memory[65536] = {};
+};
+int32_t MWD_CALL shared_context(void *owner, mwd_context_info *out) {
+   *out = static_cast<shared_fixture *>(owner)->context;
+   return 0;
+}
+int32_t MWD_CALL shared_allocate(void *owner, uint64_t size, uint64_t alignment,
+                                uint64_t address, uint32_t flags, mwd_allocation *out) {
+   auto *f = static_cast<shared_fixture *>(owner);
+   CHECK(size == 65536 && alignment == f->expected_alignment && !address && flags == 6);
+   if (f->allocate_status < 0) return f->allocate_status;
+   ++f->creates; ++f->refs; *out = f->allocation;
+   return 0;
+}
+int32_t MWD_CALL shared_retain(void *owner, void *token, mwd_allocation *out) {
+   auto *f = static_cast<shared_fixture *>(owner);
+   if (token != &f->allocation) return -1;
+   ++f->refs; *out = f->allocation;
+   return 0;
+}
+int32_t MWD_CALL shared_release(void *owner, void *token) {
+   auto *f = static_cast<shared_fixture *>(owner);
+   CHECK(token == &f->allocation && f->refs > 0);
+   if (f->release_status < 0) return f->release_status;
+   --f->refs;
+   return 0;
+}
+int32_t MWD_CALL shared_map(void *owner, void *token, void **out, uint32_t *handle) {
+   auto *f = static_cast<shared_fixture *>(owner);
+   CHECK(token == &f->allocation); ++f->maps;
+   *out = f->null_map ? NULL : f->memory;
+   *handle = f->zero_map_handle ? 0 : f->allocation.handle + 1;
+   return 0;
+}
+int32_t MWD_CALL shared_unmap(void *owner, void *token) {
+   auto *f = static_cast<shared_fixture *>(owner);
+   CHECK(token == &f->allocation && f->maps > 0);
+   if (f->unmap_status < 0) return f->unmap_status;
+   --f->maps;
+   return 0;
+}
+int32_t MWD_CALL shared_submit(void *owner, const void *stream, uint32_t size,
+                              const mwd_reference *refs, uint32_t count) {
+   auto *f = static_cast<shared_fixture *>(owner);
+   CHECK(stream && size == sizeof(test_msm_submit_one_bo) && count == 1);
+   CHECK(refs[0].token == &f->allocation && refs[0].patch_offset == 44 && refs[0].length == 65536);
+   ++f->submits;
+   return 0;
+}
+int32_t MWD_CALL shared_completed(void *, uint32_t *fence) { *fence = 7; return 0; }
+int32_t MWD_CALL shared_status(void *owner) { return static_cast<shared_fixture *>(owner)->status; }
+void test_shared_runtime() {
+   shared_fixture f;
+   tu_wddm_runtime runtime = {}; // No KMT dispatch: any accidental direct call fails this fixture.
+   tu_wddm_adapter_info identity = {};
+   identity.private_info = valid_adapter_info();
+   identity.private_info.ResetGeneration = kResetGeneration;
+   identity.luid.LowPart = 31;
+   memcpy(f.context.luid, &identity.luid, sizeof(identity.luid));
+   f.context.generation = kResetGeneration; f.context.va_start = kVaStart; f.context.va_size = kVaSize;
+   f.context.context_id = kContextId; f.context.queue_id = kSubmitQueueId;
+   f.allocation = {&f.allocation, kVaStart, 65536, kResetGeneration, 101, 6};
+   mwd_callbacks callbacks = {MWD_RUNTIME_MAGIC, MWD_RUNTIME_ABI_VERSION, sizeof(mwd_callbacks), 0,
+      shared_context, shared_allocate, shared_retain, shared_release, shared_map, shared_unmap,
+      shared_submit, shared_completed, shared_status};
+   tu_wddm_device device = {};
+   tu_wddm_context context = {};
+   CHECK(tu_wddm_runtime_device_open(&runtime, &identity, &callbacks, &f, &device, &context));
+   CHECK(!device.handle && !context.handle && context.info.ContextId == kContextId);
+   tu_wddm_allocation a = {}, imported = {};
+   tu_wddm_allocation_desc desc = {};
+   desc.size = 65536; desc.alignment = 4096; desc.flags = 6;
+   CHECK(tu_wddm_allocation_create(&context, &desc, &a) && f.creates == 1 && f.refs == 1);
+   CHECK(tu_wddm_allocation_import(&context, &f.allocation, 65536, &imported));
+   CHECK(f.creates == 1 && f.refs == 2 && a.handle == imported.handle);
+   CHECK(a.private_info.RequestedIova == imported.private_info.RequestedIova);
+   void *map = NULL;
+   CHECK(tu_wddm_allocation_lock(&imported, &map) && map == f.memory && imported.handle == 102);
+   CHECK(tu_wddm_allocation_unlock(&imported) && !f.maps);
+   auto submit = valid_submit();
+   tu_wddm_render_reference ref = {&imported, 3, 0, 65536, 44};
+   CHECK(tu_wddm_context_render(&context, &submit, sizeof(submit), &ref, 1));
+   CHECK(f.submits == 1);
+   CHECK(!tu_wddm_context_render(&context, &submit, sizeof(submit), &ref, 1)); // Duplicate fence.
+   ++submit.request.fence; f.status = -1;
+   CHECK(!tu_wddm_context_render(&context, &submit, sizeof(submit), &ref, 1) && f.submits == 1);
+   f.status = 0; ++f.context.generation;
+   CHECK(!tu_wddm_context_get_info(&context));
+   --f.context.generation;
+   CHECK(tu_wddm_allocation_destroy(&a) && f.refs == 1);
+   CHECK(tu_wddm_allocation_destroy(&imported) && f.refs == 0);
+   desc.alignment = f.expected_alignment = 65536;
+   CHECK(tu_wddm_allocation_create(&context, &desc, &a) && f.refs == 1);
+   CHECK(a.private_info.Alignment == 65536 && !(a.private_info.RequestedIova % 65536));
+   CHECK(tu_wddm_allocation_destroy(&a) && f.refs == 0);
+   f.allocation.address += 4096;
+   CHECK(!tu_wddm_allocation_create(&context, &desc, &a) && !a.runtime_token && !f.refs);
+   CHECK(a.last_create_status == 0x80070057u);
+   f.release_status = static_cast<int32_t>(0x80004005u);
+   CHECK(!tu_wddm_allocation_create(&context, &desc, &a) && f.refs == 1);
+   CHECK(a.runtime_token == &f.allocation && a.context == &context && a.last_destroy_status == 0x80004005u);
+   CHECK(!tu_wddm_allocation_destroy(&a) && a.runtime_token == &f.allocation && f.refs == 1);
+   f.release_status = 0;
+   CHECK(tu_wddm_allocation_destroy(&a) && f.refs == 0);
+   f.allocation.address -= 4096;
+   f.allocate_status = static_cast<int32_t>(0x8007000eu);
+   CHECK(!tu_wddm_allocation_create(&context, &desc, &a) && a.last_create_status == 0x8007000eu && !f.refs);
+   f.allocate_status = 0;
+   for (uint64_t bad_alignment : {uint64_t(0), uint64_t(4097), uint64_t(131072)}) {
+      desc.alignment = bad_alignment;
+      unsigned before = f.creates;
+      CHECK(!tu_wddm_allocation_create(&context, &desc, &a) && f.creates == before && !f.refs);
+   }
+   desc.alignment = 65536;
+   CHECK(tu_wddm_allocation_create(&context, &desc, &a));
+   f.null_map = true;
+   CHECK(!tu_wddm_allocation_lock(&a, &map) && !map && !a.locked && !f.maps);
+   f.unmap_status = -1;
+   CHECK(!tu_wddm_allocation_lock(&a, &map) && !map && a.locked && f.maps == 1);
+   CHECK(!tu_wddm_allocation_destroy(&a) && f.refs == 1);
+   f.unmap_status = 0;
+   CHECK(tu_wddm_allocation_unlock(&a) && !f.maps);
+   f.null_map = false; f.zero_map_handle = true;
+   CHECK(!tu_wddm_allocation_lock(&a, &map) && !map && !a.locked && !f.maps);
+   f.zero_map_handle = false;
+   CHECK(tu_wddm_allocation_lock(&a, &map) && map == f.memory);
+   CHECK(tu_wddm_allocation_unlock(&a));
+   CHECK(tu_wddm_allocation_destroy(&a) && !f.refs);
+   ++f.allocation.generation;
+   CHECK(!tu_wddm_allocation_import(&context, &f.allocation, 65536, &imported) && !f.refs);
+   f.release_status = -1;
+   CHECK(!tu_wddm_allocation_import(&context, &f.allocation, 65536, &imported) && f.refs == 1);
+   CHECK(imported.runtime_token == &f.allocation && imported.context == &context);
+   f.release_status = 0;
+   CHECK(tu_wddm_allocation_destroy(&imported) && !f.refs);
+   --f.allocation.generation;
+   uint64_t ticks = UINT64_MAX;
+   CHECK(tu_wddm_context_get_gpu_timestamp(&context, &ticks) == 0xc00000bbu && ticks == 0);
+   CHECK(tu_wddm_context_close(&context));
+   ++callbacks.version;
+   CHECK(!tu_wddm_runtime_device_open(&runtime, &identity, &callbacks, &f, &device, &context));
+}
+
 } /* namespace */
 
 extern "C" bool
@@ -2084,6 +2234,7 @@ int
 main()
 {
    test_priority_contract();
+   test_shared_runtime();
    test_context_info_contract();
    test_device_luid_contract();
    test_kmt_adapter_enumeration();
