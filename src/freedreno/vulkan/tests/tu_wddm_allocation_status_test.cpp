@@ -6,12 +6,15 @@
 #include <initializer_list>
 #include "vulkan/vulkan_core.h"
 #include "tu_wddm_abi.h"
+#include "tu_wddm_residency.h"
 #include "util/vma.h"
 
 using NTSTATUS = int32_t;
 using D3DKMT_HANDLE = uint32_t;
+using LONG64 = int64_t;
 #define NT_SUCCESS(status) ((status) >= 0)
 static constexpr NTSTATUS TU_WDDM_STATUS_SUCCESS = 0;
+static constexpr NTSTATUS TU_WDDM_STATUS_INVALID_DEVICE_STATE = static_cast<NTSTATUS>(0xc0000184u);
 static constexpr NTSTATUS TU_WDDM_STATUS_DEVICE_BUSY = static_cast<NTSTATUS>(0x80000011u);
 static constexpr uint32_t TU_WDDM_CREATE_BUSY_RETRIES = 1000;
 static constexpr uint32_t TU_WDDM_MAX_RENDER_ALLOCATIONS = 1024;
@@ -28,16 +31,29 @@ struct D3DKMT_DESTROYALLOCATION2 {
    uint32_t AllocationCount;
    struct { uint32_t AssumeNotInUse; } Flags;
 };
+struct D3DDDI_MAKERESIDENT {
+   D3DKMT_HANDLE hPagingQueue; uint32_t NumAllocations; const D3DKMT_HANDLE *AllocationList;
+   const uint32_t *PriorityList; struct { uint32_t CantTrimFurther : 1; uint32_t MustSucceed : 1; } Flags;
+   uint64_t PagingFenceValue, NumBytesToTrim;
+};
 struct tu_wddm_runtime {
    struct {
       NTSTATUS (*CreateAllocation)(D3DKMT_CREATEALLOCATION *);
       NTSTATUS (*DestroyAllocation2)(D3DKMT_DESTROYALLOCATION2 *);
+      NTSTATUS (*MakeResident)(D3DDDI_MAKERESIDENT *);
    } dispatch;
 };
 struct tu_wddm_device {
-   struct { tu_wddm_runtime *runtime; VIOGPU_WDDM_ADAPTER_INFO private_info; } adapter;
+   struct { tu_wddm_runtime *runtime; VIOGPU_WDDM_ADAPTER_INFO private_info; uint32_t driver_version; } adapter;
    D3DKMT_HANDLE handle;
+   D3DKMT_HANDLE paging_queue;
+   volatile LONG64 pending_paging_fence;
 };
+static LONG64 InterlockedCompareExchange64(LONG64 volatile *target, LONG64 exchange, LONG64 comparand) {
+   LONG64 observed = *target;
+   if (observed == comparand) *target = exchange;
+   return observed;
+}
 struct tu_wddm_context {
    tu_wddm_device *device;
    D3DKMT_HANDLE handle;
@@ -94,11 +110,13 @@ struct tu_device {
    bool wddm_initialized;
    uint32_t wddm_bo_count;
    tu_bo *wddm_bos[1];
+   uint32_t adapter_driver_version() const { return wddm_device.adapter.driver_version; }
 };
 struct state {
    uint32_t create_status, destroy_status, returned_handle;
    bool context_active, execution_active, lose_during_create, lose_during_health_query, local_alloc_fail;
    uint32_t create_calls, destroy_calls, sleeps, context_queries, execution_queries;
+   uint32_t make_resident_calls, make_resident_status[4];
    uint32_t allocations, frees, vmas, vma_frees, names;
    uint64_t requested_iova, backing_alignment;
    tu_bo slot;
@@ -176,6 +194,14 @@ static NTSTATUS create_allocation(D3DKMT_CREATEALLOCATION *create) {
    if (current.lose_during_create) active_device->vk.lost = true;
    return static_cast<NTSTATUS>(current.create_status);
 }
+static NTSTATUS make_resident(D3DDDI_MAKERESIDENT *request) {
+   check(active_device->adapter_driver_version() >= 2000 && request->hPagingQueue == 0x50 &&
+         request->NumAllocations == 1 && *request->AllocationList == current.returned_handle,
+         "only WDDM 2.0 allocations are made resident, on the device paging queue");
+   const uint32_t status = current.make_resident_calls < 4 ? current.make_resident_status[current.make_resident_calls] : 0;
+   current.make_resident_calls++;
+   return static_cast<NTSTATUS>(status);
+}
 static NTSTATUS destroy_allocation(D3DKMT_DESTROYALLOCATION2 *destroy) {
    current.destroy_calls++;
    check(destroy->Flags.AssumeNotInUse == 0 && destroy->AllocationCount == 1 &&
@@ -191,7 +217,7 @@ static NTSTATUS destroy_allocation(D3DKMT_DESTROYALLOCATION2 *destroy) {
 #undef util_vma_heap_alloc_addr
 #undef util_vma_heap_free
 
-static tu_wddm_runtime runtime = {{create_allocation, destroy_allocation}};
+static tu_wddm_runtime runtime = {{create_allocation, destroy_allocation, make_resident}};
 static tu_instance instance = {true};
 static tu_physical_device physical = {&instance};
 static bool vma_initialized;
@@ -292,6 +318,42 @@ int main() {
          current.frees == 0 && current.vma_frees == 0,
          "failed rollback retains exact handle descriptor VMA and retry owner");
    free(current.slot.wddm_allocation); // fixture owns its retained peer after assertions
+
+   /* WDDM 1.x: every scenario above issued no residency call. */
+   check(current.make_resident_calls == 0, "WDDM 1.x allocation makes no residency call");
+
+   /* WDDM 2.0: residency failures reach the same Vulkan classification and
+    * roll back exactly like a failed CreateAllocation. */
+   init(&dev); current.returned_handle = 4;
+   dev.wddm_device.adapter.driver_version = 2000; dev.wddm_device.paging_queue = 0x50;
+   check(allocate(&dev, &bo) == VK_SUCCESS && bo == &current.slot && bo->wddm_allocation->resident &&
+         current.make_resident_calls == 1 && current.destroy_calls == 0,
+         "WDDM 2.0 allocation is resident before it is published");
+   free(current.slot.wddm_allocation);
+   for (uint32_t status : {0xc0000017u, 0xc01e0100u}) {
+      init(&dev); current.returned_handle = 4;
+      dev.wddm_device.adapter.driver_version = 2000; dev.wddm_device.paging_queue = 0x50;
+      current.make_resident_status[0] = status; current.make_resident_status[1] = 0xc0000017u;
+      check(allocate(&dev, &bo) == VK_ERROR_OUT_OF_DEVICE_MEMORY && !dev.vk.lost &&
+            current.make_resident_calls == 2 && current.destroy_calls == 1,
+            "over-budget residency is bounded and reports out of device memory");
+      no_owner(&dev, bo);
+   }
+   init(&dev); current.returned_handle = 4;
+   dev.wddm_device.adapter.driver_version = 2000; dev.wddm_device.paging_queue = 0x50;
+   current.make_resident_status[0] = 0xc00002b6u;
+   check(allocate(&dev, &bo) == VK_ERROR_DEVICE_LOST && dev.vk.lost && current.make_resident_calls == 1,
+         "residency on a removed device reports device lost");
+   no_owner(&dev, bo);
+   init(&dev); current.returned_handle = 4;
+   dev.wddm_device.adapter.driver_version = 2000; dev.wddm_device.paging_queue = 0x50;
+   current.make_resident_status[0] = 0xc0000017u; current.make_resident_status[1] = 0xc0000017u;
+   current.destroy_status = 0xc000000du;
+   check(allocate(&dev, &bo) == VK_ERROR_DEVICE_LOST && dev.vk.lost && dev.wddm_bo_count == 1 &&
+         current.slot.wddm_allocation && !current.slot.wddm_allocation->resident &&
+         current.slot.wddm_allocation->handle == 4 && current.vma_frees == 0,
+         "failed residency rollback retains a non-resident retry owner");
+   free(current.slot.wddm_allocation);
 
    init(&dev); current.local_alloc_fail = true;
    check(allocate(&dev, &bo) == VK_ERROR_OUT_OF_HOST_MEMORY && current.create_calls == 0,

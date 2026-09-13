@@ -17,6 +17,12 @@
  * The explicit --negative-submit argument sends one malformed private Render
  * header, adopts every returned KMT buffer, and proves allocation cleanup plus
  * an ACTIVE execution state afterward.
+ *
+ * On a WDDM 2.0 adapter (KMTQAITYPE_DRIVERVERSION >= 2000) the probe follows
+ * the production residency contract: one paging queue for its KMT device,
+ * MakeResident inside tu_wddm_allocation_create, a paging-fence wait before
+ * every Render, Evict inside tu_wddm_allocation_destroy, and DestroyPagingQueue
+ * before DestroyDevice.  On WDDM 1.x none of those calls is made.
  */
 
 #include "../tu_knl_wddm.h"
@@ -401,6 +407,14 @@ adopt_render_replacements(tu_wddm_context *context, const D3DKMT_RENDER *render)
    return true;
 }
 
+void
+print_allocation_residency(const char *label, const tu_wddm_allocation *allocation)
+{
+   printf("  %s residency: resident=%u status=0x%08x attempts=%u\n", label,
+          static_cast<unsigned>(allocation->resident), allocation->last_residency_status,
+          allocation->residency_attempt_count);
+}
+
 bool
 run_negative_submit_probe(tu_wddm_context *context)
 {
@@ -450,6 +464,16 @@ run_negative_submit_probe(tu_wddm_context *context)
    render.pNewAllocationList = context->allocation_list;
    render.pNewPatchLocationList = context->patch_location_list;
 
+   /* This Render bypasses tu_wddm_context_render, so take its WDDM 2.0
+    * paging-fence wait explicitly; the malformed header is the only fault. */
+   const bool paged_in = tu_wddm_device_wait_paging_fence(context->device);
+   printf("  Negative submit paging fence: ready=%u\n", static_cast<unsigned>(paged_in));
+   if (!paged_in) {
+      const bool cleaned = !allocation.locked && destroy_probe_allocation(&allocation);
+      printf("  Negative submit summary: paging-fence failure cleaned=%u\n", static_cast<unsigned>(cleaned));
+      return false;
+   }
+
    printf("  Negative submit malformed header: begin expected=0x%08x\n", kStatusIllegalInstruction);
    const NTSTATUS status = context->device->adapter.runtime->dispatch.Render(&render);
    const uint32_t status_bits = static_cast<uint32_t>(status);
@@ -463,33 +487,23 @@ run_negative_submit_probe(tu_wddm_context *context)
    return passed;
 }
 
+/* The device carries the probe's residency state (driver model, paging queue),
+ * shared with the allocation phase so every allocation of the KMT device is
+ * made resident through one queue. */
 bool
-run_submit_nop_probe(tu_wddm_dispatch *dispatch,
-                     const D3DKMT_ADAPTERINFO *enumerated,
-                     D3DKMT_HANDLE adapter_handle,
-                     D3DKMT_HANDLE device_handle,
+run_submit_nop_probe(tu_wddm_device *device,
                      D3DKMT_HANDLE context_handle,
                      const D3DKMT_CREATECONTEXT *context_create,
-                     const VIOGPU_WDDM_ADAPTER_INFO *adapter_info,
                      const VIOGPU_WDDM_CONTEXT_INFO *context_info)
 {
-   if (dispatch == nullptr || enumerated == nullptr || adapter_info == nullptr || context_info == nullptr ||
-       context_create == nullptr || adapter_handle == 0 || device_handle == 0 || context_handle == 0 ||
+   if (device == nullptr || device->adapter.runtime == nullptr || device->handle == 0 ||
+       context_info == nullptr || context_create == nullptr || context_handle == 0 ||
        context_create->pCommandBuffer == nullptr || context_create->pAllocationList == nullptr ||
        context_create->pPatchLocationList == nullptr)
       return false;
 
-   tu_wddm_runtime runtime = {};
-   runtime.dispatch = *dispatch;
-   tu_wddm_device device = {};
-   device.adapter.runtime = &runtime;
-   device.adapter.luid = enumerated->AdapterLuid;
-   device.adapter.handle = adapter_handle;
-   device.adapter.private_info = *adapter_info;
-   device.handle = device_handle;
-
    tu_wddm_context context = {};
-   context.device = &device;
+   context.device = device;
    context.handle = context_handle;
    context.command_buffer = context_create->pCommandBuffer;
    context.command_buffer_size = context_create->CommandBufferSize;
@@ -510,6 +524,7 @@ run_submit_nop_probe(tu_wddm_dispatch *dispatch,
    bool created = tu_wddm_allocation_create(&context, &desc, &allocation);
    printf("  Submit probe CreateAllocation: success=%u handle=0x%08x\n", static_cast<unsigned>(created),
           allocation.handle);
+   print_allocation_residency("Submit probe", &allocation);
    if (!created && allocation.handle == 0)
       return false;
 
@@ -553,7 +568,9 @@ run_submit_nop_probe(tu_wddm_dispatch *dispatch,
       reference.patch_offset =
          static_cast<uint32_t>(offsetof(test_msm_submit_one_bo, bo) + offsetof(test_msm_submit_bo, presumed));
 
-      printf("  Submit probe Render(NOP): begin\n");
+      printf("  Submit probe Render(NOP): begin required_residency=%u pending_paging_fence=%llu\n",
+             static_cast<unsigned>(tu_wddm_device_requires_residency(device)),
+             static_cast<unsigned long long>(device->pending_paging_fence));
       submitted = tu_wddm_context_render(&context, &submit, sizeof(submit), &reference, 1);
       printf("  Submit probe Render(NOP): success=%u fence=%u\n", static_cast<unsigned>(submitted),
              context.last_submitted_fence);
@@ -873,6 +890,18 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       device.adapter.private_info = opened_info;
       device.handle = device_handle;
 
+      /* Select the residency contract exactly as tu_wddm_device_open does. */
+      uint32_t driver_version = 0;
+      const bool version_known = tu_wddm_query_driver_version(&runtime, opened_adapter, &driver_version);
+      device.adapter.driver_version = driver_version;
+      const bool residency_ready = version_known && tu_wddm_device_residency_init(&device);
+      printf("  Residency: driver_version=%u query=%u required=%u init=%u paging_queue=0x%08x "
+             "sync=0x%08x status=0x%08x\n",
+             driver_version, static_cast<unsigned>(version_known),
+             static_cast<unsigned>(tu_wddm_device_requires_residency(&device)),
+             static_cast<unsigned>(residency_ready), device.paging_queue, device.paging_queue_sync_object,
+             device.last_residency_status);
+
       tu_wddm_context context = {};
       context.device = &device;
       context.handle = context_handle;
@@ -886,9 +915,10 @@ probe_adapter(tu_wddm_dispatch *dispatch,
 
       tu_wddm_allocation allocation = {};
       printf("  CreateAllocation(native 4KiB): begin\n");
-      const bool created = tu_wddm_allocation_create(&context, &desc, &allocation);
+      const bool created = residency_ready && tu_wddm_allocation_create(&context, &desc, &allocation);
       printf("  CreateAllocation(native 4KiB): success=%u handle=0x%08x\n", static_cast<unsigned>(created),
              allocation.handle);
+      print_allocation_residency("CreateAllocation(native 4KiB)", &allocation);
       bool allocation_ready = created;
       bool locked = false;
       bool unlocked = false;
@@ -958,9 +988,15 @@ probe_adapter(tu_wddm_dispatch *dispatch,
       }
 
       if (ready && submit_nop) {
-         ready = run_submit_nop_probe(dispatch, enumerated, opened_adapter, device_handle, context_handle,
-                                      &context_create, &opened_info, &context_info);
+         ready = run_submit_nop_probe(&device, context_handle, &context_create, &context_info);
       }
+
+      /* The paging queue is a child of the KMT device destroyed below. */
+      const bool residency_finished = tu_wddm_device_residency_finish(&device);
+      printf("  Residency finish: success=%u status=0x%08x\n", static_cast<unsigned>(residency_finished),
+             device.last_residency_status);
+      if (!residency_finished)
+         ready = false;
    }
 
 cleanup:

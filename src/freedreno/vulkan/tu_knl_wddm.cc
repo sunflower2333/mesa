@@ -34,6 +34,17 @@ static constexpr uint32_t TU_WDDM_DESTROY_BUSY_RETRIES = 1000;
  * what happens after a fault or an adapter reset, must not hang the caller
  * forever.  The busy-retry loop below absorbs the rest. */
 static constexpr uint64_t TU_WDDM_DESTROY_WAIT_TIMEOUT_NS = UINT64_C(250000000);
+/* Recorded when a WDDM 2.0 residency operation cannot be issued at all. */
+static constexpr NTSTATUS TU_WDDM_STATUS_PROCEDURE_NOT_FOUND = static_cast<NTSTATUS>(0xc000007aL);
+static constexpr NTSTATUS TU_WDDM_STATUS_INVALID_DEVICE_STATE = static_cast<NTSTATUS>(0xc0000184L);
+
+/* The shared residency policy names the D3DKMT driver model constant without
+ * the SDK; pin it to the SDK enum this transport is compiled against. */
+static_assert(TU_WDDM_DRIVER_VERSION_WDDM_2_0 ==
+                 static_cast<uint32_t>(KMT_DRIVERVERSION_WDDM_2_0),
+              "WDDM 2.0 driver-version gate drifted from d3dkmthk.h");
+static_assert(sizeof(D3DKMT_DRIVERVERSION) == sizeof(uint32_t),
+              "KMTQAITYPE_DRIVERVERSION payload width changed");
 
 /* Sleep(1) may defer every fence poll by a full ~15.6 ms scheduler tick.
  * Use a per-wait one-shot timer without changing the process/global timer
@@ -426,6 +437,49 @@ tu_wddm_query_private_info(struct tu_wddm_runtime *runtime,
    return NT_SUCCESS(status) && tu_wddm_validate_adapter_info(info);
 }
 
+/* KMTQAITYPE_DRIVERVERSION reports the display driver model the KMD registered
+ * with (d3dkmthk QAI_DRIVERVERSION, supported since Windows 7).  This is the
+ * only fact that selects the WDDM 2.0 residency contract: residency calls are
+ * never issued for an adapter below KMT_DRIVERVERSION_WDDM_2_0. */
+bool
+tu_wddm_query_driver_version(struct tu_wddm_runtime *runtime,
+                             D3DKMT_HANDLE adapter_handle,
+                             uint32_t *driver_version)
+{
+   if (driver_version != NULL)
+      *driver_version = 0;
+   if (runtime == NULL || runtime->dispatch.QueryAdapterInfo == NULL ||
+       adapter_handle == 0 || driver_version == NULL)
+      return false;
+
+   uint32_t version = 0;
+   D3DKMT_QUERYADAPTERINFO query = {};
+   query.hAdapter = adapter_handle;
+   query.Type = KMTQAITYPE_DRIVERVERSION;
+   query.pPrivateDriverData = &version;
+   query.PrivateDriverDataSize = tu_wddm_sizeof<uint32_t>();
+
+   const NTSTATUS status = runtime->dispatch.QueryAdapterInfo(&query);
+   /* KMT_DRIVERVERSION_WDDM_1_0 is the lowest defined model.  Anything else
+    * is not an answer this driver can act on. */
+   if (status != TU_WDDM_STATUS_SUCCESS || version < 1000) {
+      tu_wddm_diag("driver_version query failed adapter=%u status=0x%08x version=%u",
+                   static_cast<unsigned>(adapter_handle),
+                   static_cast<unsigned>(status), version);
+      return false;
+   }
+
+   *driver_version = version;
+   return true;
+}
+
+bool
+tu_wddm_device_requires_residency(const struct tu_wddm_device *device)
+{
+   return device != NULL &&
+          device->adapter.driver_version >= TU_WDDM_DRIVER_VERSION_WDDM_2_0;
+}
+
 bool
 tu_wddm_runtime_init(struct tu_wddm_runtime *runtime)
 {
@@ -476,7 +530,17 @@ tu_wddm_adapter_open(struct tu_wddm_runtime *runtime,
       return false;
    }
 
+   /* An adapter whose driver model is unknown cannot be driven correctly:
+    * WDDM 2.0 rejects submissions of non-resident allocations, WDDM 1.x has no
+    * residency list.  Fail closed rather than guess. */
+   uint32_t driver_version = 0;
+   if (!tu_wddm_query_driver_version(runtime, open.hAdapter, &driver_version)) {
+      tu_wddm_adapter_close(adapter);
+      return false;
+   }
+
    adapter->private_info = current;
+   adapter->driver_version = driver_version;
    return true;
 }
 
@@ -574,6 +638,195 @@ tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
    return enumeration_ok;
 }
 
+/* ------------------------------------------------------------------------- */
+/* WDDM 2.0 residency                                                        */
+/*
+ * Contract implemented here (see tu_wddm_residency.h for the shared loop):
+ *  - Gate: only adapters whose KMTQAITYPE_DRIVERVERSION is at least
+ *    KMT_DRIVERVERSION_WDDM_2_0 issue any of the calls below.  On WDDM 1.x the
+ *    allocation list still controls residency and nothing here runs.
+ *  - One paging queue per KMT device, created right after CreateDevice and
+ *    destroyed right before DestroyDevice (D3DKMTCreatePagingQueue /
+ *    D3DKMTDestroyPagingQueue).
+ *  - Every allocation holds exactly one residency reference from the end of
+ *    tu_wddm_allocation_create until tu_wddm_allocation_destroy.  Turnip
+ *    references every live BO from every submission (the native packet carries
+ *    raw IOVAs), so there is no idle residency it could trim: an over-budget
+ *    MakeResident is retried once with CantTrimFurther and otherwise fails the
+ *    allocation.
+ *  - STATUS_PENDING records PagingFenceValue.  tu_wddm_context_render waits for
+ *    the highest recorded value on the paging queue's monitored fence before
+ *    D3DKMTRender, as pfnMakeResidentCb requires.
+ *  - Destroy calls D3DKMTEvict before D3DKMTDestroyAllocation2 and never
+ *    repeats a successful Evict.  Destruction removes the allocation from the
+ *    residency list, so a failed Evict does not block the destroy; the reference
+ *    stays recorded until an Evict succeeds or the handle is gone.
+ */
+
+static void
+tu_wddm_device_note_paging_fence(struct tu_wddm_device *device, uint64_t fence)
+{
+   if (device == NULL || fence == 0)
+      return;
+
+   /* Monotonic maximum.  Allocation creation and submission run on different
+    * threads, so update without a lock and never lower a newer target. */
+   for (;;) {
+      const LONG64 current =
+         InterlockedCompareExchange64(&device->pending_paging_fence, 0, 0);
+      if (static_cast<uint64_t>(current) >= fence)
+         return;
+      if (InterlockedCompareExchange64(&device->pending_paging_fence,
+                                       static_cast<LONG64>(fence), current) == current)
+         return;
+   }
+}
+
+bool
+tu_wddm_device_wait_paging_fence(struct tu_wddm_device *device)
+{
+   if (device == NULL)
+      return false;
+
+   const LONG64 pending =
+      InterlockedCompareExchange64(&device->pending_paging_fence, 0, 0);
+   if (pending == 0)
+      return true;
+
+   const uint64_t fence = static_cast<uint64_t>(pending);
+   if (!tu_wddm_device_requires_residency(device) || device->adapter.runtime == NULL ||
+       device->handle == 0 || device->paging_queue == 0 ||
+       device->paging_queue_sync_object == 0 ||
+       device->adapter.runtime->dispatch.WaitForSynchronizationObjectFromCpu == NULL) {
+      tu_wddm_diag("paging_fence wait rejected device=%u queue=%u fence=%llu",
+                   static_cast<unsigned>(device->handle),
+                   static_cast<unsigned>(device->paging_queue),
+                   static_cast<unsigned long long>(fence));
+      return false;
+   }
+
+   /* FenceValueCPUVirtualAddress is the monitored fence's read-only CPU view.
+    * When it already covers the target there is nothing to wait for. */
+   const bool completed = device->paging_fence_cpu_address != NULL &&
+                          *device->paging_fence_cpu_address >= fence;
+   if (!completed) {
+      const D3DKMT_HANDLE object = device->paging_queue_sync_object;
+      const uint64_t value = fence;
+      D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {};
+      wait.hDevice = device->handle;
+      wait.ObjectCount = 1;
+      wait.ObjectHandleArray = &object;
+      wait.FenceValueArray = &value;
+      /* NULL: return only once the paging operation has completed. */
+      wait.hAsyncEvent = NULL;
+      wait.Flags.Value = 0;
+      const NTSTATUS status =
+         device->adapter.runtime->dispatch.WaitForSynchronizationObjectFromCpu(&wait);
+      if (status != TU_WDDM_STATUS_SUCCESS) {
+         tu_wddm_diag("paging_fence wait failed device=%u fence=%llu status=0x%08x",
+                      static_cast<unsigned>(device->handle),
+                      static_cast<unsigned long long>(fence),
+                      static_cast<unsigned>(status));
+         return false;
+      }
+   }
+
+   /* Clear only the target that was observed complete; a higher fence
+    * recorded concurrently remains pending for the next submission. */
+   (void)InterlockedCompareExchange64(&device->pending_paging_fence, 0, pending);
+   return true;
+}
+
+bool
+tu_wddm_device_residency_init(struct tu_wddm_device *device)
+{
+   if (device == NULL || device->adapter.runtime == NULL || device->handle == 0)
+      return false;
+
+   device->paging_queue = 0;
+   device->paging_queue_sync_object = 0;
+   device->paging_fence_cpu_address = NULL;
+   device->pending_paging_fence = 0;
+   device->last_residency_status = static_cast<uint32_t>(TU_WDDM_STATUS_SUCCESS);
+   if (!tu_wddm_device_requires_residency(device))
+      return true;
+
+   const struct tu_wddm_dispatch *dispatch = &device->adapter.runtime->dispatch;
+   if (dispatch->CreatePagingQueue == NULL || dispatch->DestroyPagingQueue == NULL ||
+       dispatch->MakeResident == NULL || dispatch->Evict == NULL ||
+       dispatch->WaitForSynchronizationObjectFromCpu == NULL) {
+      device->last_residency_status =
+         static_cast<uint32_t>(TU_WDDM_STATUS_PROCEDURE_NOT_FOUND);
+      tu_wddm_diag("residency init failed: gdi32 lacks a WDDM 2.0 residency thunk");
+      return false;
+   }
+
+   D3DKMT_CREATEPAGINGQUEUE create = {};
+   create.hDevice = device->handle;
+   create.Priority = D3DDDI_PAGINGQUEUE_PRIORITY_NORMAL;
+   create.PhysicalAdapterIndex = 0;
+   const NTSTATUS status = dispatch->CreatePagingQueue(&create);
+   device->last_residency_status = static_cast<uint32_t>(status);
+   if (status != TU_WDDM_STATUS_SUCCESS || create.hPagingQueue == 0 ||
+       create.hSyncObject == 0) {
+      tu_wddm_diag("CreatePagingQueue failed device=%u status=0x%08x queue=%u sync=%u",
+                   static_cast<unsigned>(device->handle), static_cast<unsigned>(status),
+                   static_cast<unsigned>(create.hPagingQueue),
+                   static_cast<unsigned>(create.hSyncObject));
+      if (create.hPagingQueue != 0) {
+         /* DestroyDevice also releases the queue, so a failed compensation
+          * here cannot orphan it beyond the device's own lifetime. */
+         D3DDDI_DESTROYPAGINGQUEUE destroy = {};
+         destroy.hPagingQueue = create.hPagingQueue;
+         (void)dispatch->DestroyPagingQueue(&destroy);
+      }
+      return false;
+   }
+
+   device->paging_queue = create.hPagingQueue;
+   device->paging_queue_sync_object = create.hSyncObject;
+   device->paging_fence_cpu_address =
+      static_cast<const uint64_t *>(create.FenceValueCPUVirtualAddress);
+   tu_wddm_diag("residency init device=%u driver_version=%u queue=%u sync=%u",
+                static_cast<unsigned>(device->handle), device->adapter.driver_version,
+                static_cast<unsigned>(device->paging_queue),
+                static_cast<unsigned>(device->paging_queue_sync_object));
+   return true;
+}
+
+bool
+tu_wddm_device_residency_finish(struct tu_wddm_device *device)
+{
+   if (device == NULL)
+      return false;
+   if (device->paging_queue == 0)
+      return true;
+
+   bool destroyed = false;
+   if (device->adapter.runtime != NULL &&
+       device->adapter.runtime->dispatch.DestroyPagingQueue != NULL) {
+      D3DDDI_DESTROYPAGINGQUEUE destroy = {};
+      destroy.hPagingQueue = device->paging_queue;
+      const NTSTATUS status = device->adapter.runtime->dispatch.DestroyPagingQueue(&destroy);
+      device->last_residency_status = static_cast<uint32_t>(status);
+      destroyed = status == TU_WDDM_STATUS_SUCCESS;
+      if (!destroyed)
+         tu_wddm_diag("DestroyPagingQueue failed device=%u queue=%u status=0x%08x",
+                      static_cast<unsigned>(device->handle),
+                      static_cast<unsigned>(device->paging_queue),
+                      static_cast<unsigned>(status));
+   }
+
+   /* The queue, its sync object and CPU fence view are owned by the KMT device
+    * and are invalidated by DestroyDevice either way; never keep a pointer
+    * into a mapping that may already be gone. */
+   device->paging_queue = 0;
+   device->paging_queue_sync_object = 0;
+   device->paging_fence_cpu_address = NULL;
+   device->pending_paging_fence = 0;
+   return destroyed;
+}
+
 bool
 tu_wddm_device_open(struct tu_wddm_runtime *runtime,
                     const struct tu_wddm_adapter_info *identity,
@@ -615,6 +868,14 @@ tu_wddm_device_open(struct tu_wddm_runtime *runtime,
    device->allocation_list_size = create.AllocationListSize;
    device->patch_location_list = create.pPatchLocationList;
    device->patch_location_list_size = create.PatchLocationListSize;
+
+   /* WDDM 2.0 only: without a paging queue no allocation of this device can
+    * ever be submitted, so a device that cannot create one is not usable. */
+   if (!tu_wddm_device_residency_init(device)) {
+      /* Preserve any handle whose close fails for the caller's retry. */
+      tu_wddm_device_close(device);
+      return false;
+   }
    return true;
 }
 
@@ -635,6 +896,10 @@ tu_wddm_device_close(struct tu_wddm_device *device)
    if (device->handle != 0) {
       if (device->adapter.runtime == NULL)
          return false;
+
+      /* The paging queue is a child of the KMT device; release it first.  Its
+       * failure is diagnostic only because DestroyDevice releases it too. */
+      (void)tu_wddm_device_residency_finish(device);
 
       D3DKMT_DESTROYDEVICE destroy = {};
       destroy.hDevice = device->handle;
@@ -1089,6 +1354,105 @@ tu_wddm_destroy_allocation_handle(struct tu_wddm_context *context,
    return context->device->adapter.runtime->dispatch.DestroyAllocation2(&destroy);
 }
 
+static enum tu_wddm_residency_outcome
+tu_wddm_allocation_make_resident_attempt(void *data, bool cant_trim_further,
+                                         uint64_t *paging_fence,
+                                         uint64_t *bytes_to_trim)
+{
+   struct tu_wddm_allocation *allocation = static_cast<struct tu_wddm_allocation *>(data);
+   struct tu_wddm_device *device = allocation->context->device;
+
+   D3DKMT_HANDLE handle = allocation->handle;
+   D3DDDI_MAKERESIDENT request = {};
+   request.hPagingQueue = device->paging_queue;
+   request.NumAllocations = 1;
+   request.AllocationList = &handle;
+   /* PriorityList is currently ignored by the OS and may be NULL. */
+   request.PriorityList = NULL;
+   request.Flags.CantTrimFurther = cant_trim_further ? 1 : 0;
+
+   const NTSTATUS status = device->adapter.runtime->dispatch.MakeResident(&request);
+   allocation->last_residency_status = static_cast<uint32_t>(status);
+   *paging_fence = request.PagingFenceValue;
+   *bytes_to_trim = request.NumBytesToTrim;
+   tu_wddm_diag("MakeResident allocation=%u cant_trim_further=%u status=0x%08x fence=%llu trim=%llu",
+                static_cast<unsigned>(handle), static_cast<unsigned>(cant_trim_further),
+                static_cast<unsigned>(status),
+                static_cast<unsigned long long>(request.PagingFenceValue),
+                static_cast<unsigned long long>(request.NumBytesToTrim));
+   return tu_wddm_residency_classify_ntstatus(static_cast<uint32_t>(status));
+}
+
+/* Take the allocation's single residency reference.  No-op on WDDM 1.x. */
+static bool
+tu_wddm_allocation_make_resident(struct tu_wddm_allocation *allocation)
+{
+   struct tu_wddm_device *device = allocation->context->device;
+   if (!tu_wddm_device_requires_residency(device))
+      return true;
+   if (allocation->resident)
+      return true;
+
+   if (device->paging_queue == 0 || device->adapter.runtime->dispatch.MakeResident == NULL) {
+      allocation->last_residency_status =
+         static_cast<uint32_t>(TU_WDDM_STATUS_INVALID_DEVICE_STATE);
+      return false;
+   }
+
+   /* No trim callback: every live BO is referenced by the next submission,
+    * so the loop's final attempt carries CantTrimFurther immediately. */
+   uint64_t paging_fence = 0;
+   const enum tu_wddm_residency_outcome outcome = tu_wddm_make_resident_bounded(
+      tu_wddm_allocation_make_resident_attempt, NULL, allocation, &paging_fence,
+      &allocation->residency_attempt_count);
+   if (outcome != TU_WDDM_RESIDENCY_RESIDENT && outcome != TU_WDDM_RESIDENCY_PENDING) {
+      tu_wddm_diag("residency failed allocation=%u outcome=%u status=0x%08x attempts=%u",
+                   static_cast<unsigned>(allocation->handle), static_cast<unsigned>(outcome),
+                   allocation->last_residency_status, allocation->residency_attempt_count);
+      return false;
+   }
+
+   /* Record the fence before the caller can publish the allocation to a
+    * submission, so Render cannot observe it without the pending target. */
+   if (outcome == TU_WDDM_RESIDENCY_PENDING)
+      tu_wddm_device_note_paging_fence(device, paging_fence);
+   allocation->resident = true;
+   return true;
+}
+
+/* Drop the allocation's residency reference, exactly once. */
+static bool
+tu_wddm_allocation_evict(struct tu_wddm_allocation *allocation)
+{
+   if (!allocation->resident)
+      return true;
+
+   struct tu_wddm_device *device = allocation->context->device;
+   if (device->adapter.runtime->dispatch.Evict == NULL) {
+      allocation->last_residency_status =
+         static_cast<uint32_t>(TU_WDDM_STATUS_PROCEDURE_NOT_FOUND);
+      return false;
+   }
+
+   D3DKMT_HANDLE handle = allocation->handle;
+   D3DKMT_EVICT evict = {};
+   evict.hDevice = device->handle;
+   evict.NumAllocations = 1;
+   evict.AllocationList = &handle;
+   /* EvictOnlyIfNecessary clear: the allocation is about to be destroyed. */
+   evict.Flags.Value = 0;
+   const NTSTATUS status = device->adapter.runtime->dispatch.Evict(&evict);
+   allocation->last_residency_status = static_cast<uint32_t>(status);
+   if (status != TU_WDDM_STATUS_SUCCESS) {
+      tu_wddm_diag("Evict failed allocation=%u status=0x%08x",
+                   static_cast<unsigned>(handle), static_cast<unsigned>(status));
+      return false;
+   }
+
+   allocation->resident = false;
+   return true;
+}
+
 bool
 tu_wddm_allocation_create(struct tu_wddm_context *context,
                           const struct tu_wddm_allocation_desc *desc,
@@ -1171,6 +1535,26 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
    allocation->handle = allocation_info.hAllocation;
    allocation->private_info = private_data;
    allocation->vma_size = (desc->size + UINT64_C(4095)) & ~UINT64_C(4095);
+
+   /* WDDM 2.0: the allocation must be on the device residency requirement
+    * list before any submission can reference it.  A failed MakeResident took
+    * no reference, so the handle is released without Evict and the residency
+    * status becomes the create result the caller classifies. */
+   if (!tu_wddm_allocation_make_resident(allocation)) {
+      const uint32_t residency_status = allocation->last_residency_status;
+      const uint32_t residency_attempts = allocation->residency_attempt_count;
+      allocation->last_create_status = residency_status;
+      const NTSTATUS destroy_status =
+         tu_wddm_destroy_allocation_handle(context, allocation->handle);
+      allocation->last_destroy_status = static_cast<uint32_t>(destroy_status);
+      if (destroy_status == TU_WDDM_STATUS_SUCCESS) {
+         memset(allocation, 0, sizeof(*allocation));
+         allocation->last_create_status = residency_status;
+         allocation->last_residency_status = residency_status;
+         allocation->residency_attempt_count = residency_attempts;
+      }
+      return false;
+   }
    return true;
 }
 
@@ -1201,6 +1585,14 @@ tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
                    static_cast<unsigned>(allocation->handle),
                    allocation->context->last_submitted_fence);
    }
+
+   /* WDDM 2.0: release this UMD's residency reference before the handle goes
+    * away.  Destroying the allocation also removes it from the device
+    * residency list, so a failed Evict (for example on a removed device) is
+    * recorded and the destroy still proceeds; retaining the owner would only
+    * leak it.  The reference flag stays set until Evict succeeds, so a retry
+    * after a failed destroy evicts again and a successful Evict never repeats. */
+   (void)tu_wddm_allocation_evict(allocation);
 
    /* VidMm may still hold a reference from a completion it has not processed
     * yet, and now says so instead of bugchecking.  Retry on the busy statuses
@@ -1509,6 +1901,12 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    if (context->last_submitted_fence != 0 &&
        !tu_wddm_fence_after(submitted_fence, context->last_submitted_fence))
       return rejected("fence-order");
+
+   /* WDDM 2.0: a MakeResident that returned STATUS_PENDING is still paging
+    * its allocation in.  Wait for the paging fence before the DMA buffer can
+    * reference it; on WDDM 1.x nothing is ever pending and no call is made. */
+   if (!tu_wddm_device_wait_paging_fence(context->device))
+      return rejected("paging-fence");
 
    BYTE *packet = static_cast<BYTE *>(context->command_buffer);
    memset(packet, 0, static_cast<size_t>(command_length));

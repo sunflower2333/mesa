@@ -21,6 +21,9 @@ constexpr D3DKMT_HANDLE kAdapterHandle = 1;
 constexpr D3DKMT_HANDLE kDeviceHandle = 2;
 constexpr D3DKMT_HANDLE kContextHandle = 3;
 constexpr D3DKMT_HANDLE kAllocationHandle = 4;
+constexpr D3DKMT_HANDLE kPagingQueue = 5;
+constexpr D3DKMT_HANDLE kPagingSyncObject = 6;
+constexpr NTSTATUS kStatusPending = static_cast<NTSTATUS>(0x103);
 constexpr NTSTATUS kStatusSuccess = static_cast<NTSTATUS>(0);
 constexpr NTSTATUS kStatusTimeout = static_cast<NTSTATUS>(0x102);
 constexpr NTSTATUS kStatusDeviceBusy = static_cast<NTSTATUS>(0x80000011L);
@@ -438,6 +441,19 @@ struct test_fixture {
    bool render_returns_oversized_replacements;
    bool render_leaves_replacements_untouched;
    bool context_returns_invalid_buffers;
+   /* WDDM 2.0 residency fakes. */
+   unsigned create_queue_calls;
+   unsigned destroy_queue_calls;
+   unsigned make_resident_calls;
+   unsigned evict_calls;
+   unsigned wait_calls;
+   NTSTATUS make_resident_status;
+   UINT64 make_resident_fence;
+   UINT64 paging_fence_cpu;
+   unsigned allocation_resident_refs;
+   bool render_before_paging;
+   bool render_non_resident;
+   bool destroy_while_resident;
 };
 
 test_fixture *current_fixture;
@@ -585,6 +601,9 @@ fake_destroy_allocation2(const D3DKMT_DESTROYALLOCATION2 *destroy)
       return kStatusInvalidParameter;
 
    fixture->destroy_allocation_calls++;
+   if (fixture->device.adapter.driver_version >= TU_WDDM_DRIVER_VERSION_WDDM_2_0 &&
+       fixture->allocation_resident_refs != 0)
+      fixture->destroy_while_resident = true;
    CHECK(destroy->hDevice == kDeviceHandle);
    CHECK(destroy->AllocationCount == 1);
    CHECK(destroy->phAllocationList != NULL);
@@ -761,6 +780,10 @@ fake_render(D3DKMT_RENDER *render)
       return kStatusInvalidParameter;
 
    fixture->render_calls++;
+   if (fixture->device.adapter.driver_version >= TU_WDDM_DRIVER_VERSION_WDDM_2_0) {
+      fixture->render_non_resident |= fixture->allocation_resident_refs == 0;
+      fixture->render_before_paging |= fixture->paging_fence_cpu < fixture->make_resident_fence;
+   }
    if (fixture->expected_allocation_count == 1)
       check_render_packet(render);
    else if (fixture->expected_allocation_count == 2)
@@ -930,6 +953,73 @@ fake_get_device_state(D3DKMT_GETDEVICESTATE *state)
    return fixture->get_device_state_status;
 }
 
+NTSTATUS APIENTRY
+fake_create_paging_queue(D3DKMT_CREATEPAGINGQUEUE *create)
+{
+   test_fixture *fixture = current_fixture;
+   fixture->create_queue_calls++;
+   CHECK(create->hDevice == kDeviceHandle);
+   CHECK(create->Priority == D3DDDI_PAGINGQUEUE_PRIORITY_NORMAL);
+   CHECK(create->PhysicalAdapterIndex == 0);
+   create->hPagingQueue = kPagingQueue;
+   create->hSyncObject = kPagingSyncObject;
+   create->FenceValueCPUVirtualAddress = &fixture->paging_fence_cpu;
+   return kStatusSuccess;
+}
+
+NTSTATUS APIENTRY
+fake_destroy_paging_queue(D3DDDI_DESTROYPAGINGQUEUE *destroy)
+{
+   current_fixture->destroy_queue_calls++;
+   CHECK(destroy->hPagingQueue == kPagingQueue);
+   return kStatusSuccess;
+}
+
+NTSTATUS APIENTRY
+fake_make_resident(D3DDDI_MAKERESIDENT *request)
+{
+   test_fixture *fixture = current_fixture;
+   fixture->make_resident_calls++;
+   CHECK(request->hPagingQueue == kPagingQueue);
+   CHECK(request->NumAllocations == 1);
+   CHECK(request->AllocationList != NULL && request->AllocationList[0] == kAllocationHandle);
+   CHECK(request->Flags.MustSucceed == 0);
+   if (fixture->make_resident_status == kStatusSuccess || fixture->make_resident_status == kStatusPending) {
+      fixture->allocation_resident_refs++;
+      request->PagingFenceValue = fixture->make_resident_fence;
+   }
+   return fixture->make_resident_status;
+}
+
+NTSTATUS APIENTRY
+fake_evict(D3DKMT_EVICT *evict)
+{
+   test_fixture *fixture = current_fixture;
+   fixture->evict_calls++;
+   CHECK(evict->hDevice == kDeviceHandle);
+   CHECK(evict->NumAllocations == 1);
+   CHECK(evict->AllocationList != NULL && evict->AllocationList[0] == kAllocationHandle);
+   CHECK(evict->Flags.Value == 0);
+   CHECK(fixture->allocation_resident_refs != 0);
+   if (fixture->allocation_resident_refs != 0)
+      fixture->allocation_resident_refs--;
+   return kStatusSuccess;
+}
+
+NTSTATUS APIENTRY
+fake_wait_from_cpu(const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *wait)
+{
+   test_fixture *fixture = current_fixture;
+   fixture->wait_calls++;
+   CHECK(wait->hDevice == kDeviceHandle);
+   CHECK(wait->ObjectCount == 1);
+   CHECK(wait->ObjectHandleArray != NULL && wait->ObjectHandleArray[0] == kPagingSyncObject);
+   CHECK(wait->FenceValueArray != NULL && wait->FenceValueArray[0] == fixture->make_resident_fence);
+   CHECK(wait->hAsyncEvent == NULL);
+   fixture->paging_fence_cpu = wait->FenceValueArray[0];
+   return kStatusSuccess;
+}
+
 void
 init_fixture(test_fixture *fixture)
 {
@@ -946,6 +1036,12 @@ init_fixture(test_fixture *fixture)
    fixture->runtime.dispatch.Render = fake_render;
    fixture->runtime.dispatch.Escape = fake_escape;
    fixture->runtime.dispatch.GetDeviceState = fake_get_device_state;
+   /* Present on every fixture: WDDM 1.x paths must never reach them. */
+   fixture->runtime.dispatch.CreatePagingQueue = fake_create_paging_queue;
+   fixture->runtime.dispatch.DestroyPagingQueue = fake_destroy_paging_queue;
+   fixture->runtime.dispatch.MakeResident = fake_make_resident;
+   fixture->runtime.dispatch.Evict = fake_evict;
+   fixture->runtime.dispatch.WaitForSynchronizationObjectFromCpu = fake_wait_from_cpu;
    fixture->render_status = kStatusSuccess;
    fixture->context_info_status = kStatusSuccess;
    fixture->escape_status = kStatusSuccess;
@@ -2065,6 +2161,55 @@ test_completed_fence_identity_rejected()
    CHECK(completed == 0);
 }
 
+void
+test_wddm1_issues_no_residency_calls()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.device.adapter.driver_version = 1200;
+   CHECK(tu_wddm_device_residency_init(&fixture.device));
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(tu_wddm_device_residency_finish(&fixture.device));
+   CHECK(fixture.create_queue_calls == 0 && fixture.make_resident_calls == 0 && fixture.wait_calls == 0 &&
+         fixture.evict_calls == 0 && fixture.destroy_queue_calls == 0);
+   CHECK(!allocation.resident && fixture.device.paging_queue == 0);
+}
+
+void
+test_wddm2_residency_contract()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   fixture.device.adapter.driver_version = TU_WDDM_DRIVER_VERSION_WDDM_2_0;
+   CHECK(tu_wddm_device_residency_init(&fixture.device));
+   CHECK(fixture.create_queue_calls == 1 && fixture.device.paging_queue == kPagingQueue &&
+         fixture.device.paging_queue_sync_object == kPagingSyncObject);
+
+   fixture.make_resident_status = kStatusPending;
+   fixture.make_resident_fence = 9;
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+   CHECK(allocation.resident && fixture.make_resident_calls == 1 && fixture.wait_calls == 0);
+
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   CHECK(tu_wddm_context_render(&fixture.context, &submit, sizeof(submit), &reference, 1));
+   CHECK(fixture.wait_calls == 1 && fixture.render_calls == 1);
+   CHECK(!fixture.render_before_paging && !fixture.render_non_resident);
+
+   CHECK(tu_wddm_allocation_destroy(&allocation));
+   CHECK(fixture.evict_calls == 1 && fixture.destroy_allocation_calls == 1 && !fixture.destroy_while_resident);
+   CHECK(!allocation.resident && allocation.handle == 0);
+   CHECK(tu_wddm_device_residency_finish(&fixture.device) && fixture.destroy_queue_calls == 1);
+}
+
 } /* namespace */
 
 extern "C" bool
@@ -2127,6 +2272,8 @@ main()
    test_wait_rejects_unsubmitted_fence();
    test_completed_fence_wait_rejects_inactive_device();
    test_completed_fence_identity_rejected();
+   test_wddm1_issues_no_residency_calls();
+   test_wddm2_residency_contract();
    current_fixture = NULL;
 
    if (failures != 0)

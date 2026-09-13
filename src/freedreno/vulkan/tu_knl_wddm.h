@@ -16,6 +16,7 @@
 
 #include "tu_wddm_abi.h"
 #include "tu_wddm_dispatch.h"
+#include "tu_wddm_residency.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,9 @@ struct tu_wddm_adapter {
    LUID luid;
    D3DKMT_HANDLE handle;
    VIOGPU_WDDM_ADAPTER_INFO private_info;
+   /* D3DKMT_DRIVERVERSION reported by dxgkrnl for this adapter.  Zero means
+    * not queried, which keeps the WDDM 1.x path (no residency calls). */
+   uint32_t driver_version;
 };
 
 struct tu_wddm_device {
@@ -49,6 +53,17 @@ struct tu_wddm_device {
    uint32_t allocation_list_size;
    D3DDDI_PATCHLOCATIONLIST *patch_location_list;
    uint32_t patch_location_list_size;
+   /* WDDM 2.0 residency state; all zero on WDDM 1.x adapters.  The paging
+    * queue belongs to this KMT device and its monitored fence orders every
+    * MakeResident paging operation. */
+   D3DKMT_HANDLE paging_queue;
+   D3DKMT_HANDLE paging_queue_sync_object;
+   const uint64_t *paging_fence_cpu_address;
+   /* Highest PagingFenceValue returned by a pending MakeResident that has not
+    * yet been observed complete.  Allocation creation raises it before the
+    * allocation is published; Render waits for it before submitting. */
+   volatile LONG64 pending_paging_fence;
+   uint32_t last_residency_status;
 };
 
 struct tu_wddm_context {
@@ -118,6 +133,11 @@ struct tu_wddm_allocation {
     * STATUS_GRAPHICS_ALLOCATION_BUSY and the call is retried; a count above one
     * is the visible trace of that window. */
    uint32_t destroy_attempt_count;
+   /* True while this UMD holds exactly one WDDM 2.0 residency reference on
+    * the allocation (one successful MakeResident not yet matched by Evict). */
+   bool resident;
+   uint32_t last_residency_status;
+   uint32_t residency_attempt_count;
 };
 
 struct tu_wddm_render_reference {
@@ -168,11 +188,28 @@ bool tu_wddm_adapter_open(struct tu_wddm_runtime *runtime,
                           struct tu_wddm_adapter *adapter);
 bool tu_wddm_adapter_close(struct tu_wddm_adapter *adapter);
 
+/* KMTQAITYPE_DRIVERVERSION for an open adapter handle.  Answered by dxgkrnl
+ * from the miniport's registered DDI version; it does not reach the KMD. */
+bool tu_wddm_query_driver_version(struct tu_wddm_runtime *runtime,
+                                  D3DKMT_HANDLE adapter_handle,
+                                  uint32_t *driver_version);
+bool tu_wddm_device_requires_residency(const struct tu_wddm_device *device);
+
 bool tu_wddm_device_open(struct tu_wddm_runtime *runtime,
                          const struct tu_wddm_adapter_info *identity,
                          struct tu_wddm_device *device);
 bool tu_wddm_device_execution_active(struct tu_wddm_device *device);
 bool tu_wddm_device_close(struct tu_wddm_device *device);
+
+/* Create the device paging queue on a WDDM 2.0 adapter; a no-op without any
+ * KMT call on WDDM 1.x.  device_open calls this; code that assembles a
+ * tu_wddm_device from its own KMT handles (the bring-up probe) must call it
+ * before creating allocations and call residency_finish before DestroyDevice. */
+bool tu_wddm_device_residency_init(struct tu_wddm_device *device);
+bool tu_wddm_device_residency_finish(struct tu_wddm_device *device);
+/* Wait for every pending MakeResident paging operation of this device.  Must
+ * precede any submission that references this device's allocations. */
+bool tu_wddm_device_wait_paging_fence(struct tu_wddm_device *device);
 
 bool tu_wddm_context_open(struct tu_wddm_device *device,
                           struct tu_wddm_context *context);
@@ -189,6 +226,10 @@ bool tu_wddm_context_wait_submissions(struct tu_wddm_context *context,
                                       uint64_t timeout_ns);
 bool tu_wddm_context_close(struct tu_wddm_context *context);
 
+/* On a WDDM 2.0 adapter a successful create also holds one residency
+ * reference (MakeResident, bounded over-budget retry); a create that cannot
+ * make the allocation resident releases the handle and fails.  Destroy drops
+ * that reference with Evict before DestroyAllocation2, exactly once. */
 bool tu_wddm_allocation_create(struct tu_wddm_context *context,
                                const struct tu_wddm_allocation_desc *desc,
                                struct tu_wddm_allocation *allocation);
@@ -202,7 +243,8 @@ bool tu_wddm_allocation_unlock(struct tu_wddm_allocation *allocation);
 
 /* Build one bounded Native Context packet in the KMD-provided DMA buffers.
  * This only prepares the WDDM Render call; fence submission/retirement stays
- * with VidSch and the KMD. */
+ * with VidSch and the KMD.  On WDDM 2.0 it first waits for the device paging
+ * fence, so no referenced allocation is still being paged in. */
 bool tu_wddm_context_render(struct tu_wddm_context *context,
                             const void *command_stream,
                             uint32_t command_stream_size,

@@ -49,6 +49,19 @@ tu_wddm_dispatch_init(struct tu_wddm_dispatch *dispatch)
    TU_WDDM_LOAD(Render);
    TU_WDDM_LOAD(GetDeviceState);
 
+#define TU_WDDM_LOAD_OPTIONAL(name) \
+   dispatch->name = reinterpret_cast<decltype(dispatch->name)>( \
+      tu_wddm_get_proc(dispatch->gdi32, "D3DKMT" #name))
+
+   /* Residency is required only by WDDM 2.0 adapters; tu_wddm_device_open
+    * checks these entries once it knows the adapter's driver model. */
+   TU_WDDM_LOAD_OPTIONAL(CreatePagingQueue);
+   TU_WDDM_LOAD_OPTIONAL(DestroyPagingQueue);
+   TU_WDDM_LOAD_OPTIONAL(MakeResident);
+   TU_WDDM_LOAD_OPTIONAL(Evict);
+   TU_WDDM_LOAD_OPTIONAL(WaitForSynchronizationObjectFromCpu);
+
+#undef TU_WDDM_LOAD_OPTIONAL
 #undef TU_WDDM_LOAD
    return true;
 

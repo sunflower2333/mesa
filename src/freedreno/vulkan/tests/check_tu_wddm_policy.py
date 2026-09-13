@@ -390,6 +390,81 @@ def main() -> int:
             f"{function_name} must release heap usage only after KMT destruction succeeds",
         )
 
+    # WDDM 2.0: residency is controlled only by the device residency list.
+    for thunk in ("CreatePagingQueue", "DestroyPagingQueue", "MakeResident", "Evict",
+                  "WaitForSynchronizationObjectFromCpu"):
+        if f"TU_WDDM_LOAD_OPTIONAL({thunk});" not in dispatch:
+            fail(f"WDDM 2.0 residency thunk must be loaded without breaking WDDM 1.x: {thunk}")
+        if f"TU_WDDM_LOAD({thunk});" in dispatch:
+            fail(f"a missing WDDM 2.0 residency thunk must not disable WDDM 1.x: {thunk}")
+    driver_version = canonical(function_body("tu_wddm_query_driver_version", wddm_source))
+    if "query.Type=KMTQAITYPE_DRIVERVERSION;" not in driver_version:
+        fail("the WDDM 2.0 gate must come from KMTQAITYPE_DRIVERVERSION")
+    requires = canonical(function_body("tu_wddm_device_requires_residency", wddm_source))
+    if "device->adapter.driver_version>=TU_WDDM_DRIVER_VERSION_WDDM_2_0" not in requires:
+        fail("residency must be gated on a WDDM 2.0 or later driver model")
+    require_order(
+        canonical(function_body("tu_wddm_adapter_open", wddm_source)),
+        (
+            "tu_wddm_query_private_info(runtime,open.hAdapter,&current)",
+            "tu_wddm_query_driver_version(runtime,open.hAdapter,&driver_version)",
+            "adapter->driver_version=driver_version;",
+        ),
+        "adapter open must record the dxgkrnl driver model after claiming the private ABI",
+    )
+    require_order(
+        canonical(function_body("tu_wddm_device_residency_init", wddm_source)),
+        (
+            "if(!tu_wddm_device_requires_residency(device))returntrue;",
+            "dispatch->CreatePagingQueue(&create)",
+        ),
+        "WDDM 1.x devices must not create a paging queue",
+    )
+    require_order(
+        canonical(function_body("tu_wddm_device_open", wddm_source)),
+        ("runtime->dispatch.CreateDevice(&create)", "tu_wddm_device_residency_init(device)"),
+        "WDDM 2.0 devices must own a paging queue before any allocation",
+    )
+    require_order(
+        canonical(function_body("tu_wddm_device_close", wddm_source)),
+        ("tu_wddm_device_residency_finish(device)", "dispatch.DestroyDevice(&destroy)"),
+        "the paging queue must be released before its KMT device",
+    )
+    require_order(
+        canonical(function_body("tu_wddm_allocation_make_resident", wddm_source)),
+        (
+            "if(!tu_wddm_device_requires_residency(device))returntrue;",
+            "tu_wddm_make_resident_bounded(",
+            "tu_wddm_device_note_paging_fence(device,paging_fence);",
+            "allocation->resident=true;",
+        ),
+        "MakeResident must be gated and record its paging fence before the allocation is usable",
+    )
+    require_order(
+        canonical(function_body("tu_wddm_allocation_create", wddm_source)),
+        ("dispatch.CreateAllocation(&create)", "if(!tu_wddm_allocation_make_resident(allocation)){"),
+        "every WDDM 2.0 allocation must be resident before creation returns",
+    )
+    require_order(
+        bo_destroy,
+        (
+            "tu_wddm_context_wait_submissions(allocation->context,TU_WDDM_DESTROY_WAIT_TIMEOUT_NS)",
+            "(void)tu_wddm_allocation_evict(allocation);",
+            "tu_wddm_destroy_allocation_handle(allocation->context,handle)",
+        ),
+        "a WDDM 2.0 allocation must be evicted before DestroyAllocation2",
+    )
+    require_order(
+        render,
+        (
+            "tu_wddm_device_execution_active(context->device)",
+            "if(!tu_wddm_device_wait_paging_fence(context->device))returnrejected(\"paging-fence\");",
+            "memset(packet,0,static_cast<size_t>(command_length))",
+            "runtime->dispatch.Render(&render)",
+        ),
+        "Render must wait for the WDDM 2.0 paging fence before submitting",
+    )
+
     print("Turnip WDDM pageable-memory and residency policy passed")
     return 0
 

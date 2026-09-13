@@ -54,6 +54,16 @@ struct tu_wddm_dispatch {
    PFND3DKMT_ESCAPE Escape;
    PFND3DKMT_RENDER Render;
    PFND3DKMT_GETDEVICESTATE GetDeviceState;
+
+   /* WDDM 2.0 residency thunks.  They are loaded when gdi32 exports them but
+    * are optional here: a WDDM 1.x adapter never calls them, so a missing
+    * export must not change its behaviour.  Device open rejects a WDDM 2.0
+    * adapter when any of them is absent. */
+   PFND3DKMT_CREATEPAGINGQUEUE CreatePagingQueue;
+   PFND3DKMT_DESTROYPAGINGQUEUE DestroyPagingQueue;
+   PFND3DKMT_MAKERESIDENT MakeResident;
+   PFND3DKMT_EVICT Evict;
+   PFND3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU WaitForSynchronizationObjectFromCpu;
 };
 
 /* Returns false if gdi32 or any required thunk is unavailable. */

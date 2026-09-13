@@ -10,7 +10,8 @@ import tempfile
 
 
 def definition(source, name):
-    match = re.search(r'(?:static\s+)?(?:bool|void|NTSTATUS|VkResult)\s+' + name + r'\([^;]*?\)\s*\{', source)
+    match = re.search(r'(?:static\s+)?(?:bool|void|NTSTATUS|VkResult|enum tu_wddm_residency_outcome)\s+' +
+                      name + r'\([^;]*?\)\s*\{', source)
     if not match:
         raise ValueError('Missing production function: ' + name)
     depth = 0
@@ -33,6 +34,8 @@ source = (here.parent / 'tu_knl_wddm.cc').read_text()
 header = (here.parent / 'tu_knl_wddm.h').read_text()
 names = ['tu_wddm_init_header', 'tu_wddm_header_is_current', 'tu_wddm_validate_context_info',
          'tu_wddm_allocation_desc_valid', 'tu_wddm_destroy_allocation_handle',
+         'tu_wddm_device_requires_residency', 'tu_wddm_device_note_paging_fence',
+         'tu_wddm_allocation_make_resident_attempt', 'tu_wddm_allocation_make_resident',
          'tu_wddm_allocation_create', 'tu_wddm_device_check_status',
          'tu_wddm_allocation_error', 'tu_wddm_remove_bo_locked', 'tu_wddm_bo_init']
 production = '\n\n'.join(definition(source, name) for name in names)
