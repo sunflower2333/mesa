@@ -2212,9 +2212,7 @@ Shader_tgsi_translate(const unsigned *code,
       case D3D10_SB_OPCODE_DCL_INDEXABLE_TEMP:
          {
             uint i;
-
-            /* XXX: Add true indexable temps to gallium.
-             */
+            struct ureg_dst array;
 
             assert(opcode.specific.dcl_indexable_temp.index <
                    SHADER_MAX_INDEXABLE_TEMPS);
@@ -2224,8 +2222,17 @@ Shader_tgsi_translate(const unsigned *code,
             sx->indexable_temp_offsets[opcode.specific.dcl_indexable_temp.index] =
                sx->declared_temps;
 
+            /* Indirect TGSI TEMP accesses require an array declaration.
+             * Scalar temporaries become independent NIR registers, so treating
+             * a DXBC x-register array as consecutive scalars drops its dynamic
+             * index in release builds (and asserts in debug builds). Keep the
+             * array identity on every element, including direct accesses.
+             */
+            array = ureg_DECL_array_temporary(
+               ureg, opcode.specific.dcl_indexable_temp.count, false);
             for (i = 0; i < opcode.specific.dcl_indexable_temp.count; i++) {
-               sx->temps[sx->declared_temps + i] = ureg_DECL_temporary(ureg);
+               sx->temps[sx->declared_temps + i] = array;
+               sx->temps[sx->declared_temps + i].Index += i;
             }
             sx->declared_temps += opcode.specific.dcl_indexable_temp.count;
          }
