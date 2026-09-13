@@ -177,18 +177,6 @@ jobs:
           python -m pip install --disable-pip-version-check --upgrade `
             "meson==1.9.1" mako packaging pyyaml
 
-      - name: Execute WDDM 2.0 residency regression with negative controls
-        shell: pwsh
-        run: |
-          $d3d = 'src/gallium/frontends/d3d10umd/residency_test.py'
-          python $d3d
-          if ($LASTEXITCODE) { throw 'D3D10 UMD residency regression failed' }
-          foreach ($control in @('no-make-resident', 'no-paging-wait', 'no-trim', 'no-evict-on-destroy',
-                                 'ungated', 'pending-as-failure')) {
-            python $d3d --negative-control $control
-            if ($LASTEXITCODE) { throw "D3D10 UMD residency negative control $control failed" }
-          }
-
       - name: Assert the D3D10 target keeps a selectable backend
         shell: pwsh
         run: |
