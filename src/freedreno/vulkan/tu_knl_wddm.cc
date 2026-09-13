@@ -2201,6 +2201,10 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
    uint64_t iova = 0;
+   const uint64_t iova_alignment =
+      (flags & TU_BO_ALLOC_BDA_64K) ? UINT64_C(65536) : os_page_size;
+   if (client_iova && (client_iova & (iova_alignment - 1)))
+      return vk_error(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS);
    mtx_lock(&dev->vma_mutex);
    if (client_iova != 0) {
       if (!util_vma_heap_alloc_addr(&dev->vma, client_iova, vma_size)) {
@@ -2209,7 +2213,7 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
       }
       iova = client_iova;
    } else {
-      iova = util_vma_heap_alloc(&dev->vma, vma_size, os_page_size);
+      iova = util_vma_heap_alloc(&dev->vma, vma_size, iova_alignment);
    }
    mtx_unlock(&dev->vma_mutex);
    if (iova == 0) {

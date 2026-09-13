@@ -458,6 +458,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .QCOM_multiview_per_view_viewports =
          device->info->props.has_per_view_viewport,
       .QCOM_render_pass_shader_resolve = true,
+      .VALVE_buffer_device_address_allocation_alignment = is_wddm(device->instance),
       .VALVE_fragment_density_map_layered = true,
       .VALVE_mutable_descriptor_type = true,
    } };
@@ -590,6 +591,7 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->timelineSemaphore                   = true;
    features->bufferDeviceAddress                 = true;
    features->bufferDeviceAddressCaptureReplay    = pdevice->has_set_iova;
+   features->bufferDeviceAddressAllocationAlignment = is_wddm(pdevice->instance);
    features->bufferDeviceAddressMultiDevice      = false;
    features->vulkanMemoryModel                   = true;
    features->vulkanMemoryModelDeviceScope        = true;
@@ -1678,6 +1680,11 @@ tu_get_properties(struct tu_physical_device *pdevice,
 
    /* VK_VALVE_fragment_density_map_layered */
    props->maxFragmentDensityMapLayers = MAX_VIEWS;
+
+   /* WDDM can reserve over-aligned guest IOVAs without increasing the KMT
+    * backing page alignment. Sparse and external memory remain unsupported. */
+   props->maxBufferDeviceAddressAllocationAlignment =
+      is_wddm(pdevice->instance) ? 65536 : 0;
 
    /* VK_QCOM_image_processing */
    props->maxWeightFilterPhases = 1024;
@@ -3862,6 +3869,38 @@ tu_memory_emit_report(struct tu_device *device,
                                 (uintptr_t)(mem), /* heap_index */ 0);
 }
 
+static VkResult
+tu_memory_bda_alignment(struct tu_device *device,
+                        const VkMemoryAllocateInfo *info,
+                        BITMASK_ENUM(tu_bo_alloc_flags) *alloc_flags)
+{
+   const VkBufferDeviceAddressAlignmentAllocateInfoVALVE *alignment_info =
+      vk_find_struct_const(info->pNext,
+                           BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE);
+   if (!alignment_info || !alignment_info->alignment)
+      return VK_SUCCESS;
+
+   const uint32_t alignment = alignment_info->alignment;
+   const VkMemoryAllocateFlagsInfo *flags_info =
+      vk_find_struct_const(info->pNext, MEMORY_ALLOCATE_FLAGS_INFO);
+   const VkMemoryOpaqueCaptureAddressAllocateInfo *replay_info =
+      vk_find_struct_const(info->pNext, MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO);
+   /* Nonzero alignment and a nonzero opaque capture address are mutually
+    * exclusive (VUID 12511). Replay omits alignment and retains the exact
+    * captured address, including that address's original alignment. */
+   if (!is_wddm(device->physical_device->instance) ||
+       !device->vk.enabled_features.bufferDeviceAddressAllocationAlignment ||
+       alignment > 65536 || (alignment & (alignment - 1)) ||
+       !flags_info || !(flags_info->flags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT))
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   if (replay_info && replay_info->opaqueCaptureAddress)
+      return VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS;
+
+   *alloc_flags |= TU_BO_ALLOC_BDA_64K;
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_AllocateMemory(VkDevice _device,
                   const VkMemoryAllocateInfo *pAllocateInfo,
@@ -3906,6 +3945,10 @@ tu_AllocateMemory(VkDevice _device,
 
    const VkImportMemoryFdInfoKHR *fd_info =
       vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
+
+   result = tu_memory_bda_alignment(device, pAllocateInfo, &alloc_flags);
+   if (result != VK_SUCCESS)
+      goto fail;
 
    if (fd_info && fd_info->handleType) {
       assert(fd_info->handleType ==

@@ -72,6 +72,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-rollback-status
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-alignment
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Execute compute shader conversion failure regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_compute_compile_failure_test.py
@@ -498,6 +500,10 @@ jobs:
             /Fe:tu_wddm_vulkan_compute_probe_arm64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
+            src/freedreno/vulkan/tests/tu_wddm_vulkan_alignment_probe.cpp `
+            /Fe:tu_wddm_vulkan_alignment_probe_arm64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
             src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp `
             /Fe:tu_wddm_vulkan_graphics_probe_arm64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -526,6 +532,7 @@ jobs:
           Write-Host 'ARM64 Vulkan runtime probe linked; it requires the app-local Turnip DLL at runtime.'
 
           foreach ($name in @('tu_wddm_kmt_probe_arm64.exe',
+                              'tu_wddm_vulkan_alignment_probe_arm64.exe',
                               'tu_wddm_vulkan_compute_probe_arm64.exe',
                               'tu_wddm_vulkan_graphics_probe_arm64.exe',
                               'tu_wddm_win32_probe_arm64.exe')) {
@@ -557,6 +564,7 @@ jobs:
           path: |
             tu_wddm_kmt_probe_arm64.exe
             tu_wddm_vulkan_probe_arm64.exe
+            tu_wddm_vulkan_alignment_probe_arm64.exe
           if-no-files-found: error
           retention-days: 7
 

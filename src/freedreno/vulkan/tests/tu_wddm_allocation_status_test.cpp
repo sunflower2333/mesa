@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include "vulkan/vulkan_core.h"
 #include "tu_wddm_abi.h"
+#include "util/vma.h"
 
 using NTSTATUS = int32_t;
 using D3DKMT_HANDLE = uint32_t;
@@ -47,10 +48,33 @@ struct tu_wddm_context {
 enum tu_bo_alloc_flags {
    TU_BO_ALLOC_DMABUF = 1, TU_BO_ALLOC_SHAREABLE = 2,
    TU_BO_ALLOC_IMPLICIT_SYNC = 4, TU_BO_ALLOC_GPU_READ_ONLY = 8,
+   TU_BO_ALLOC_BDA_64K = 128,
 };
 struct vk_object_base {};
 struct tu_sparse_vma {};
-struct vk_device { bool lost; int alloc; };
+struct vk_device {
+   bool lost;
+   int alloc;
+   struct { bool bufferDeviceAddressAllocationAlignment; } enabled_features;
+};
+struct tu_instance { bool wddm; };
+struct tu_physical_device { tu_instance *instance; };
+static bool is_wddm(tu_instance *instance) { return instance->wddm; }
+struct fixture_next {
+   const void *value;
+   template <typename T> operator const T *() const { return static_cast<const T *>(value); }
+};
+static fixture_next fixture_find(const void *chain, VkStructureType type) {
+   auto *next = static_cast<const VkBaseInStructure *>(chain);
+   while (next && next->sType != type) next = next->pNext;
+   return {next};
+}
+#define vk_find_struct_const(chain, type) fixture_find(chain, VK_STRUCTURE_TYPE_##type)
+#define BITMASK_ENUM(E) enum E
+static tu_bo_alloc_flags &operator|=(tu_bo_alloc_flags &a, tu_bo_alloc_flags b) {
+   a = static_cast<tu_bo_alloc_flags>(static_cast<unsigned>(a) | static_cast<unsigned>(b));
+   return a;
+}
 struct tu_bo {
    uint32_t gem_handle;
    uint64_t size, iova;
@@ -62,7 +86,9 @@ struct tu_bo {
 };
 struct tu_device {
    vk_device vk;
-   int vma_mutex, bo_mutex, vma;
+   int vma_mutex, bo_mutex;
+   util_vma_heap vma;
+   tu_physical_device *physical_device;
    tu_wddm_device wddm_device;
    tu_wddm_context wddm_context;
    bool wddm_initialized;
@@ -74,6 +100,7 @@ struct state {
    bool context_active, execution_active, lose_during_create, lose_during_health_query, local_alloc_fail;
    uint32_t create_calls, destroy_calls, sleeps, context_queries, execution_queries;
    uint32_t allocations, frees, vmas, vma_frees, names;
+   uint64_t requested_iova, backing_alignment;
    tu_bo slot;
 } current;
 static unsigned checks, failures;
@@ -102,9 +129,20 @@ static bool tu_wddm_device_execution_active(tu_wddm_device *) {
 }
 static void mtx_lock(int *mutex) { check((*mutex)++ == 0, "no recursive bookkeeping lock"); }
 static void mtx_unlock(int *mutex) { check(--(*mutex) == 0, "balanced bookkeeping lock"); }
-static uint64_t util_vma_heap_alloc(int *, uint64_t, uint64_t) { current.vmas++; return 0x100000000ull; }
-static bool util_vma_heap_alloc_addr(int *, uint64_t, uint64_t) { current.vmas++; return true; }
-static void util_vma_heap_free(int *, uint64_t, uint64_t) { current.vma_frees++; }
+static uint64_t fixture_vma_alloc(util_vma_heap *heap, uint64_t size, uint64_t alignment) {
+   uint64_t address = util_vma_heap_alloc(heap, size, alignment);
+   current.vmas += address != 0;
+   return address;
+}
+static bool fixture_vma_alloc_addr(util_vma_heap *heap, uint64_t address, uint64_t size) {
+   bool success = util_vma_heap_alloc_addr(heap, address, size);
+   current.vmas += success;
+   return success;
+}
+static void fixture_vma_free(util_vma_heap *heap, uint64_t address, uint64_t size) {
+   current.vma_frees++;
+   util_vma_heap_free(heap, address, size);
+}
 static void *vk_zalloc(int *, size_t size, size_t, int) {
    if (current.local_alloc_fail) return nullptr;
    current.allocations++; return calloc(1, size);
@@ -132,6 +170,9 @@ static NTSTATUS create_allocation(D3DKMT_CREATEALLOCATION *create) {
    check(create->Flags.NonSecure == 1 && create->NumAllocations == 1,
          "production create flags and count");
    create->pAllocationInfo->hAllocation = current.returned_handle;
+   const auto *info = static_cast<const VIOGPU_WDDM_ALLOCATION_INFO *>(create->pAllocationInfo->pPrivateDriverData);
+   current.requested_iova = info->RequestedIova;
+   current.backing_alignment = info->Alignment;
    if (current.lose_during_create) active_device->vk.lost = true;
    return static_cast<NTSTATUS>(current.create_status);
 }
@@ -142,10 +183,20 @@ static NTSTATUS destroy_allocation(D3DKMT_DESTROYALLOCATION2 *destroy) {
          "compensating destroy preserves VidMm ownership checks");
    return static_cast<NTSTATUS>(current.destroy_status);
 }
+#define util_vma_heap_alloc fixture_vma_alloc
+#define util_vma_heap_alloc_addr fixture_vma_alloc_addr
+#define util_vma_heap_free fixture_vma_free
 // PRODUCTION_FUNCTIONS
+#undef util_vma_heap_alloc
+#undef util_vma_heap_alloc_addr
+#undef util_vma_heap_free
 
 static tu_wddm_runtime runtime = {{create_allocation, destroy_allocation}};
+static tu_instance instance = {true};
+static tu_physical_device physical = {&instance};
+static bool vma_initialized;
 static void init(tu_device *dev, uint32_t status = 0) {
+   if (vma_initialized) util_vma_heap_finish(&dev->vma);
    memset(&current, 0, sizeof(current)); memset(dev, 0, sizeof(*dev));
    current.create_status = status; current.context_active = current.execution_active = true;
    dev->wddm_initialized = true;
@@ -158,6 +209,11 @@ static void init(tu_device *dev, uint32_t status = 0) {
    info.ExpectedResetGeneration = info.ResetGeneration = 7;
    info.ContextId = 11; info.SubmitQueueId = 17;
    info.VaStart = 0x100000000ull; info.VaSize = 0x01000000;
+   util_vma_heap_init(&dev->vma, info.VaStart, info.VaSize);
+   vma_initialized = true;
+   instance.wddm = true;
+   dev->physical_device = &physical;
+   dev->vk.enabled_features.bufferDeviceAddressAllocationAlignment = true;
    active_device = dev;
 }
 static VkResult allocate(tu_device *dev, tu_bo **bo) {
@@ -252,6 +308,80 @@ int main() {
    check(!tu_wddm_allocation_create(&dev.wddm_context, nullptr, &invalid) &&
          invalid.handle == 0 && invalid.last_create_status == 0xc000000du && current.create_calls == 0,
          "local descriptor rejection records invalid parameter not success");
+
+   VkMemoryOpaqueCaptureAddressAllocateInfo capture = {
+      VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO, nullptr, 0};
+   VkMemoryAllocateFlagsInfo flags = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+      &capture, VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT, 0};
+   VkBufferDeviceAddressAlignmentAllocateInfoVALVE alignment = {
+      VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE, &flags, 0};
+   VkMemoryAllocateInfo memory = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &alignment, 4096, 0};
+   for (uint32_t requested : {0u, 1u, 4096u, 8192u, 16384u, 32768u, 65536u}) {
+      for (uint64_t bytes : {4096ull, 12288ull, 69632ull}) {
+         init(&dev); current.returned_handle = 4;
+         alignment.alignment = requested;
+         auto alloc_flags = TU_BO_ALLOC_GPU_READ_ONLY;
+         check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_SUCCESS,
+               "valid allocation alignment request accepted");
+         /* Make the highest 64 KiB boundary unavailable. This uses Mesa's
+          * actual VMA allocator, so passing a flag without honoring it fails. */
+         check(util_vma_heap_alloc_addr(&dev.vma, 0x100ff0000ull, 4096),
+               "reserve fragmentation guard in actual VMA");
+         uint64_t free_before = dev.vma.free_size;
+         check(tu_wddm_bo_init(&dev, nullptr, &bo, bytes, 0, 0, alloc_flags,
+                              nullptr, "alignment") == VK_SUCCESS && bo,
+               "production allocation succeeds with fragmented actual VMA");
+         if (bo) {
+            check(!requested || !(bo->iova % requested),
+                  "requested buffer address alignment is honored by actual VMA");
+            check(requested || bo->iova % 65536,
+                  "zero request preserves existing page-aligned allocation behavior");
+            check(current.requested_iova == bo->iova && current.backing_alignment == 4096 &&
+                  dev.vma.free_size == free_before - bytes && bo->gpu_read_only,
+                  "overalignment preserves exact backing size alignment flags and RequestedIova");
+            util_vma_heap_free(&dev.vma, bo->iova, bytes);
+            free(bo->wddm_allocation);
+         }
+      }
+   }
+   for (uint32_t requested : {3u, 4097u, 65537u, 131072u, 0xffffffffu}) {
+      init(&dev); alignment.alignment = requested;
+      auto alloc_flags = TU_BO_ALLOC_GPU_READ_ONLY;
+      check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_ERROR_FEATURE_NOT_PRESENT &&
+            alloc_flags == TU_BO_ALLOC_GPU_READ_ONLY && !current.create_calls && !current.vmas,
+            "invalid power of two or over-limit alignment rejects before ownership changes");
+   }
+   init(&dev); alignment.alignment = 65536;
+   auto alloc_flags = TU_BO_ALLOC_GPU_READ_ONLY;
+   instance.wddm = false;
+   check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_ERROR_FEATURE_NOT_PRESENT,
+         "unimplemented non-WDDM backend never accepts alignment promise");
+   instance.wddm = true; dev.vk.enabled_features.bufferDeviceAddressAllocationAlignment = false;
+   check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_ERROR_FEATURE_NOT_PRESENT,
+         "disabled feature rejects nonzero alignment");
+   dev.vk.enabled_features.bufferDeviceAddressAllocationAlignment = true; flags.flags = 0;
+   check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_ERROR_FEATURE_NOT_PRESENT,
+         "nonzero alignment requires device address allocation flag");
+   flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT; capture.opaqueCaptureAddress = 0x100001000ull;
+   check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+         "alignment request cannot silently override explicit capture address");
+   alignment.alignment = 0; current.returned_handle = 4;
+   check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_SUCCESS &&
+         tu_wddm_bo_init(&dev, nullptr, &bo, 4096, capture.opaqueCaptureAddress, 0,
+                        alloc_flags, nullptr, "capture") == VK_SUCCESS &&
+         bo->iova == capture.opaqueCaptureAddress,
+         "zero request retains exact page-aligned capture replay address");
+   if (bo) free(bo->wddm_allocation);
+   init(&dev, 0xc0000017u); alignment.alignment = 65536; capture.opaqueCaptureAddress = 0;
+   alloc_flags = TU_BO_ALLOC_GPU_READ_ONLY;
+   uint64_t free_before = dev.vma.free_size;
+   check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_SUCCESS &&
+         tu_wddm_bo_init(&dev, nullptr, &bo, 4096, 0, 0, alloc_flags, nullptr, "rollback") ==
+            VK_ERROR_OUT_OF_DEVICE_MEMORY && dev.vma.free_size == free_before,
+         "aligned allocation failure restores exact VMA reservation");
+   no_owner(&dev, bo);
+   util_vma_heap_finish(&dev.vma);
+   vma_initialized = false;
    printf("%s production WDDM allocation classification and rollback: %u checks, %u failures\n",
           failures ? "FAIL" : "PASS", checks, failures);
    return failures ? 1 : 0;
