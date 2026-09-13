@@ -35,7 +35,8 @@ names = ['tu_wddm_init_header', 'tu_wddm_header_is_current', 'tu_wddm_validate_c
          'tu_wddm_allocation_desc_valid', 'tu_wddm_destroy_allocation_handle',
          'tu_wddm_shared_allocation', 'tu_wddm_allocation_import',
          'tu_wddm_allocation_create', 'tu_wddm_device_check_status',
-         'tu_wddm_allocation_error', 'tu_wddm_remove_bo_locked', 'tu_wddm_bo_shared', 'tu_wddm_bo_init']
+         'tu_wddm_allocation_error', 'tu_wddm_remove_bo_locked', 'tu_wddm_bo_shared', 'tu_wddm_bo_init',
+         'tu_wddm_device_finish']
 production = definition(header, 'tu_wddm_shared_context') + '\n\n'
 production += '\n\n'.join(definition(source, name) for name in names)
 production += '\n\n' + definition((here.parent / 'tu_device.cc').read_text(), 'tu_memory_bda_alignment')

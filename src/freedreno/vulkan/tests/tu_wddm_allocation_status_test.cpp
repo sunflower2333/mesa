@@ -38,13 +38,14 @@ struct tu_wddm_runtime {
 struct tu_wddm_device {
    void *runtime_owner;
    mwd_callbacks callbacks;
-   struct { tu_wddm_runtime *runtime; VIOGPU_WDDM_ADAPTER_INFO private_info; } adapter;
+   struct { tu_wddm_runtime *runtime; VIOGPU_WDDM_ADAPTER_INFO private_info; D3DKMT_HANDLE handle; } adapter;
    D3DKMT_HANDLE handle;
 };
 struct tu_wddm_context {
    tu_wddm_device *device;
    D3DKMT_HANDLE handle;
    VIOGPU_WDDM_CONTEXT_INFO info;
+   uint32_t last_submitted_fence, last_destroy_status, destroy_attempt_count;
 };
 // PRODUCTION_STRUCTS
 
@@ -85,6 +86,7 @@ struct tu_bo {
    int refcnt;
    bool gpu_read_only;
    bool never_unmap;
+   void *map;
    vk_object_base *base;
    tu_wddm_allocation *wddm_allocation;
 };
@@ -98,7 +100,9 @@ struct tu_device {
    bool wddm_initialized;
    void *wddm_runtime_owner;
    uint32_t wddm_bo_count;
-   tu_bo *wddm_bos[1];
+   uint32_t wddm_bo_capacity;
+   bool wddm_teardown_failed;
+   tu_bo **wddm_bos;
 };
 struct state {
    uint32_t create_status, destroy_status, returned_handle;
@@ -114,12 +118,14 @@ struct state {
 } current;
 static unsigned checks, failures;
 static tu_device *active_device;
+static tu_bo *fixture_bos[1];
 static void check(bool value, const char *label) {
    checks++;
    if (!value) { failures++; printf("FAIL %s\n", label); }
 }
 template <typename T> static uint32_t tu_wddm_sizeof() { return sizeof(T); }
 static void tu_wddm_diag(const char *, ...) {}
+static void mesa_loge(const char *, ...) {}
 static bool tu_wddm_diag_enabled() { return false; }
 static void Sleep(uint32_t) { current.sleeps++; }
 static bool vk_device_is_lost(vk_device *device) { return device->lost; }
@@ -159,7 +165,10 @@ static void *vk_zalloc(int *, size_t size, size_t, int) {
    if (current.local_alloc_fail) return nullptr;
    current.allocations++; return calloc(1, size);
 }
-static void vk_free(int *, void *memory) { current.frees++; free(memory); }
+static void vk_free(int *, void *memory) {
+   if (memory == fixture_bos) return;
+   current.frees++; free(memory);
+}
 static uint32_t tu_wddm_alloc_token_locked(tu_device *) { return 1; }
 static tu_bo *tu_device_lookup_bo(tu_device *, uint32_t) { return &current.slot; }
 static bool tu_wddm_add_bo_locked(tu_device *dev, tu_bo *bo) {
@@ -167,6 +176,19 @@ static bool tu_wddm_add_bo_locked(tu_device *dev, tu_bo *bo) {
 }
 static const char *tu_debug_bos_add(tu_device *, uint64_t, const char *name) { current.names++; return name; }
 static void tu_dump_bo_init(tu_device *, tu_bo *) {}
+static void tu_bo_release_heap_accounting(tu_device *, tu_bo *) {}
+static void tu_debug_bos_del(tu_device *, tu_bo *) {}
+static void tu_dump_bo_del(tu_device *, tu_bo *) {}
+static bool tu_wddm_context_wait_submissions(tu_wddm_context *, uint64_t) { return true; }
+static bool tu_wddm_context_close(tu_wddm_context *) { return true; }
+static bool tu_wddm_device_close(tu_wddm_device *) { return true; }
+static bool tu_wddm_allocation_unlock(tu_wddm_allocation *) { return true; }
+static bool tu_wddm_allocation_destroy(tu_wddm_allocation *allocation) {
+   check(allocation->runtime_token == &current && current.shared_refs == 1,
+         "device teardown reaches exact retained runtime token even without usable KMT handle");
+   auto *device = allocation->context->device;
+   return device->callbacks.release(device->runtime_owner, allocation->runtime_token) >= 0;
+}
 using BOOL = int;
 struct MEMORYSTATUSEX {
    uint32_t dwLength;
@@ -230,6 +252,7 @@ static void init(tu_device *dev, uint32_t status = 0) {
    memset(&current, 0, sizeof(current)); memset(dev, 0, sizeof(*dev));
    current.create_status = status; current.context_active = current.execution_active = true;
    dev->wddm_initialized = true;
+   dev->wddm_bos = fixture_bos;
    dev->wddm_device.adapter.runtime = &runtime;
    dev->wddm_device.handle = 2; dev->wddm_device.adapter.private_info.ResetGeneration = 7;
    dev->wddm_context.device = &dev->wddm_device; dev->wddm_context.handle = 3;
@@ -460,9 +483,17 @@ int main() {
          current.slot.wddm_allocation && current.slot.wddm_allocation->runtime_token == &current &&
          current.frees == 0 && current.vmas == 0 && current.names == 0,
          "failed runtime rollback preserves exact token and BO cleanup owner without publishing usable memory");
+   check(current.slot.wddm_allocation->handle == 0,
+         "malformed reply rollback has a token but no valid allocation handle");
+   tu_wddm_device_finish(&dev);
+   check(dev.wddm_teardown_failed && dev.wddm_bo_count == 1 &&
+         current.shared_refs == 1 && current.frees == 0,
+         "failed final release retains the token graph for retry");
    current.shared_release_status = 0;
-   runtime_release(&current, current.slot.wddm_allocation->runtime_token);
-   free(current.slot.wddm_allocation);
+   tu_wddm_device_finish(&dev);
+   check(!dev.wddm_initialized && !dev.wddm_teardown_failed && !dev.wddm_bo_count &&
+         !dev.wddm_bos && !current.shared_refs && current.frees == 1 && !current.vma_frees,
+         "final teardown releases zero-handle runtime token without touching private VMA");
    util_vma_heap_finish(&dev.vma);
    vma_initialized = false;
    printf("%s production WDDM allocation classification and rollback: %u checks, %u failures\n",

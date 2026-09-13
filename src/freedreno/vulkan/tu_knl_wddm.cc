@@ -2253,7 +2253,7 @@ tu_wddm_device_finish(struct tu_device *dev)
          return;
       }
       bo->map = NULL;
-      if (allocation->handle != 0 &&
+      if ((allocation->handle != 0 || allocation->runtime_token != NULL) &&
           !tu_wddm_allocation_destroy(allocation)) {
          tu_wddm_diag("device_finish failed destroying allocation=%u status=0x%08x",
                       static_cast<unsigned>(allocation->handle),
