@@ -769,6 +769,7 @@ static void test_concurrent_paging_fence_bookkeeping()
 
 int main()
 {
+   (void)TU_WDDM_FENCE_HALF_RANGE; /* extracted with the MSM layout block */
    test_wddm1_issues_no_residency_calls();
    test_wddm2_residency_lifecycle();
    test_pending_waits_for_paging_fence();
