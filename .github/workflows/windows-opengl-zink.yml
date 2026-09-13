@@ -26,6 +26,10 @@ jobs:
           if ($LASTEXITCODE) { throw 'Render reference validation failed' }
           python src/freedreno/vulkan/tests/tu_compute_compile_failure_test.py
           if ($LASTEXITCODE) { throw 'Compute conversion failure regression failed' }
+          python src/freedreno/vulkan/tests/tu_wddm_residency_test.py
+          if ($LASTEXITCODE) { throw 'Turnip WDDM 2.0 residency regression failed' }
+          python src/freedreno/vulkan/tests/check_tu_wddm_policy.py
+          if ($LASTEXITCODE) { throw 'Turnip WDDM residency policy failed' }
   candidate:
     needs: source-regressions
     runs-on: windows-2025-vs2026

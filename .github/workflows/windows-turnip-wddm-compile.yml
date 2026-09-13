@@ -11,6 +11,9 @@ on:
       - "src/freedreno/vulkan/tu_wddm_dispatch.cc"
       - "src/freedreno/vulkan/tu_knl_wddm.h"
       - "src/freedreno/vulkan/tu_knl_wddm.cc"
+      - "src/freedreno/vulkan/tu_wddm_residency.h"
+      - "src/freedreno/vulkan/tests/tu_wddm_residency_test.py"
+      - "src/freedreno/vulkan/tests/tu_wddm_residency_test.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_abi_layout.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_abi_manifest.cpp"
       - "src/freedreno/vulkan/tests/tu_wddm_abi_manifest_entries.h"
@@ -90,6 +93,25 @@ jobs:
       - name: Execute command stream pooling and range ownership regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_cs_pool_test.py
+      - name: Execute WDDM 2.0 residency regressions with negative controls
+        shell: pwsh
+        run: |
+          $turnip = 'src/freedreno/vulkan/tests/tu_wddm_residency_test.py'
+          python $turnip
+          if ($LASTEXITCODE) { throw 'Turnip WDDM residency regression failed' }
+          foreach ($control in @('no-make-resident', 'no-paging-wait', 'no-evict', 'ungated',
+                                 'pending-as-resident', 'unbounded-retry')) {
+            python $turnip --negative-control $control
+            if ($LASTEXITCODE) { throw "Turnip residency negative control $control failed" }
+          }
+          $d3d = 'src/gallium/frontends/d3d10umd/residency_test.py'
+          python $d3d
+          if ($LASTEXITCODE) { throw 'D3D10 UMD residency regression failed' }
+          foreach ($control in @('no-make-resident', 'no-paging-wait', 'no-trim', 'no-evict-on-destroy',
+                                 'ungated', 'pending-as-failure')) {
+            python $d3d --negative-control $control
+            if ($LASTEXITCODE) { throw "D3D10 UMD residency negative control $control failed" }
+          }
 
   compile:
     name: ARM64 SDK/WDK compile
