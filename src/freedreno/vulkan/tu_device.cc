@@ -9,6 +9,7 @@
 
 #include "tu_device.h"
 #include "tu_wddm_startup_perf.h"
+#include <errno.h>
 
 #if DETECT_OS_WINDOWS
 #include <io.h>
@@ -220,6 +221,18 @@ is_wddm(struct tu_instance *instance)
 #endif
 }
 
+static bool
+tu_has_calibrated_timestamps(const struct tu_physical_device *device)
+{
+   if (!device->info->props.has_persistent_counter)
+      return false;
+#ifdef TU_HAS_WDDM
+   if (is_wddm(device->instance))
+      return device->wddm_has_gpu_timestamp;
+#endif
+   return true;
+}
+
 static bool tu_has_multiview(const struct tu_physical_device *device)
 {
    return device->info->props.has_hw_multiview || TU_DEBUG(NOCONFORM);
@@ -251,8 +264,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_acceleration_structure = has_raytracing,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
-      .KHR_calibrated_timestamps = device->info->props.has_persistent_counter &&
-                                   !is_wddm(device->instance),
+      .KHR_calibrated_timestamps = tu_has_calibrated_timestamps(device),
       .KHR_compute_shader_derivatives = true,
       .KHR_copy_commands2 = true,
       // TODO workaround for https://github.com/KhronosGroup/VK-GL-CTS/issues/525
@@ -349,8 +361,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_attachment_feedback_loop_layout = true,
       .EXT_border_color_swizzle = true,
-      .EXT_calibrated_timestamps = device->info->props.has_persistent_counter &&
-                                   !is_wddm(device->instance),
+      .EXT_calibrated_timestamps = tu_has_calibrated_timestamps(device),
       .EXT_color_write_enable = true,
       .EXT_conditional_rendering = true,
       .EXT_conservative_rasterization = device->info->chip >= 7,
@@ -2878,6 +2889,12 @@ tu_device_get_timestamp(struct vk_device *vk_device, uint64_t *timestamp)
 {
    struct tu_device *dev = container_of(vk_device, struct tu_device, vk);
    const int ret = tu_device_get_gpu_timestamp(dev, timestamp);
+   if (ret == -ENODEV)
+      return VK_ERROR_DEVICE_LOST;
+   if (ret == -ENOMEM)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   if (ret == -ENOSYS)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
    return ret == 0 ? VK_SUCCESS : VK_ERROR_UNKNOWN;
 }
 

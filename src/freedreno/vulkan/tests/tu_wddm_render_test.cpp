@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <initializer_list>
 
 namespace {
 
@@ -393,6 +394,8 @@ struct test_fixture {
    VIOGPU_WDDM_ALLOCATION_INFO created_private_info;
    NTSTATUS render_status;
    NTSTATUS context_info_status;
+   NTSTATUS timestamp_status;
+   unsigned timestamp_corruption;
    NTSTATUS escape_status;
    NTSTATUS get_device_state_status;
    NTSTATUS create_allocation_status;
@@ -842,6 +845,35 @@ fake_escape(const D3DKMT_ESCAPE *escape)
       return kStatusSuccess;
    }
 
+   if (escape->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_TIMESTAMP_INFO)) {
+      auto *info = static_cast<VIOGPU_WDDM_TIMESTAMP_INFO *>(escape->pPrivateDriverData);
+      CHECK(info->Header.Size == 80);
+      CHECK(info->Opcode == VIOGPU_WDDM_ESCAPE_GET_GPU_TIMESTAMP);
+      CHECK(info->ExpectedResetGeneration == kResetGeneration);
+      CHECK(info->GpuTimestamp == 0 && info->ResetGeneration == 0 && info->ContextId == 0);
+      CHECK(info->TimestampFrequency == 0 && info->TimestampValidBits == 0);
+      CHECK(info->Reserved[0] == 0 && info->Reserved[1] == 0);
+      if (fixture->timestamp_status != 0)
+         return fixture->timestamp_status;
+      info->GpuTimestamp = UINT64_C(0x123456789ab);
+      info->ResetGeneration = kResetGeneration;
+      info->ContextId = kContextId;
+      info->TimestampFrequency = 19200000;
+      info->TimestampValidBits = 48;
+      switch (fixture->timestamp_corruption) {
+      case 1: info->ResetGeneration++; break;
+      case 2: info->ContextId++; break;
+      case 3: info->TimestampFrequency = 1000000000; break;
+      case 4: info->TimestampValidBits = 64; break;
+      case 5: info->GpuTimestamp = 1ULL << 48; break;
+      case 6: info->Reserved[0] = 1; break;
+      case 7: info->Header.Size--; break;
+      case 8: info->Opcode--; break;
+      case 9: info->ExpectedResetGeneration++; break;
+      }
+      return kStatusSuccess;
+   }
+
    CHECK(escape->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_FENCE_INFO));
    if (escape->PrivateDriverDataSize != sizeof(VIOGPU_WDDM_FENCE_INFO))
       return kStatusInvalidParameter;
@@ -958,6 +990,31 @@ init_fixture(test_fixture *fixture)
    fixture->context.info.ResetGeneration = kResetGeneration;
    fixture->context.info.ContextId = kContextId;
    fixture->context.info.SubmitQueueId = kSubmitQueueId;
+}
+
+void
+test_gpu_timestamp()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   uint64_t ticks = 0;
+   CHECK(tu_wddm_context_get_gpu_timestamp(&fixture.context, &ticks) == 0);
+   CHECK(ticks == UINT64_C(0x123456789ab));
+   for (uint32_t status : {0xc00000bbu, 0xc000009au, 0xc00000a3u, 0x00000102u}) {
+      fixture.timestamp_status = static_cast<NTSTATUS>(status);
+      ticks = 99;
+      CHECK(tu_wddm_context_get_gpu_timestamp(&fixture.context, &ticks) == status);
+      CHECK(ticks == 0);
+   }
+   fixture.timestamp_status = 0;
+   for (unsigned bad = 1; bad <= 9; bad++) {
+      fixture.timestamp_corruption = bad;
+      ticks = 99;
+      CHECK(tu_wddm_context_get_gpu_timestamp(&fixture.context, &ticks) != 0);
+      CHECK(ticks == 0);
+   }
+   CHECK(tu_wddm_context_get_gpu_timestamp(nullptr, &ticks) != 0);
+   CHECK(tu_wddm_context_get_gpu_timestamp(&fixture.context, nullptr) != 0);
 }
 
 void
@@ -2031,6 +2088,7 @@ main()
    test_device_luid_contract();
    test_kmt_adapter_enumeration();
    test_device_execution_state();
+   test_gpu_timestamp();
    test_context_buffer_contract_and_failed_destroy_retention();
    test_context_info_failure_cleanup_retry();
    test_context_close_retries_transient_busy();

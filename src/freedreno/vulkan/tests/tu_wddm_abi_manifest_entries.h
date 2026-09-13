@@ -89,6 +89,19 @@ ABI_OFFSET(offset.fence_info.reset_generation, VIOGPU_WDDM_FENCE_INFO, ResetGene
 ABI_OFFSET(offset.fence_info.context_id, VIOGPU_WDDM_FENCE_INFO, ContextId, 48);
 ABI_OFFSET(offset.fence_info.reserved, VIOGPU_WDDM_FENCE_INFO, Reserved, 52);
 
+ABI_VALUE(escape.opcode.get_gpu_timestamp, VIOGPU_WDDM_ESCAPE_GET_GPU_TIMESTAMP, 4);
+ABI_SIZE(size.timestamp_info, VIOGPU_WDDM_TIMESTAMP_INFO, 80);
+ABI_OFFSET(offset.timestamp_info.header, VIOGPU_WDDM_TIMESTAMP_INFO, Header, 0);
+ABI_OFFSET(offset.timestamp_info.opcode, VIOGPU_WDDM_TIMESTAMP_INFO, Opcode, 16);
+ABI_OFFSET(offset.timestamp_info.flags, VIOGPU_WDDM_TIMESTAMP_INFO, Flags, 20);
+ABI_OFFSET(offset.timestamp_info.expected_reset_generation, VIOGPU_WDDM_TIMESTAMP_INFO, ExpectedResetGeneration, 24);
+ABI_OFFSET(offset.timestamp_info.gpu_timestamp, VIOGPU_WDDM_TIMESTAMP_INFO, GpuTimestamp, 32);
+ABI_OFFSET(offset.timestamp_info.reset_generation, VIOGPU_WDDM_TIMESTAMP_INFO, ResetGeneration, 40);
+ABI_OFFSET(offset.timestamp_info.context_id, VIOGPU_WDDM_TIMESTAMP_INFO, ContextId, 48);
+ABI_OFFSET(offset.timestamp_info.valid_bits, VIOGPU_WDDM_TIMESTAMP_INFO, TimestampValidBits, 52);
+ABI_OFFSET(offset.timestamp_info.frequency, VIOGPU_WDDM_TIMESTAMP_INFO, TimestampFrequency, 56);
+ABI_OFFSET(offset.timestamp_info.reserved, VIOGPU_WDDM_TIMESTAMP_INFO, Reserved, 64);
+
 ABI_SIZE(size.render_command, VIOGPU_WDDM_RENDER_COMMAND, 64);
 ABI_OFFSET(offset.render_command.header, VIOGPU_WDDM_RENDER_COMMAND, Header, 0);
 ABI_OFFSET(offset.render_command.opcode, VIOGPU_WDDM_RENDER_COMMAND, Opcode, 16);

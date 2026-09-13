@@ -775,6 +775,44 @@ tu_wddm_context_get_info(struct tu_wddm_context *context)
    return true;
 }
 
+uint32_t
+tu_wddm_context_get_gpu_timestamp(struct tu_wddm_context *context, uint64_t *ticks)
+{
+   constexpr uint32_t invalid = 0xc000000d; /* STATUS_INVALID_PARAMETER */
+   constexpr uint32_t mismatch = 0xc01e0009; /* STATUS_GRAPHICS_DRIVER_MISMATCH */
+   if (ticks)
+      *ticks = 0;
+   if (!ticks || !context || !context->device || !context->handle ||
+       !context->device->adapter.runtime || !context->info.ContextId ||
+       !tu_wddm_validate_context_info(&context->info,
+                                      context->device->adapter.private_info.ResetGeneration))
+      return invalid;
+   VIOGPU_WDDM_TIMESTAMP_INFO request = {};
+   tu_wddm_init_header(&request.Header, sizeof(request));
+   request.Opcode = VIOGPU_WDDM_ESCAPE_GET_GPU_TIMESTAMP;
+   request.ExpectedResetGeneration = context->info.ResetGeneration;
+   D3DKMT_ESCAPE escape = {};
+   escape.hAdapter = context->device->adapter.handle;
+   escape.hDevice = context->device->handle;
+   escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+   escape.pPrivateDriverData = &request;
+   escape.PrivateDriverDataSize = sizeof(request);
+   escape.hContext = context->handle;
+   uint32_t status = context->device->adapter.runtime->dispatch.Escape(&escape);
+   if (status != 0)
+      return status;
+   if (!tu_wddm_header_is_current(&request.Header, sizeof(request)) ||
+       request.Opcode != VIOGPU_WDDM_ESCAPE_GET_GPU_TIMESTAMP || request.Flags != 0 ||
+       request.ExpectedResetGeneration != context->info.ResetGeneration ||
+       request.ResetGeneration != context->info.ResetGeneration ||
+       request.ContextId != context->info.ContextId || request.TimestampValidBits != 48 ||
+       request.TimestampFrequency != 19200000 || request.GpuTimestamp >= (1ULL << 48) ||
+       request.Reserved[0] != 0 || request.Reserved[1] != 0)
+      return mismatch;
+   *ticks = request.GpuTimestamp;
+   return 0;
+}
+
 bool
 tu_wddm_context_get_completed_fence(struct tu_wddm_context *context,
                                     uint32_t *completed_fence)
@@ -2080,10 +2118,19 @@ tu_wddm_device_finish(struct tu_device *dev)
 static int
 tu_wddm_device_get_gpu_timestamp(struct tu_device *dev, uint64_t *ts)
 {
-   (void)dev;
-   if (ts != NULL)
+   if (ts)
       *ts = 0;
-   return -ENOSYS;
+   if (!dev || !ts || !dev->wddm_initialized)
+      return -EINVAL;
+   if (!dev->physical_device->wddm_has_gpu_timestamp)
+      return -ENOSYS;
+   uint32_t status = tu_wddm_context_get_gpu_timestamp(&dev->wddm_context, ts);
+   if (status == 0)
+      return 0;
+   if (status == 0xc000009a) /* STATUS_INSUFFICIENT_RESOURCES */
+      return -ENOMEM;
+   vk_device_set_lost(&dev->vk, "WDDM GPU timestamp read failed: 0x%08x", status);
+   return -ENODEV;
 }
 
 static int
@@ -3125,9 +3172,16 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
    bool opened_context = tu_wddm_context_open(probe_device, probe_context);
    uint64_t va_start = 0;
    uint64_t va_size = 0;
+   bool has_gpu_timestamp = false;
    if (opened_context) {
       va_start = probe_context->info.VaStart;
       va_size = probe_context->info.VaSize;
+      uint64_t first = 0, second = 0;
+      has_gpu_timestamp =
+         tu_wddm_context_get_gpu_timestamp(probe_context, &first) == 0 &&
+         tu_wddm_context_get_gpu_timestamp(probe_context, &second) == 0 &&
+         first != 0 && ((second - first) & ((1ULL << 48) - 1)) != 0 &&
+         ((second - first) & ((1ULL << 48) - 1)) < (1ULL << 47);
    }
    if (!tu_wddm_probe_cleanup(state->instance)) {
       state->result = VK_ERROR_DEVICE_LOST;
@@ -3150,6 +3204,7 @@ tu_wddm_probe_adapter(const struct tu_wddm_adapter_info *identity, void *data)
    device->master_fd = -1;
    device->kgsl_dma_fd = -1;
    device->wddm_adapter = *identity;
+   device->wddm_has_gpu_timestamp = has_gpu_timestamp;
    device->msm_major_version = (int)identity->private_info.MsmMajorVersion;
    device->msm_minor_version = (int)identity->private_info.MsmMinorVersion;
    device->dev_id.gpu_id = identity->private_info.GpuId;

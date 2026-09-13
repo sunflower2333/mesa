@@ -22,6 +22,7 @@
  */
 
 #include "vk_device.h"
+#include "vk_calibrated_time.h"
 
 #include "vk_alloc.h"
 #include "vk_common_entrypoints.h"
@@ -863,7 +864,7 @@ vk_device_get_timestamp(struct vk_device *device, VkTimeDomainKHR domain,
 #if DETECT_OS_WINDOWS
    if (domain == VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR) {
       LARGE_INTEGER ts;
-      if (QueryPerformanceCounter(&ts)) {
+      if (QueryPerformanceCounter(&ts) && ts.QuadPart >= 0) {
          *timestamp = ts.QuadPart;
          return VK_SUCCESS;
       }
@@ -915,6 +916,8 @@ vk_common_GetCalibratedTimestampsKHR(
    /* collect timestamps as tight as possible */
    result =
       vk_device_get_timestamp(device, device->calibrate_time_domain, &begin);
+   if (result != VK_SUCCESS)
+      return result;
    for (uint32_t i = 0; i < timestampCount; i++) {
       VkTimeDomainKHR domain = pTimestampInfos[i].timeDomain;
       if (domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT) {
@@ -924,14 +927,17 @@ vk_common_GetCalibratedTimestampsKHR(
       }
       if (domain == device->calibrate_time_domain)
          pTimestamps[i] = begin;
-      else
-         result |= vk_device_get_timestamp(device, domain, &pTimestamps[i]);
+      else {
+         result = vk_device_get_timestamp(device, domain, &pTimestamps[i]);
+         if (result != VK_SUCCESS)
+            return result;
+      }
    }
-   result |=
+   result =
       vk_device_get_timestamp(device, device->calibrate_time_domain, &end);
 
    if (result != VK_SUCCESS)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+      return result;
 
    uint64_t max_clock_period = 0;
    for (uint32_t i = 0; i < timestampCount; i++) {
@@ -960,7 +966,19 @@ vk_common_GetCalibratedTimestampsKHR(
       max_clock_period = MAX2(max_clock_period, period);
    }
 
-   *pMaxDeviation = vk_time_max_deviation(begin, end, max_clock_period);
+   uint64_t interval_frequency = NSEC_PER_SEC;
+#if DETECT_OS_WINDOWS
+   if (device->calibrate_time_domain == VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR) {
+      LARGE_INTEGER frequency;
+      if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      interval_frequency = frequency.QuadPart;
+   }
+#endif
+   /* QPC outputs remain raw ticks. Only the sampling interval is converted
+    * to nanoseconds, as required by pMaxDeviation. */
+   *pMaxDeviation = vk_time_calibrated_deviation(begin, end, interval_frequency,
+                                                max_clock_period);
 
    return VK_SUCCESS;
 }

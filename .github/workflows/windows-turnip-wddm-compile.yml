@@ -51,6 +51,13 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      - name: Execute calibrated timestamp unit conversion regression
+        shell: pwsh
+        run: |
+          cl /nologo /std:c11 /W4 /WX src/vulkan/runtime/tests/calibrated_time_test.c /Fe:calibrated-time.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./calibrated-time.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Execute production substream failure paths
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_cs_failure_test.py
@@ -504,6 +511,10 @@ jobs:
             /Fe:tu_wddm_vulkan_alignment_probe_arm64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
+            src/freedreno/vulkan/tests/tu_wddm_vulkan_timestamp_probe.cpp `
+            /Fe:tu_wddm_vulkan_timestamp_probe_arm64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cl /nologo /std:c++17 /W4 /WX /EHsc /MT /I include `
             src/freedreno/vulkan/tests/tu_wddm_vulkan_graphics_probe.cpp `
             /Fe:tu_wddm_vulkan_graphics_probe_arm64.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -565,6 +576,7 @@ jobs:
             tu_wddm_kmt_probe_arm64.exe
             tu_wddm_vulkan_probe_arm64.exe
             tu_wddm_vulkan_alignment_probe_arm64.exe
+            tu_wddm_vulkan_timestamp_probe_arm64.exe
           if-no-files-found: error
           retention-days: 7
 

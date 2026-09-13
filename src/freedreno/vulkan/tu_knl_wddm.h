@@ -177,6 +177,9 @@ bool tu_wddm_device_close(struct tu_wddm_device *device);
 bool tu_wddm_context_open(struct tu_wddm_device *device,
                           struct tu_wddm_context *context);
 bool tu_wddm_context_get_info(struct tu_wddm_context *context);
+/* Returns exact NTSTATUS; zero is the only successful completed read. */
+uint32_t tu_wddm_context_get_gpu_timestamp(struct tu_wddm_context *context,
+                                          uint64_t *ticks);
 bool tu_wddm_context_get_completed_fence(struct tu_wddm_context *context,
                                          uint32_t *completed_fence);
 bool tu_wddm_context_wait_fence(struct tu_wddm_context *context,

@@ -203,6 +203,7 @@ struct tu_physical_device
     * private ABI is validated during enumeration and compared again when a
     * device is opened. */
    struct tu_wddm_adapter_info wddm_adapter;
+   bool wddm_has_gpu_timestamp;
 #endif
 
    struct vk_sync_type syncobj_type;
