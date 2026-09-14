@@ -1,0 +1,100 @@
+name: DroidVM OpenGL Zink Turnip ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/droidvm-gpu-20260914]
+    paths:
+      - 'src/gallium/drivers/zink/**'
+      - 'src/gallium/frontends/wgl/**'
+      - 'src/gallium/targets/wgl/**'
+      - 'src/gallium/targets/libgl-gdi/**'
+      - 'src/freedreno/**'
+      - 'meson.build'
+      - 'meson.options'
+      - '.github/workflows/windows-zink-turnip-opengl-arm64.yml'
+  pull_request:
+    paths:
+      - 'src/gallium/drivers/zink/**'
+      - '.github/workflows/windows-zink-turnip-opengl-arm64.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: droidvm-opengl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cache-and-package:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Predicate, exact-failure negative control and package fixtures
+        shell: bash
+        run: |
+          python src/gallium/drivers/zink/tests/droidvm/run_cache_test.py
+          python src/gallium/drivers/zink/tests/droidvm/run_cache_test.py --negative-control
+          python -m unittest discover -s src/gallium/drivers/zink/tests/droidvm -p 'test_*.py' -v
+
+  opengl-arm64:
+    needs: cache-and-package
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64_arm64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install host build generators
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check 'meson==1.9.1' mako packaging pyyaml ninja
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Get-Command win_flex.exe -ErrorAction SilentlyContinue)) {
+            choco install winflexbison3 --yes --no-progress
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Locate host shader compiler
+        shell: pwsh
+        run: |
+          $shader = Get-ChildItem -Path 'C:\VulkanSDK' -Filter glslangValidator.exe -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Directory.Name -eq 'Bin' } | Select-Object -First 1
+          if (-not $shader -and -not (Get-Command glslangValidator.exe -ErrorAction SilentlyContinue)) {
+            $version = '1.4.304.0'
+            $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk.exe'
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
+            $process = Start-Process -FilePath $installer -ArgumentList '--am --al -c in' -Wait -PassThru
+            if ($process.ExitCode) { throw "Host Vulkan SDK installation failed: $($process.ExitCode)" }
+          }
+      - name: Build, check and stage same-revision WGL Zink and Turnip
+        shell: pwsh
+        run: ./src/gallium/drivers/zink/tests/droidvm/build-arm64.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: droidvm-opengl-zink-turnip-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/droidvm-opengl-arm64/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: droidvm-opengl-build-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/droidvm-zink-turnip-arm64/meson-logs/*
+          retention-days: 7
