@@ -440,9 +440,20 @@ tu_wddm_device_execution_active(struct tu_wddm_device *device)
           state.ExecutionState == D3DKMT_DEVICEEXECUTION_ACTIVE;
 }
 
+/* Preserve Turnip's client hint while allowing native OpenGL contexts. */
 bool
 tu_wddm_context_open(struct tu_wddm_device *device,
                      struct tu_wddm_context *context)
+{
+   return tu_wddm_context_open_with_hint(device, context, D3DKMT_CLIENTHINT_VULKAN);
+}
+
+/* The hint is OS metadata; it does not introduce a graphics API dependency. */
+bool
+tu_wddm_context_open_with_hint(
+   struct tu_wddm_device *device,
+   struct tu_wddm_context *context,
+   D3DKMT_CLIENTHINT client_hint)
 {
    if (device == NULL || context == NULL || device->adapter.runtime == NULL ||
        device->handle == 0 || device->adapter.private_info.ResetGeneration == 0)
@@ -461,7 +472,7 @@ tu_wddm_context_open(struct tu_wddm_device *device,
    create.EngineAffinity = 1;
    create.pPrivateDriverData = &private_data;
    create.PrivateDriverDataSize = tu_wddm_sizeof<VIOGPU_WDDM_CONTEXT_CREATE>();
-   create.ClientHint = D3DKMT_CLIENTHINT_VULKAN;
+   create.ClientHint = client_hint;
 
    NTSTATUS status = device->adapter.runtime->dispatch.CreateContext(&create);
    if (!NT_SUCCESS(status) || create.hContext == 0 ||

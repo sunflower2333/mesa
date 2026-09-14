@@ -27,11 +27,11 @@ Push-Location -LiteralPath $destination
 try {
     $common = @('/nologo', '/W4', '/WX', '/MT', "/I$root", '/D_WIN32_WINNT=0x0A00',
                 '/DNTDDI_VERSION=0x0A00000C')
-    & cl @common /std:c++17 /EHsc /c "$root/freedreno_wddm.cc" "$root/tu_wddm_dispatch.cc"
+    & cl @common /std:c++17 /EHsc /c "$root/freedreno_wddm.cc" "$root/tu_wddm_dispatch.cc" "$root/freedreno_wddm_native.cc"
     Check-Exit 'native transport C++ compile'
     & cl @common /std:c11 /c "$root/freedreno_wddm_submit.c"
     Check-Exit 'native packet C compile'
-    & lib /nologo /out:freedreno_wddm.lib freedreno_wddm.obj tu_wddm_dispatch.obj freedreno_wddm_submit.obj
+    & lib /nologo /out:freedreno_wddm.lib freedreno_wddm.obj tu_wddm_dispatch.obj freedreno_wddm_submit.obj freedreno_wddm_native.obj
     Check-Exit 'native static library'
     & cl @common /std:c++17 /EHsc "$PSScriptRoot/native_link_test.cpp" freedreno_wddm.lib /Fe:native_link_test.exe
     Check-Exit 'Vulkan-free native link'
@@ -40,8 +40,13 @@ try {
     # Existing fixture injects dispatch functions itself; do not link real dispatch here.
     & cl @common /std:c++17 /EHsc "$legacyTests/tu_wddm_render_test.cpp" freedreno_wddm.obj /Fe:transport_test.exe
     Check-Exit 'existing fake-dispatch fixture link'
+    & cl @common /std:c++17 /EHsc "$PSScriptRoot/native_owner_test.cpp" freedreno_wddm.obj freedreno_wddm_native.obj freedreno_wddm_submit.obj /Fe:native_owner_test.exe
+    Check-Exit 'native owner fake-dispatch link'
+    & cl @common /std:c11 "$PSScriptRoot/timeline_test.c" /Fe:timeline_test.exe
+    Check-Exit 'native timeline compile'
+
     $expectedMachine = if ($Architecture -eq 'arm64') { 'AA64' } else { '8664' }
-    foreach ($name in @('native_link_test.exe', 'packet_test.exe', 'transport_test.exe')) {
+    foreach ($name in @('native_link_test.exe', 'packet_test.exe', 'transport_test.exe', 'native_owner_test.exe', 'timeline_test.exe')) {
         $headers = (& dumpbin /nologo /headers $name 2>&1 | Out-String)
         Check-Exit "PE check $name"
         if ($headers -notmatch "(?i)\b$expectedMachine machine") { throw "Wrong architecture: $name" }
@@ -59,6 +64,10 @@ try {
         Check-Exit 'native packet test execution'
         & .\transport_test.exe
         Check-Exit 'fake-dispatch test execution'
+        & .\native_owner_test.exe
+        Check-Exit 'native owner test execution'
+        & .\timeline_test.exe
+        Check-Exit 'native timeline test execution'
     }
     Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination README.md
     Write-Host 'Built native KMT transport only; this is not an OpenGL DLL or GPU acceptance result.'

@@ -174,6 +174,11 @@ bool tu_wddm_device_close(struct tu_wddm_device *device);
 
 bool tu_wddm_context_open(struct tu_wddm_device *device,
                           struct tu_wddm_context *context);
+/* Create an API-specific OS context without linking that graphics API. */
+bool tu_wddm_context_open_with_hint(
+   struct tu_wddm_device *device,
+   struct tu_wddm_context *context,
+   D3DKMT_CLIENTHINT client_hint);
 bool tu_wddm_context_get_info(struct tu_wddm_context *context);
 bool tu_wddm_context_get_completed_fence(struct tu_wddm_context *context,
                                          uint32_t *completed_fence);
