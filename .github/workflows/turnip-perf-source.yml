@@ -1,0 +1,45 @@
+name: Turnip performance source provenance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/droidvm-gpu-20260914]
+    paths:
+      - 'src/freedreno/**'
+      - '.github/workflows/turnip-perf-source.yml'
+  pull_request:
+    paths:
+      - 'src/freedreno/**'
+      - '.github/workflows/turnip-perf-source.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: turnip-perf-source-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve exact tracked source and blob identities
+        run: |
+          git rev-parse HEAD > turnip-perf-revision.txt
+          git ls-tree -r HEAD > turnip-perf-tree.txt
+          git archive --format=zip --output=turnip-perf-source.zip HEAD
+          sha256sum turnip-perf-source.zip > turnip-perf-source.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turnip-perf-source-${{ github.sha }}
+          path: |
+            turnip-perf-source.zip
+            turnip-perf-revision.txt
+            turnip-perf-tree.txt
+            turnip-perf-source.sha256
+          retention-days: 7
+          if-no-files-found: error
