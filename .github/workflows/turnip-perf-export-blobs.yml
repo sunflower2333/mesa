@@ -1,0 +1,81 @@
+name: Export verified Turnip source blobs once
+
+on:
+  push:
+    branches: [perf/droidvm-gpu-20260914]
+    paths: ['.github/workflows/turnip-perf-export-blobs.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    if: github.repository == 'sunflower2333/mesa' && github.ref == 'refs/heads/perf/droidvm-gpu-20260914'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Verify exact source and export non-workflow content blobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import ast, base64, hashlib, json, os, pathlib, subprocess, textwrap, urllib.request, zlib
+          assert os.environ['GITHUB_REPOSITORY'] == 'sunflower2333/mesa'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/perf/droidvm-gpu-20260914'
+          head = os.environ['GITHUB_SHA']
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == head
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == '51bf361f24ec988b3bd4f1fe81d8e20d62d6ee21'
+          source = pathlib.Path('.github/workflows/turnip-perf-materialize.yml').read_text()
+          code = textwrap.dedent(source.split("python3 - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
+          values = {}
+          for node in ast.parse(code).body:
+              if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                  if node.targets[0].id in ('manifest', 'encoded'):
+                      values[node.targets[0].id] = ast.literal_eval(node.value)
+          patch = pathlib.Path(os.environ['RUNNER_TEMP']) / 'turnip-verified.patch'
+          patch.write_bytes(zlib.decompress(base64.b64decode(values['encoded'], validate=True)))
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          # Validate original tested bytes before the narrowly scoped Clang fixture correction.
+          def blob_sha(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          for item in values['manifest']:
+              assert blob_sha(pathlib.Path(item['path']).read_bytes()) == item['sha'], item['path']
+          fixture = pathlib.Path('src/freedreno/vulkan/tests/lifetime-perf/lifetime_test.cpp')
+          old = fixture.read_text()
+          assert old.count('// INSERT_RECORDS') == 1
+          fixture.write_text(old.replace('// INSERT_RECORDS', '// INSERT_RECORDS\nstatic_assert(TU_WDDM_FENCE_HALF_RANGE == (UINT64_C(1) << 31), "production fence serial-number bound");'))
+          assert blob_sha(fixture.read_bytes()) == '15a4c9096e21d043d185324661c2137abb59d40e'
+          with open('turnip-source-tests.txt', 'w', encoding='utf-8') as log:
+              root = 'src/freedreno/vulkan/tests/'
+              commands = [['python3', root + 'check_tu_wddm_policy.py'], ['python3', root + 'lifetime-perf/run.py']]
+              commands += [['python3', root + 'lifetime-perf/run.py', '--negative-control', reason] for reason in ('fence', 'busy', 'residency', 'scratch')]
+              for command in commands:
+                  subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
+          results = []
+          for item in values['manifest']:
+              data = pathlib.Path(item['path']).read_bytes()
+              sha = blob_sha(data)
+              if not item['path'].startswith('.github/'):
+                  body = json.dumps(dict(content=base64.b64encode(data).decode(), encoding='base64')).encode()
+                  request = urllib.request.Request('https://api.github.com/repos/sunflower2333/mesa/git/blobs', data=body,
+                      headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'})
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      result = json.load(response)
+                  assert result['sha'] == sha
+              results.append(dict(path=item['path'], mode=item['mode'], type='blob', sha=sha, uploaded=not item['path'].startswith('.github/')))
+          pathlib.Path('turnip-source-blobs.json').write_text(json.dumps(dict(parent=head, expected_tree='8d79633524ac2cfaebf695b4cb52fe818375a2e1', files=results, refs_changed=False), indent=2) + '\n')
+          print('Verified and exported source blobs; no trees, commits, workflows or refs changed by Actions.')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turnip-source-blobs-${{ github.sha }}
+          path: |
+            turnip-source-blobs.json
+            turnip-source-tests.txt
+          retention-days: 7
+          if-no-files-found: error
