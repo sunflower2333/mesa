@@ -7,6 +7,8 @@ on:
       - wip/windows-turnip-wddm
       - perf/droidvm-gpu-20260914
     paths:
+      - "src/freedreno/wddm/**"
+      - "src/freedreno/meson.build"
       - "src/freedreno/vulkan/tu_wddm_abi.h"
       - "src/freedreno/vulkan/tu_wddm_dispatch.h"
       - "src/freedreno/vulkan/tu_wddm_dispatch.cc"
@@ -72,8 +74,8 @@ jobs:
           cl /nologo /std:c++17 /W4 /WX /EHsc /c
           /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C
           /I src\freedreno\vulkan
-          src\freedreno\vulkan\tu_wddm_dispatch.cc
-          src\freedreno\vulkan\tu_knl_wddm.cc
+          src\freedreno\wddm\tu_wddm_dispatch.cc
+          src\freedreno\wddm\freedreno_wddm.cc
           src\freedreno\vulkan\tests\tu_wddm_render_test.cpp
           src\freedreno\vulkan\tests\tu_wddm_kmt_probe.cpp
           src\freedreno\vulkan\tests\tu_wddm_transport_compile.cpp
@@ -84,7 +86,7 @@ jobs:
           cl /nologo /std:c++17 /W4 /WX /EHsc
           /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C
           /I src\freedreno\vulkan
-          src\freedreno\vulkan\tu_knl_wddm.cc
+          src\freedreno\wddm\freedreno_wddm.cc
           src\freedreno\vulkan\tests\tu_wddm_render_test.cpp
           /Fe:tu_wddm_render_test_arm64.exe
 
@@ -413,8 +415,8 @@ jobs:
           cl /nologo /std:c++17 /W4 /WX /EHsc
           /MT
           /I src\freedreno\vulkan
-          src\freedreno\vulkan\tu_wddm_dispatch.cc
-          src\freedreno\vulkan\tu_knl_wddm.cc
+          src\freedreno\wddm\tu_wddm_dispatch.cc
+          src\freedreno\wddm\freedreno_wddm.cc
           src\freedreno\vulkan\tests\tu_wddm_kmt_probe.cpp
           /Fe:tu_wddm_kmt_probe_arm64.exe
 

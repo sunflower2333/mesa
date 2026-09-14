@@ -1,0 +1,98 @@
+name: Freedreno native WDDM foundation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/droidvm-gpu-20260914]
+    paths:
+      - 'src/freedreno/wddm/**'
+      - 'src/freedreno/meson.build'
+      - 'src/freedreno/vulkan/meson.build'
+      - 'src/freedreno/vulkan/tu_knl_wddm.*'
+      - 'src/freedreno/vulkan/tests/**'
+      - '.github/workflows/windows-freedreno-native-wddm.yml'
+  pull_request:
+    paths:
+      - 'src/freedreno/wddm/**'
+      - 'src/freedreno/vulkan/tu_knl_wddm.*'
+      - '.github/workflows/windows-freedreno-native-wddm.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freedreno-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-packet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Dependency direction and production packet tests
+        run: |
+          python3 src/freedreno/wddm/tests/check_native_split.py
+          python3 src/freedreno/wddm/tests/run_packet.py
+          python3 src/freedreno/wddm/tests/run_packet.py --negative-control capacity
+          python3 src/freedreno/wddm/tests/run_packet.py --negative-control iova
+          CC=clang python3 src/freedreno/wddm/tests/run_packet.py
+          python3 src/freedreno/vulkan/tests/check_tu_wddm_policy.py
+          python3 src/freedreno/vulkan/tests/lifetime-perf/run.py
+          for mutation in fence busy residency scratch; do
+            python3 src/freedreno/vulkan/tests/lifetime-perf/run.py --negative-control "$mutation"
+          done
+
+  native-windows:
+    needs: native-packet
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: x64
+            architecture: x64
+          - compiler: x64_arm64
+            architecture: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.compiler }}
+      - name: Compile/link shared backend without Vulkan or Gallium
+        shell: pwsh
+        run: |
+          $arguments = @{
+            Output = Join-Path $env:RUNNER_TEMP 'freedreno-native'
+            Architecture = '${{ matrix.architecture }}'
+            RunTests = ('${{ matrix.architecture }}' -eq 'x64')
+          }
+          & ./src/freedreno/wddm/tests/build-native.ps1 @arguments
+      - name: Record revision and validation boundary
+        shell: pwsh
+        run: |
+          $receipt = @{
+            schema = 1
+            mesa_commit = '${{ github.sha }}'
+            architecture = '${{ matrix.architecture }}'
+            artifact_kind = 'native-wddm-transport-foundation'
+            gallium_opengl_implemented = $false
+            gpu_test_executed = $false
+            fake_dispatch_tests_executed = ('${{ matrix.architecture }}' -eq 'x64')
+          }
+          $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'freedreno-native/receipt.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freedreno-native-foundation-${{ matrix.architecture }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/freedreno-native/freedreno_wddm.lib
+            ${{ runner.temp }}/freedreno-native/*_test.exe
+            ${{ runner.temp }}/freedreno-native/README.md
+            ${{ runner.temp }}/freedreno-native/receipt.json
+          if-no-files-found: error
+          retention-days: 7

@@ -49,10 +49,17 @@ def main() -> int:
     device_source = (VULKAN_DIR / "tu_device.cc").read_text(encoding="utf-8")
     device_header = (VULKAN_DIR / "tu_device.h").read_text(encoding="utf-8")
     knl_header = (VULKAN_DIR / "tu_knl.h").read_text(encoding="utf-8")
-    wddm_source = (VULKAN_DIR / "tu_knl_wddm.cc").read_text(encoding="utf-8")
-    wddm_header = (VULKAN_DIR / "tu_knl_wddm.h").read_text(encoding="utf-8")
-    dispatch_source = (VULKAN_DIR / "tu_wddm_dispatch.cc").read_text(encoding="utf-8")
-    dispatch_header = (VULKAN_DIR / "tu_wddm_dispatch.h").read_text(encoding="utf-8")
+    shared_dir = VULKAN_DIR.parent / "wddm"
+    wddm_source = "\n".join(path.read_text(encoding="utf-8") for path in (
+        shared_dir / "freedreno_wddm_private.h",
+        shared_dir / "freedreno_wddm_packet.h",
+        shared_dir / "freedreno_wddm.cc",
+        VULKAN_DIR / "tu_knl_wddm.cc",
+    ))
+    wddm_header = (shared_dir / "freedreno_wddm.h").read_text(encoding="utf-8")
+    wddm_header += (shared_dir / "freedreno_wddm_packet.h").read_text(encoding="utf-8")
+    dispatch_source = (shared_dir / "tu_wddm_dispatch.cc").read_text(encoding="utf-8")
+    dispatch_header = (shared_dir / "tu_wddm_dispatch.h").read_text(encoding="utf-8")
     transport_fixture = (TEST_DIR / "tu_wddm_transport_compile.cpp").read_text(encoding="utf-8")
     render_fixture_source = (TEST_DIR / "tu_wddm_render_test.cpp").read_text(encoding="utf-8")
     kmt_probe_source = (TEST_DIR / "tu_wddm_kmt_probe.cpp").read_text(encoding="utf-8")

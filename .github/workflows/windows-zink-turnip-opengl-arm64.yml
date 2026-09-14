@@ -1,22 +1,9 @@
-name: DroidVM OpenGL Zink Turnip ARM64
+name: DroidVM OpenGL Zink Turnip ARM64 fallback (manual)
 
+# Native Freedreno Gallium is the development priority. Keep this route
+# available explicitly, without automatically rebuilding it for native changes.
 on:
   workflow_dispatch:
-  push:
-    branches: [perf/droidvm-gpu-20260914]
-    paths:
-      - 'src/gallium/drivers/zink/**'
-      - 'src/gallium/frontends/wgl/**'
-      - 'src/gallium/targets/wgl/**'
-      - 'src/gallium/targets/libgl-gdi/**'
-      - 'src/freedreno/**'
-      - 'meson.build'
-      - 'meson.options'
-      - '.github/workflows/windows-zink-turnip-opengl-arm64.yml'
-  pull_request:
-    paths:
-      - 'src/gallium/drivers/zink/**'
-      - '.github/workflows/windows-zink-turnip-opengl-arm64.yml'
 
 permissions:
   contents: read

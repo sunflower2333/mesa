@@ -51,16 +51,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--negative-control', choices=('fence', 'busy', 'residency', 'scratch'))
     args = parser.parse_args()
-    source = (VULKAN / 'tu_knl_wddm.cc').read_text(encoding='utf-8')
-    header = (VULKAN / 'tu_knl_wddm.h').read_text(encoding='utf-8')
+    shared = VULKAN.parent / 'wddm'
+    source = (shared / 'freedreno_wddm.cc').read_text(encoding='utf-8')
+    source += (VULKAN / 'tu_knl_wddm.cc').read_text(encoding='utf-8')
+    header = (shared / 'freedreno_wddm.h').read_text(encoding='utf-8')
     records = '\n'.join(extract(header, f'struct {name} {{') + ';' for name in (
         'tu_wddm_allocation', 'tu_wddm_render_reference'))
-    records += '\n' + source[source.index('enum : uint32_t {'):source.index('/* Native-context fences')]
+    private = (shared / 'freedreno_wddm_private.h').read_text(encoding='utf-8')
+    fence_bound = [line for line in private.splitlines()
+                   if line.startswith('static constexpr uint64_t TU_WDDM_FENCE_HALF_RANGE =')]
+    if len(fence_bound) != 1:
+        raise ValueError('Expected one production fence serial bound')
+    records += '\n' + fence_bound[0]
     for name in ('tu_wddm_submit_entry', 'tu_wddm_submit_reference', 'tu_wddm_submit_scratch', 'tu_wddm_submit'):
         records += '\n' + extract(source, f'struct {name} {{') + ';'
     functions = (
         'static NTSTATUS\ntu_wddm_destroy_allocation_handle(',
-        'static NTSTATUS\ntu_wddm_allocation_try_destroy(',
+        'NTSTATUS\ntu_wddm_allocation_try_destroy(',
         'static inline bool\ntu_wddm_bo_valid(',
         'static inline bool\ntu_wddm_bo_valid_for_device(',
         'static void\ntu_wddm_remove_bo_locked(',
@@ -94,6 +101,14 @@ def main():
                    ['c++', '-std=c++20', '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-no-pie',
                     '-I', str(VULKAN), str(unit), '-o', str(exe)])
+        packet_object = temp / ('packet.obj' if msvc else 'packet.o')
+        c_command = (['cl', '/nologo', '/std:c11', '/W4', '/WX', '/c',
+                      str(shared / 'freedreno_wddm_submit.c'), '/Fo:' + str(packet_object)] if msvc else
+                     ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                      '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-pie',
+                      '-c', str(shared / 'freedreno_wddm_submit.c'), '-o', str(packet_object)])
+        subprocess.run(c_command, cwd=temp, check=True, timeout=120)
+        command.append(str(packet_object))
         subprocess.run(command, cwd=temp, check=True, timeout=120)
         result = subprocess.run([str(exe)], cwd=temp, text=True, capture_output=True, timeout=60)
         output = result.stdout + result.stderr

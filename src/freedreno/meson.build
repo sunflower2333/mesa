@@ -49,6 +49,10 @@ if with_tools.contains('drm-shim')
   subdir('drm-shim')
 endif
 
+if freedreno_kmds.contains('wddm')
+  subdir('wddm')
+endif
+
 if with_freedreno_vk
   subdir('vulkan')
 endif

@@ -15,6 +15,7 @@
 #include <set>
 #include <vector>
 #include "tu_wddm_lifetime.h"
+#include "../wddm/freedreno_wddm_submit.h"
 
 using NTSTATUS = int32_t;
 using D3DKMT_HANDLE = uint32_t;
@@ -25,8 +26,6 @@ constexpr NTSTATUS TU_WDDM_STATUS_SUCCESS = 0;
 constexpr NTSTATUS TU_WDDM_STATUS_DEVICE_BUSY = static_cast<NTSTATUS>(0x80000011U);
 constexpr NTSTATUS TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY = static_cast<NTSTATUS>(0xc01e0102U);
 constexpr uint64_t TU_WDDM_DESTROY_WAIT_TIMEOUT_NS = 250000000;
-constexpr uint32_t TU_WDDM_MAX_RENDER_ALLOCATIONS = 1024;
-constexpr uint32_t TU_WDDM_MAX_RENDER_COMMAND_SIZE = 64 * 1024;
 constexpr uint32_t TU_WDDM_MAX_SUBMIT_REFERENCES = 1024;
 constexpr uint32_t TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE = 2048;
 constexpr int VK_SYSTEM_ALLOCATION_SCOPE_DEVICE = 0;

@@ -155,7 +155,8 @@ endif
 
 if freedreno_kmds.contains('wddm')
   tu_flags += '-DTU_HAS_WDDM'
-  libtu_files += files('tu_wddm_dispatch.cc', 'tu_knl_wddm.cc')
+  libtu_files += files('tu_knl_wddm.cc')
+  tu_link_with += libfreedreno_wddm
 endif
 
 tu_build_id = get_option('tu-build-id')
