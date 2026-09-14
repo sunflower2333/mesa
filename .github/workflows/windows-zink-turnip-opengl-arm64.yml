@@ -70,18 +70,34 @@ jobs:
             choco install winflexbison3 --yes --no-progress
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
-      - name: Locate host shader compiler
+      - name: Prepare checksum-pinned host shader compiler
+        timeout-minutes: 4
         shell: pwsh
         run: |
-          $shader = Get-ChildItem -Path 'C:\VulkanSDK' -Filter glslangValidator.exe -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Directory.Name -eq 'Bin' } | Select-Object -First 1
-          if (-not $shader -and -not (Get-Command glslangValidator.exe -ErrorAction SilentlyContinue)) {
-            $version = '1.4.304.0'
-            $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk.exe'
-            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
-            $process = Start-Process -FilePath $installer -ArgumentList '--am --al -c in' -Wait -PassThru
-            if ($process.ExitCode) { throw "Host Vulkan SDK installation failed: $($process.ExitCode)" }
+          $ErrorActionPreference = 'Stop'
+          $version = '16.6.0'
+          $digest = '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b'
+          $archive = Join-Path $env:RUNNER_TEMP 'glslang-host.zip'
+          $directory = Join-Path $env:RUNNER_TEMP 'glslang-host'
+          $url = "https://github.com/KhronosGroup/glslang/releases/download/$version/glslang-$version-windows-x86_64-release.zip"
+          curl.exe --fail --location --retry 2 --connect-timeout 20 --max-time 120 --output $archive $url
+          if ($LASTEXITCODE) { throw 'Host glslang download failed' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) {
+            throw 'Host glslang archive checksum mismatch'
           }
+          Expand-Archive -LiteralPath $archive -DestinationPath $directory
+          $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslangValidator.exe)
+          if ($programs.Count -eq 0) {
+            $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslang.exe)
+            if ($programs.Count -ne 1) { throw 'Expected one glslang command-line program' }
+            # Mesa still uses the historical executable name; the binary is unchanged.
+            Copy-Item -LiteralPath $programs[0].FullName -Destination (Join-Path $programs[0].DirectoryName 'glslangValidator.exe')
+            $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslangValidator.exe)
+          }
+          if ($programs.Count -ne 1) { throw 'Expected one host glslangValidator.exe' }
+          & $programs[0].FullName --version
+          if ($LASTEXITCODE) { throw 'Host shader compiler cannot execute' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $programs[0].DirectoryName
       - name: Build, check and stage same-revision WGL Zink and Turnip
         shell: pwsh
         run: ./src/gallium/drivers/zink/tests/droidvm/build-arm64.ps1
