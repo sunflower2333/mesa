@@ -1,0 +1,76 @@
+name: Validate native Freedreno ownership implementation
+on:
+  push:
+    branches: [work/freedreno-native-backend-stage-20260914]
+permissions:
+  contents: read
+jobs:
+  packet-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify reviewed source files
+        run: python3 .github/native-backend/stage.py
+      - name: Execute packet, timeline and existing lifetime tests
+        run: |
+          python3 src/freedreno/wddm/tests/check_native_split.py
+          python3 src/freedreno/wddm/tests/run_packet.py
+          python3 src/freedreno/vulkan/tests/check_tu_wddm_policy.py
+          python3 src/freedreno/vulkan/tests/lifetime-perf/run.py
+          for compiler in cc clang; do
+            "$compiler" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-pie -no-pie -I src/freedreno/wddm src/freedreno/wddm/tests/timeline_test.c -o "$RUNNER_TEMP/timeline"
+            "$RUNNER_TEMP/timeline"
+          done
+      - name: Publish verified content-addressed blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/native-backend/stage.py --publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-backend-source-receipt
+          path: native-backend-receipt.json
+          if-no-files-found: error
+  native-windows:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: x64
+            architecture: x64
+          - compiler: x64_arm64
+            architecture: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.compiler }}
+      - name: Verify reviewed source files
+        run: python .github/native-backend/stage.py
+      - name: Build actual native owner and run fake-OS tests on x64
+        shell: pwsh
+        run: |
+          $arguments = @{
+            Output = Join-Path $env:RUNNER_TEMP 'native-backend'
+            Architecture = '${{ matrix.architecture }}'
+            RunTests = ('${{ matrix.architecture }}' -eq 'x64')
+          }
+          & ./src/freedreno/wddm/tests/build-native.ps1 @arguments
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-backend-${{ matrix.architecture }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/native-backend/freedreno_wddm.lib
+            ${{ runner.temp }}/native-backend/*_test.exe
+            native-backend-receipt.json
+          if-no-files-found: error
