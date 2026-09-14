@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--publish', action='store_true')
     args = parser.parse_args()
     plan = json.loads(Path('.github/native-backend/plan.json').read_bytes())
+    fixes = json.loads(Path('.github/native-backend/fixes.json').read_bytes())
     if plan['base'] != BASE or os.environ['GITHUB_REPOSITORY'] != 'sunflower2333/mesa':
         raise RuntimeError('Wrong baseline or repository')
     sources = [source_bytes(p, s).decode('utf-8').splitlines(keepends=True)
@@ -59,7 +60,18 @@ def main():
             data = ''.join(pieces).encode('utf-8')
         if hashlib.sha256(data).hexdigest() != file['sha256']:
             raise RuntimeError('Review hash mismatch: ' + path)
+        if path in fixes:
+            text = data.decode('utf-8')
+            for old, new in fixes[path]['replacements']:
+                if text.count(old) != 1:
+                    raise RuntimeError('Correction anchor drift: ' + path)
+                text = text.replace(old, new)
+            data = text.encode('utf-8')
+            if hashlib.sha256(data).hexdigest() != fixes[path]['sha256']:
+                raise RuntimeError('Correction hash mismatch: ' + path)
         outputs[path] = data
+    if set(fixes) - set(outputs):
+        raise RuntimeError('Correction path was not reviewed')
     for path, data in outputs.items():
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(data)

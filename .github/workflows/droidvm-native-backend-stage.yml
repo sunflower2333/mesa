@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 32
           persist-credentials: false
       - name: Verify reviewed source files
         run: python3 .github/native-backend/stage.py
@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 32
           persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@v1
         with:
