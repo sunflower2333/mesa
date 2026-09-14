@@ -1,0 +1,28 @@
+name: Stage verified native foundation objects
+on:
+  push:
+    branches: [work/freedreno-native-import-20260914]
+    paths:
+      - '.github/native-import/**'
+      - '.github/workflows/droidvm-native-import.yml'
+permissions:
+  contents: write
+jobs:
+  stage:
+    if: github.repository == 'sunflower2333/mesa'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Reconstruct exact delivered files, run tests, create detached tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/native-import/import.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-foundation-import-receipt
+          path: native-import-receipt.json
+          if-no-files-found: error
