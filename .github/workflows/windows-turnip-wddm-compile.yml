@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - wip/windows-turnip-wddm
+      - perf/droidvm-gpu-20260914
     paths:
       - "src/freedreno/vulkan/tu_wddm_abi.h"
       - "src/freedreno/vulkan/tu_wddm_dispatch.h"

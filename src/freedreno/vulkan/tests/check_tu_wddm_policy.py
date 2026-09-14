@@ -390,6 +390,37 @@ def main() -> int:
             f"{function_name} must release heap usage only after KMT destruction succeeds",
         )
 
+    deferred = canonical(function_body("tu_wddm_reap_retired_bos_locked", wddm_source))
+    require_order(
+        deferred,
+        ("tu_wddm_retirement_observe(&allocation->retirement,completed)",
+         "tu_wddm_allocation_try_destroy(allocation)",
+         "if(status!=TU_WDDM_STATUS_SUCCESS)",
+         "tu_bo_release_heap_accounting(dev,bo);",
+         "util_vma_heap_free(&dev->vma,iova,size);"),
+        "deferred retirement must not release accounting or IOVA before KMT accepts destroy",
+    )
+    if "Sleep(" in deferred or "wait_submissions(" in deferred or "wait_fence(" in deferred:
+        fail("opportunistic BO retirement must not spin, sleep or drain the context")
+    one_shot = canonical(function_body("tu_wddm_allocation_try_destroy", wddm_source))
+    require_order(
+        one_shot,
+        ("tu_wddm_destroy_allocation_handle(allocation->context,allocation->handle)",
+         "if(status==TU_WDDM_STATUS_SUCCESS)", "free(allocation->metadata);",
+         "memset(allocation,0,sizeof(*allocation));"),
+        "one-shot destroy must retain all metadata for any nonzero status",
+    )
+    valid_bo = canonical(function_body("tu_wddm_bo_valid_for_device", wddm_source))
+    if "!bo->wddm_allocation->retirement.pending" not in valid_bo:
+        fail("retired owners must never re-enter Render residency or CPU mappings")
+    if 'debug_get_bool_option("TU_WDDM_DEFERRED_BO_DESTROY",false)' not in wddm:
+        fail("unvalidated deferred BO destruction must remain opt-in")
+    staging = canonical(function_body("tu_wddm_submit_render", wddm_source))
+    if "vk_free(" in staging or "vk_zalloc(" in staging:
+        fail("Render must retain its bounded device-owned scratch between submissions")
+    if "if(device->wddm_submit_scratch==NULL)" not in staging:
+        fail("submit scratch must be allocated lazily per device")
+
     print("Turnip WDDM pageable-memory and residency policy passed")
     return 0
 

@@ -108,6 +108,7 @@ tu_wddm_diag(const char *format, ...)
 #include <errno.h>
 
 #include "util/os_time.h"
+#include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "vk_sync_dummy.h"
 #include "vk_sync_timeline.h"
@@ -1044,6 +1045,31 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
    return true;
 }
 
+#ifdef TU_HAS_WDDM
+/* Attempt destruction once; retain every field on any non-success status.
+ * The caller supplies retirement evidence and owns any retry scheduling. */
+static NTSTATUS
+tu_wddm_allocation_try_destroy(struct tu_wddm_allocation *allocation)
+{
+   if (allocation == NULL || allocation->context == NULL || allocation->handle == 0 ||
+       allocation->locked || allocation->context->device == NULL ||
+       allocation->context->device->adapter.runtime == NULL ||
+       allocation->context->device->handle == 0)
+      return static_cast<NTSTATUS>(0xc000000dL); /* STATUS_INVALID_PARAMETER */
+
+   const NTSTATUS status =
+      tu_wddm_destroy_allocation_handle(allocation->context, allocation->handle);
+   allocation->last_destroy_status = static_cast<uint32_t>(status);
+   if (allocation->destroy_attempt_count != UINT32_MAX)
+      allocation->destroy_attempt_count++;
+   if (status == TU_WDDM_STATUS_SUCCESS) {
+      free(allocation->metadata);
+      memset(allocation, 0, sizeof(*allocation));
+   }
+   return status;
+}
+#endif
+
 bool
 tu_wddm_allocation_destroy(struct tu_wddm_allocation *allocation)
 {
@@ -1509,6 +1535,13 @@ struct tu_wddm_submit_reference {
    uint32_t access;
 };
 
+/* One device-local staging allocation replaces two heap round trips per
+ * Render.  KMT consumes/copies the staging data before Render returns. */
+struct tu_wddm_submit_scratch {
+   uint8_t packet[TU_WDDM_MAX_RENDER_COMMAND_SIZE];
+   struct tu_wddm_render_reference references[TU_WDDM_MAX_RENDER_ALLOCATIONS];
+};
+
 struct tu_wddm_submit {
    struct util_dynarray entries;
    struct util_dynarray references;
@@ -1780,6 +1813,7 @@ static inline bool
 tu_wddm_bo_valid_for_device(const struct tu_device *dev, const struct tu_bo *bo)
 {
    return dev != NULL && tu_wddm_bo_valid(bo) &&
+          !bo->wddm_allocation->retirement.pending &&
           bo->wddm_allocation->context->device == &dev->wddm_device;
 }
 
@@ -1831,6 +1865,117 @@ tu_wddm_add_bo_locked(struct tu_device *dev, struct tu_bo *bo)
    return true;
 }
 
+/* Reap a bounded number of slots under wddm_mutex, never under bo_mutex.
+ * One fence query serves the whole pass; busy objects remain quarantined.
+ * A rotating cursor prevents a busy owner from starving later ready objects. */
+static bool
+tu_wddm_reap_retired_bos_locked(struct tu_device *dev, uint32_t budget)
+{
+   if (dev->wddm_retired_count == 0)
+      return true;
+
+   uint32_t completed = 0;
+   bool queried = false;
+   mtx_lock(&dev->bo_mutex);
+   const uint32_t limit = MIN2(budget, dev->wddm_bo_count);
+   mtx_unlock(&dev->bo_mutex);
+   for (uint32_t scanned = 0; scanned < limit && dev->wddm_retired_count; scanned++) {
+      mtx_lock(&dev->bo_mutex);
+      if (dev->wddm_bo_count == 0) {
+         mtx_unlock(&dev->bo_mutex);
+         return false;
+      }
+      dev->wddm_reap_cursor %= dev->wddm_bo_count;
+      struct tu_bo *bo = dev->wddm_bos[dev->wddm_reap_cursor++];
+      struct tu_wddm_allocation *allocation = bo->wddm_allocation;
+      mtx_unlock(&dev->bo_mutex);
+      if (allocation == NULL || !allocation->retirement.pending)
+         continue;
+
+      if (allocation->retirement.reset_generation != dev->wddm_context.info.ResetGeneration ||
+          allocation->retirement.reset_generation !=
+             dev->wddm_device.adapter.private_info.ResetGeneration) {
+         dev->wddm_lifetime_stats.epoch_failures++;
+         vk_device_set_lost(&dev->vk, "WDDM retired BO belongs to an old reset epoch");
+         return false;
+      }
+      if (!allocation->retirement.fence_ready && allocation->retirement.fence != 0) {
+         if (!queried) {
+            dev->wddm_lifetime_stats.fence_queries++;
+            if (!tu_wddm_context_get_completed_fence(&dev->wddm_context, &completed) ||
+                !tu_wddm_device_execution_active(&dev->wddm_device)) {
+               dev->wddm_lifetime_stats.query_failures++;
+               vk_device_set_lost(&dev->vk, "WDDM deferred retirement query failed");
+               return false;
+            }
+            queried = true;
+         }
+         if (!tu_wddm_retirement_observe(&allocation->retirement, completed)) {
+            dev->wddm_lifetime_stats.fence_pending++;
+            continue;
+         }
+      }
+
+      if (allocation->locked && !tu_wddm_allocation_unlock(allocation)) {
+         dev->wddm_lifetime_stats.unlock_failures++;
+         vk_device_set_lost(&dev->vk, "failed to unlock a retired WDDM allocation");
+         return false;
+      }
+      bo->map = NULL;
+      const uint64_t iova = allocation->private_info.RequestedIova;
+      const uint64_t size = allocation->vma_size;
+      const NTSTATUS status = tu_wddm_allocation_try_destroy(allocation);
+      if (status == TU_WDDM_STATUS_DEVICE_BUSY ||
+          status == TU_WDDM_STATUS_GRAPHICS_ALLOCATION_BUSY) {
+         dev->wddm_lifetime_stats.destroy_busy++;
+         continue;
+      }
+      if (status != TU_WDDM_STATUS_SUCCESS) {
+         dev->wddm_lifetime_stats.destroy_failures++;
+         vk_device_set_lost(&dev->vk, "failed to destroy a retired WDDM allocation");
+         return false;
+      }
+
+      /* Success acknowledges transfer to VidMm.  KMD still retains its own
+       * native IOVA range until host detach; a subsequent create may return
+       * DEVICE_BUSY and must use the existing guarded create retry path. */
+      tu_bo_release_heap_accounting(dev, bo);
+      tu_debug_bos_del(dev, bo);
+      tu_dump_bo_del(dev, bo);
+      mtx_lock(&dev->bo_mutex);
+      tu_wddm_remove_bo_locked(dev, bo);
+      memset(bo, 0, sizeof(*bo));
+      dev->wddm_reap_cursor--;
+      mtx_unlock(&dev->bo_mutex);
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, iova, size);
+      mtx_unlock(&dev->vma_mutex);
+      vk_free(&dev->vk.alloc, allocation);
+      dev->wddm_retired_count--;
+      dev->wddm_lifetime_stats.reaped++;
+   }
+   return true;
+}
+
+/* Report aggregate reasons once at successful device teardown, not per BO or
+ * per submit.  Pending/busy values count observations, not elapsed GPU time. */
+static void
+tu_wddm_report_lifetime_stats(struct tu_device *dev)
+{
+   const struct tu_wddm_lifetime_stats *s = &dev->wddm_lifetime_stats;
+   tu_wddm_diag("lifetime queued=%llu reaped=%llu pending=%u peak=%llu\n"
+                "  fence_queries=%llu fence_pending=%llu destroy_busy=%llu\n"
+                "  unlock_failures=%llu destroy_failures=%llu query_failures=%llu epoch_failures=%llu\n"
+                "  scratch_allocations=%llu scratch_reuses=%llu",
+                (unsigned long long)s->queued, (unsigned long long)s->reaped,
+                dev->wddm_retired_count, (unsigned long long)s->pending_peak,
+                (unsigned long long)s->fence_queries, (unsigned long long)s->fence_pending,
+                (unsigned long long)s->destroy_busy, (unsigned long long)s->unlock_failures,
+                (unsigned long long)s->destroy_failures, (unsigned long long)s->query_failures,
+                (unsigned long long)s->epoch_failures, (unsigned long long)s->scratch_allocations,
+                (unsigned long long)s->scratch_reuses);
+}
+
 static VkResult
 tu_wddm_device_init(struct tu_device *dev)
 {
@@ -1845,6 +1990,14 @@ tu_wddm_device_init(struct tu_device *dev)
    dev->wddm_bos = NULL;
    dev->wddm_bo_count = 0;
    dev->wddm_bo_capacity = 0;
+   dev->wddm_retired_count = 0;
+   dev->wddm_reap_cursor = 0;
+   dev->wddm_submit_scratch = NULL;
+   memset(&dev->wddm_lifetime_stats, 0, sizeof(dev->wddm_lifetime_stats));
+   /* Keep the new lifetime policy opt-in until target-device A/B and reset
+    * testing is complete.  This is read once, never in the submit hot path. */
+   dev->wddm_deferred_bo_destroy =
+      debug_get_bool_option("TU_WDDM_DEFERRED_BO_DESTROY", false);
 
    if (!instance->wddm_runtime_initialized ||
        !tu_wddm_device_open(&instance->wddm_runtime, &physical->wddm_adapter,
@@ -1900,7 +2053,9 @@ tu_wddm_device_finish(struct tu_device *dev)
     * UMD bookkeeping/VMA state while a live allocation or parent handle still
     * exists. */
    const bool submissions_retired =
-      tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX);
+      tu_wddm_context_wait_submissions(
+         &dev->wddm_context,
+         dev->wddm_deferred_bo_destroy ? TU_WDDM_DESTROY_WAIT_TIMEOUT_NS : UINT64_MAX);
    if (!submissions_retired) {
       tu_wddm_diag("device_finish failed waiting submissions fence=%u",
                    dev->wddm_context.last_submitted_fence);
@@ -1919,6 +2074,7 @@ tu_wddm_device_finish(struct tu_device *dev)
          dev->wddm_bo_count--;
          continue;
       }
+      const bool was_retired = allocation->retirement.pending;
       const uint64_t allocation_iova = allocation->private_info.RequestedIova;
       const uint64_t allocation_size = allocation->vma_size != 0
                                           ? allocation->vma_size
@@ -1954,6 +2110,10 @@ tu_wddm_device_finish(struct tu_device *dev)
       vk_free(&dev->vk.alloc, allocation);
       memset(bo, 0, sizeof(*bo));
       dev->wddm_bo_count--;
+      if (was_retired) {
+         dev->wddm_retired_count--;
+         dev->wddm_lifetime_stats.reaped++;
+      }
    }
 
    vk_free(&dev->vk.alloc, dev->wddm_bos);
@@ -1990,6 +2150,9 @@ tu_wddm_device_finish(struct tu_device *dev)
       }
    }
 
+   tu_wddm_report_lifetime_stats(dev);
+   vk_free(&dev->vk.alloc, dev->wddm_submit_scratch);
+   dev->wddm_submit_scratch = NULL;
    memset(&dev->wddm_context, 0, sizeof(dev->wddm_context));
    memset(&dev->wddm_device, 0, sizeof(dev->wddm_device));
    dev->wddm_initialized = false;
@@ -2078,6 +2241,12 @@ tu_wddm_bo_init(struct tu_device *dev, struct vk_object_base *base,
    const uint64_t vma_size = (size + UINT64_C(4095)) & ~UINT64_C(4095);
    if (vma_size == 0)
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   mtx_lock(&dev->wddm_mutex);
+   const bool reaped = tu_wddm_reap_retired_bos_locked(dev, TU_WDDM_MAX_RENDER_ALLOCATIONS);
+   mtx_unlock(&dev->wddm_mutex);
+   if (!reaped)
+      return vk_error(dev, VK_ERROR_DEVICE_LOST);
 
    uint64_t iova = 0;
    mtx_lock(&dev->vma_mutex);
@@ -2255,6 +2424,26 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
     * destruction with the live-BO residency snapshot and Render call without
     * recursively acquiring submit_mutex. */
    mtx_lock(&dev->wddm_mutex);
+   if (dev->wddm_deferred_bo_destroy) {
+      restore_owner();
+      bo->wddm_allocation->retirement = {
+         .reset_generation = dev->wddm_context.info.ResetGeneration,
+         .fence = dev->wddm_context.last_submitted_fence,
+         .pending = true,
+         .fence_ready = dev->wddm_context.last_submitted_fence == 0,
+      };
+      /* VkDeviceMemory may disappear now.  Keep only the driver's ownership
+       * graph, never a pointer to its freed Vulkan object or dump membership. */
+      bo->base = NULL;
+      tu_dump_bo_del(dev, bo);
+      dev->wddm_retired_count++;
+      dev->wddm_lifetime_stats.queued++;
+      dev->wddm_lifetime_stats.pending_peak =
+         MAX2(dev->wddm_lifetime_stats.pending_peak, dev->wddm_retired_count);
+      tu_wddm_reap_retired_bos_locked(dev, 16);
+      mtx_unlock(&dev->wddm_mutex);
+      return;
+   }
    if (!tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX)) {
       vk_device_set_lost(&dev->vk, "failed to retire WDDM queue work");
       restore_owner();
@@ -2536,10 +2725,18 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    const uint32_t packet_size = (uint32_t)packet_size64;
 
-   uint8_t *packet = (uint8_t *)vk_zalloc(&device->vk.alloc, packet_size, 8,
-                                          VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
-   if (packet == NULL)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   if (device->wddm_submit_scratch == NULL) {
+      device->wddm_submit_scratch = (struct tu_wddm_submit_scratch *)vk_alloc(
+         &device->vk.alloc, sizeof(*device->wddm_submit_scratch), 8,
+         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+      if (device->wddm_submit_scratch == NULL)
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      device->wddm_lifetime_stats.scratch_allocations++;
+   } else {
+      device->wddm_lifetime_stats.scratch_reuses++;
+   }
+   uint8_t *packet = device->wddm_submit_scratch->packet;
+   memset(packet, 0, packet_size);
 
    tu_wddm_msm_submit_request request = {
       .command = TU_WDDM_MSM_CCMD_GEM_SUBMIT,
@@ -2554,14 +2751,8 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
    };
    memcpy(packet, &request, sizeof(request));
 
-   struct tu_wddm_render_reference *render_refs =
-      (struct tu_wddm_render_reference *)vk_zalloc(
-         &device->vk.alloc, (size_t)reference_count * sizeof(*render_refs), 8,
-         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
-   if (render_refs == NULL) {
-      vk_free(&device->vk.alloc, packet);
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
+   struct tu_wddm_render_reference *render_refs = device->wddm_submit_scratch->references;
+   memset(render_refs, 0, (size_t)reference_count * sizeof(*render_refs));
    const uint32_t bo_offset = sizeof(request);
    for (uint32_t i = 0; i < reference_count; i++) {
       struct tu_wddm_submit_reference *ref = util_dynarray_element(
@@ -2585,8 +2776,8 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
                       VIOGPU_WDDM_REFERENCE_WRITE : 0),
          .allocation_offset = 0,
          .length = ref->bo->size,
-         .patch_offset = bo_offset + i * sizeof(bo) +
-                         offsetof(tu_wddm_msm_submit_bo, presumed),
+         .patch_offset = static_cast<uint32_t>(
+            bo_offset + i * sizeof(bo) + offsetof(tu_wddm_msm_submit_bo, presumed)),
       };
    }
 
@@ -2596,11 +2787,8 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
       struct tu_wddm_submit_entry *entry = util_dynarray_element(
          &submit->entries, struct tu_wddm_submit_entry, i);
       int ref_index = tu_wddm_submit_reference_index(submit, entry->bo);
-      if (ref_index < 0) {
-         vk_free(&device->vk.alloc, render_refs);
-         vk_free(&device->vk.alloc, packet);
+      if (ref_index < 0)
          return VK_ERROR_DEVICE_LOST;
-      }
       tu_wddm_msm_submit_command command = {
          .type = TU_WDDM_MSM_SUBMIT_CMD_BUF,
          .submit_index = (uint32_t)ref_index,
@@ -2617,8 +2805,6 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
    bool rendered = tu_wddm_context_render(&device->wddm_context, packet,
                                           packet_size, render_refs,
                                           reference_count);
-   vk_free(&device->vk.alloc, render_refs);
-   vk_free(&device->vk.alloc, packet);
    return rendered ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
 }
 
@@ -2711,6 +2897,8 @@ tu_wddm_queue_submit_locked(struct tu_queue *queue,
    const uint32_t entry_count = util_dynarray_num_elements(
       &submit->entries, struct tu_wddm_submit_entry);
    uint32_t fence = 0;
+   if (!tu_wddm_reap_retired_bos_locked(device, 16))
+      return VK_ERROR_DEVICE_LOST;
    if (entry_count != 0) {
       if (!tu_wddm_submit_add_live_bos(device, submit))
          return vk_device_set_lost(

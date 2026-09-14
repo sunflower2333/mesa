@@ -519,6 +519,13 @@ struct tu_device
    uint32_t wddm_next_handle;
    uint32_t wddm_next_fence;
    uint32_t wddm_pending_submission_upper_bound;
+   /* Retired BOs keep their sparse slot, heap charge and VMA until KMT accepts
+    * destruction.  Live + retired owners share the existing 1024-BO bound. */
+   uint32_t wddm_retired_count;
+   uint32_t wddm_reap_cursor;
+   bool wddm_deferred_bo_destroy;
+   struct tu_wddm_submit_scratch *wddm_submit_scratch;
+   struct tu_wddm_lifetime_stats wddm_lifetime_stats;
    bool wddm_initialized;
    /* KMT owner graph remains live when final teardown cannot complete.  The
     * Vulkan destroy hook must then retain this outer object as well. */

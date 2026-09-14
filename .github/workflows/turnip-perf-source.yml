@@ -43,3 +43,40 @@ jobs:
             turnip-perf-source.sha256
           retention-days: 7
           if-no-files-found: error
+
+  lifetime-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check ownership and residency policy
+        run: python3 src/freedreno/vulkan/tests/check_tu_wddm_policy.py
+      - name: Execute production lifetime and staging under ASan and UBSan
+        run: python3 src/freedreno/vulkan/tests/lifetime-perf/run.py
+      - name: Require all four intentional regressions to be detected
+        run: |
+          for reason in fence busy residency scratch; do
+            python3 src/freedreno/vulkan/tests/lifetime-perf/run.py --negative-control "$reason"
+          done
+
+  lifetime-msvc:
+    runs-on: windows-11-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Compile and execute production lifetime and staging with MSVC
+        shell: pwsh
+        run: |
+          python src/freedreno/vulkan/tests/lifetime-perf/run.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($reason in @('fence', 'busy', 'residency', 'scratch')) {
+            python src/freedreno/vulkan/tests/lifetime-perf/run.py --negative-control $reason
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
