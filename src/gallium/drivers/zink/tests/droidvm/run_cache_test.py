@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
+from fixture_directory import fixture_directory
 
 FIXTURE = r'''
 #include <cassert>
@@ -131,7 +131,7 @@ def main() -> int:
     compiler = os.environ.get('CXX') or ('cl' if os.name == 'nt' else 'g++')
     if not shutil.which(compiler):
         raise RuntimeError(f'compiler not found: {compiler}')
-    with tempfile.TemporaryDirectory(prefix='zink-cache-') as directory:
+    with fixture_directory() as directory:
         root = Path(directory)
         src = root / 'test.cpp'
         exe = root / ('test.exe' if os.name == 'nt' else 'test')
