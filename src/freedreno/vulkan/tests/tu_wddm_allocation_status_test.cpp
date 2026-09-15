@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include "vulkan/vulkan_core.h"
 #include "tu_wddm_abi.h"
+#include "tu_wddm_lifetime.h"
 #include "tu_wddm_residency.h"
 #include "util/vma.h"
 
@@ -103,6 +104,12 @@ struct tu_bo {
 struct tu_device {
    vk_device vk;
    int vma_mutex, bo_mutex;
+   /* Deferred BO retirement: tu_wddm_bo_init reaps opportunistically under
+    * this lock before it takes IOVA, so the fixture models both. */
+   int wddm_mutex;
+   uint32_t wddm_retired_count;
+   bool wddm_reap_fails;
+   uint32_t wddm_reap_calls;
    util_vma_heap vma;
    tu_physical_device *physical_device;
    tu_wddm_device wddm_device;
@@ -112,6 +119,17 @@ struct tu_device {
    tu_bo *wddm_bos[1];
    uint32_t adapter_driver_version() const { return wddm_device.adapter.driver_version; }
 };
+/* Models tu_wddm_reap_retired_bos_locked for this fixture: an empty
+ * retirement list is a cheap success and a refused reap must fail the caller
+ * before any IOVA or accounting is taken. */
+static bool tu_wddm_reap_retired_bos_locked(tu_device *dev, uint32_t budget) {
+   (void)budget;
+   dev->wddm_reap_calls++;
+   if (dev->wddm_reap_fails)
+      return false;
+   dev->wddm_retired_count = 0;
+   return true;
+}
 struct state {
    uint32_t create_status, destroy_status, returned_handle;
    bool context_active, execution_active, lose_during_create, lose_during_health_query, local_alloc_fail;

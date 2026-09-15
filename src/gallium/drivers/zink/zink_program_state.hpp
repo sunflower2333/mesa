@@ -94,6 +94,24 @@ check_vertex_strides(struct zink_context *ctx)
    return true;
 }
 
+/* A matching hash is only a candidate: use the table's semantic equality
+ * predicate before reusing a pipeline across program changes. This retains
+ * the one-entry fast path without accepting collisions as state identity. */
+static bool
+zink_can_reuse_cached_pipeline(struct zink_gfx_program *prog,
+                              const struct zink_gfx_pipeline_state *state,
+                              unsigned idx, uint32_t final_hash)
+{
+   assert(idx < ARRAY_SIZE(prog->last_pipeline));
+   if (prog->last_finalized_hash[idx] != final_hash ||
+       prog->inline_variants || !prog->last_pipeline[idx] ||
+       prog->shaders[MESA_SHADER_FRAGMENT]->fs.legacy_shadow_mask)
+      return false;
+
+   return prog->pipelines[idx].key_equals_function(
+      &prog->last_pipeline[idx]->state, state);
+}
+
 /* runtime-optimized function to recalc pipeline state and find a usable pipeline:
  * in theory, zink supports many feature levels,
  * but it's important to provide a more optimized codepath for drivers that support all the best features
@@ -113,7 +131,7 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
    const unsigned idx = IS_MESH || screen->info.dynamic_state3_props.dynamicPrimitiveTopologyUnrestricted ?
                         0 :
                         get_pipeline_idx<DYNAMIC_STATE >= ZINK_DYNAMIC_STATE>(mode, vkmode);
-   assert(idx <= ARRAY_SIZE(prog->pipelines));
+   assert(idx < ARRAY_SIZE(prog->pipelines));
    if (IS_MESH) {
       if (!state->mesh_dirty && !state->mesh_modules_changed)
          return state->mesh_pipeline;
@@ -160,10 +178,7 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
    if (IS_MESH) {
       state->mesh_modules_changed = false;
 
-      if (prog->last_finalized_hash[idx] == state->mesh_final_hash &&
-         !prog->inline_variants && likely(prog->last_pipeline[idx]) &&
-         /* this data is too big to compare in the fast-path */
-         likely(!prog->shaders[MESA_SHADER_FRAGMENT]->fs.legacy_shadow_mask)) {
+      if (zink_can_reuse_cached_pipeline(prog, state, idx, state->mesh_final_hash)) {
          state->mesh_pipeline = prog->last_pipeline[idx]->pipeline;
          return state->mesh_pipeline;
       }
@@ -202,10 +217,7 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
 
       /* shortcut for reusing previous pipeline across program changes */
       if (DYNAMIC_STATE == ZINK_DYNAMIC_VERTEX_INPUT || DYNAMIC_STATE == ZINK_DYNAMIC_VERTEX_INPUT2) {
-         if (prog->last_finalized_hash[idx] == state->final_hash &&
-            !prog->inline_variants && likely(prog->last_pipeline[idx]) &&
-            /* this data is too big to compare in the fast-path */
-            likely(!prog->shaders[MESA_SHADER_FRAGMENT]->fs.legacy_shadow_mask)) {
+         if (zink_can_reuse_cached_pipeline(prog, state, idx, state->final_hash)) {
             state->pipeline = prog->last_pipeline[idx]->pipeline;
             return state->pipeline;
          }

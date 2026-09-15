@@ -1,0 +1,116 @@
+name: DroidVM OpenGL Zink Turnip ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/droidvm-gpu-20260914]
+    paths:
+      - 'src/gallium/drivers/zink/**'
+      - 'src/gallium/frontends/wgl/**'
+      - 'src/gallium/targets/wgl/**'
+      - 'src/gallium/targets/libgl-gdi/**'
+      - 'src/freedreno/**'
+      - 'meson.build'
+      - 'meson.options'
+      - '.github/workflows/windows-zink-turnip-opengl-arm64.yml'
+  pull_request:
+    paths:
+      - 'src/gallium/drivers/zink/**'
+      - '.github/workflows/windows-zink-turnip-opengl-arm64.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: droidvm-opengl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cache-and-package:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Predicate, exact-failure negative control and package fixtures
+        shell: bash
+        run: |
+          python src/gallium/drivers/zink/tests/droidvm/run_cache_test.py
+          python src/gallium/drivers/zink/tests/droidvm/run_cache_test.py --negative-control
+          python -m unittest discover -s src/gallium/drivers/zink/tests/droidvm -p 'test_*.py' -v
+
+  opengl-arm64:
+    needs: cache-and-package
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64_arm64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install host build generators
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check 'meson==1.9.1' mako packaging pyyaml ninja
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Get-Command win_flex.exe -ErrorAction SilentlyContinue)) {
+            choco install winflexbison3 --yes --no-progress
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Prepare checksum-pinned host shader compiler
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '16.6.0'
+          $digest = '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b'
+          $archive = Join-Path $env:RUNNER_TEMP 'glslang-host.zip'
+          $directory = Join-Path $env:RUNNER_TEMP 'glslang-host'
+          $url = "https://github.com/KhronosGroup/glslang/releases/download/$version/glslang-$version-windows-x86_64-release.zip"
+          curl.exe --fail --location --retry 2 --connect-timeout 20 --max-time 120 --output $archive $url
+          if ($LASTEXITCODE) { throw 'Host glslang download failed' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) {
+            throw 'Host glslang archive checksum mismatch'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $directory
+          $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslangValidator.exe)
+          if ($programs.Count -eq 0) {
+            $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslang.exe)
+            if ($programs.Count -ne 1) { throw 'Expected one glslang command-line program' }
+            # Mesa still uses the historical executable name; the binary is unchanged.
+            Copy-Item -LiteralPath $programs[0].FullName -Destination (Join-Path $programs[0].DirectoryName 'glslangValidator.exe')
+            $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslangValidator.exe)
+          }
+          if ($programs.Count -ne 1) { throw 'Expected one host glslangValidator.exe' }
+          & $programs[0].FullName --version
+          if ($LASTEXITCODE) { throw 'Host shader compiler cannot execute' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $programs[0].DirectoryName
+      - name: Build, check and stage same-revision WGL Zink and Turnip
+        shell: pwsh
+        run: ./src/gallium/drivers/zink/tests/droidvm/build-arm64.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: droidvm-opengl-zink-turnip-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/droidvm-opengl-arm64/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: droidvm-opengl-build-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/droidvm-zink-turnip-arm64/meson-logs/*
+          retention-days: 7

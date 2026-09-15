@@ -21,7 +21,23 @@ struct tu_device {
    tu_wddm_context wddm_context{&vk};
    uint32_t wddm_next_fence = 1;
    uint32_t wddm_pending_submission_upper_bound = 0;
+   /* Deferred BO retirement state. The queue path reaps opportunistically
+    * before it reads the inherited fence; nothing here may block or wait. */
+   uint32_t wddm_retired_count = 0;
+   bool wddm_reap_fails = false;
+   uint32_t wddm_reap_calls = 0;
 };
+/* Models tu_wddm_reap_retired_bos_locked's contract for this fixture: the
+ * empty-submit path calls it, an empty retirement list is a cheap success, and
+ * a refused reap must fail the submit rather than signal early. */
+static bool tu_wddm_reap_retired_bos_locked(tu_device *dev, uint32_t budget) {
+   (void)budget;
+   dev->wddm_reap_calls++;
+   if (dev->wddm_reap_fails)
+      return false;
+   dev->wddm_retired_count = 0;
+   return true;
+}
 struct tu_queue { tu_device *device; int fence = 0; };
 struct vk_sync_type {};
 static const vk_sync_type tu_wddm_sync_type{}, dummy_type{};

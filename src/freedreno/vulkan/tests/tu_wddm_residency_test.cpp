@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 #include "tu_wddm_abi.h"
+#include "tu_wddm_lifetime.h"
 #include "tu_wddm_residency.h"
 
 /* ---- Minimal D3DKMT surface with the SDK field names production uses ---- */

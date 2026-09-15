@@ -16,6 +16,7 @@
 
 #include "tu_wddm_abi.h"
 #include "tu_wddm_dispatch.h"
+#include "tu_wddm_lifetime.h"
 #include "tu_wddm_residency.h"
 
 #ifdef __cplusplus
@@ -119,6 +120,7 @@ struct tu_wddm_allocation {
     * reservation size separately from the logical Vulkan allocation size so
     * adjacent requested IOVAs cannot overlap the rounded backing extent. */
    uint64_t vma_size;
+   struct tu_wddm_retirement retirement;
    void *map;
    bool locked;
    void *metadata;
