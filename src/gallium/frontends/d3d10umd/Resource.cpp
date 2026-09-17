@@ -159,6 +159,22 @@ UnregisterZeroCopyShare(struct pipe_screen *screen, UINT64 key)
    }
 }
 
+/* Second opt-in: the creator of a shared texture stops copying its pixels into
+ * the D3D allocation. Only safe once every opener imports the texture, because
+ * an opener that falls back to the copy path reads that allocation. */
+static bool
+ZeroCopyCreatorSkipsPublish(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = GetFileAttributesA("C:\\ProgramData\\DroidVM\\viogpu-zero-copy-nopublish") !=
+              INVALID_FILE_ATTRIBUTES;
+      cached = value;
+   }
+   return value != 0;
+}
+
 static void
 LogZeroCopy(const char *op, UINT64 key, unsigned width, unsigned height, unsigned stride, bool ok)
 {
@@ -1088,8 +1104,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    memset(&resourceShare, 0, sizeof resourceShare);
    if (kernelBacked && !pResource->scanout_primary && ZeroCopySharedSurfaces())
       pResource->resource = CreateZeroCopyTexture(pipe, &templat, &resourceShare);
-   pResource->zero_copy = pResource->resource != NULL;
-   pResource->zero_copy_owner = pResource->zero_copy;
+   pResource->zero_copy_owner = pResource->resource != NULL;
+   /* The creator keeps publishing its pixels unless the second opt-in says
+    * otherwise: an opener whose import fails still reads the allocation. */
+   pResource->zero_copy = pResource->zero_copy_owner && ZeroCopyCreatorSkipsPublish();
    pResource->zero_copy_key = resourceShare.ShareKey;
    if (pResource->zero_copy_owner)
       RegisterZeroCopyShare(screen, resourceShare.ShareKey, pResource->resource);
