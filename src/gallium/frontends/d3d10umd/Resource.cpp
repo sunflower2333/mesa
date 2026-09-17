@@ -1099,15 +1099,19 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       }
    }
 
-   /* Scanout primaries keep the copy: the kernel scans out their allocation. */
+   /* A swap-chain buffer that can scan out is still composed by DWM sampling
+    * it, so it is shared like any other kernel-backed texture. Its allocation
+    * keeps receiving the pixels, which is what the kernel scans out. */
    VIOGPU_WDDM_RESOURCE_SHARE resourceShare;
    memset(&resourceShare, 0, sizeof resourceShare);
-   if (kernelBacked && !pResource->scanout_primary && ZeroCopySharedSurfaces())
+   if (kernelBacked && ZeroCopySharedSurfaces())
       pResource->resource = CreateZeroCopyTexture(pipe, &templat, &resourceShare);
    pResource->zero_copy_owner = pResource->resource != NULL;
    /* The creator keeps publishing its pixels unless the second opt-in says
-    * otherwise: an opener whose import fails still reads the allocation. */
-   pResource->zero_copy = pResource->zero_copy_owner && ZeroCopyCreatorSkipsPublish();
+    * otherwise: an opener whose import fails still reads the allocation, and
+    * the kernel scans a primary's allocation out. */
+   pResource->zero_copy = pResource->zero_copy_owner && !pResource->scanout_primary &&
+                          ZeroCopyCreatorSkipsPublish();
    pResource->zero_copy_key = resourceShare.ShareKey;
    if (pResource->zero_copy_owner)
       RegisterZeroCopyShare(screen, resourceShare.ShareKey, pResource->resource);
@@ -1436,8 +1440,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    /* A zero-copy creator put its share key in the resource private data;
     * import that allocation with the same linear layout the creator used. */
    if (ZeroCopySharedSurfaces() && pOpenResource->pPrivateDriverData &&
-       pOpenResource->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_RESOURCE_SHARE) &&
-       info.Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY) {
+       pOpenResource->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_RESOURCE_SHARE)) {
       VIOGPU_WDDM_RESOURCE_SHARE share;
       memcpy(&share, pOpenResource->pPrivateDriverData, sizeof share);
       if (IsValidResourceShare(&share, info.Width)) {
