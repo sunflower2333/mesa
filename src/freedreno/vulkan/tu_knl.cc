@@ -127,6 +127,30 @@ tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
    return dev->instance->knl->bo_export_dmabuf(dev, bo);
 }
 
+VkResult
+tu_bo_init_shared(struct tu_device *dev, struct tu_bo **bo, uint64_t size,
+                  uint64_t share_key)
+{
+   if (dev->instance->knl->bo_init_shared == NULL)
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   size = align64(size, os_page_size);
+   VkResult result = dev->instance->knl->bo_init_shared(dev, bo, size, share_key);
+   if (result != VK_SUCCESS)
+      return result;
+   if (!(*bo)->unique_id)
+      (*bo)->unique_id = (*bo)->gem_handle;
+   return VK_SUCCESS;
+}
+
+VkResult
+tu_bo_export_shared(struct tu_device *dev, struct tu_bo *bo,
+                    uint64_t *share_key)
+{
+   if (dev->instance->knl->bo_export_shared == NULL)
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   return dev->instance->knl->bo_export_shared(dev, bo, share_key);
+}
+
 void
 tu_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 {

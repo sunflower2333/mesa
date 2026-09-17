@@ -281,8 +281,11 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_dynamic_rendering_local_read = true,
       .KHR_external_fence = !is_wddm(device->instance),
       .KHR_external_fence_fd = !is_wddm(device->instance),
-      .KHR_external_memory = !is_wddm(device->instance),
+      .KHR_external_memory = true,
       .KHR_external_memory_fd = !is_wddm(device->instance),
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+      .KHR_external_memory_win32 = is_wddm(device->instance),
+#endif
       .KHR_external_semaphore = !is_wddm(device->instance),
       .KHR_external_semaphore_fd = !is_wddm(device->instance),
       .KHR_format_feature_flags2 = true,
@@ -3962,6 +3965,10 @@ tu_AllocateMemory(VkDevice _device,
 
    const VkImportMemoryFdInfoKHR *fd_info =
       vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   const VkImportMemoryWin32HandleInfoKHR *win32_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR);
+#endif
 
    result = tu_memory_bda_alignment(device, pAllocateInfo, &alloc_flags);
    if (result != VK_SUCCESS)
@@ -3985,6 +3992,16 @@ tu_AllocateMemory(VkDevice _device,
          /* take ownership and close the fd */
          close(fd_info->fd);
       }
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   } else if (win32_info && win32_info->handleType) {
+      /* A KMT handle is a value, not a kernel object: nothing to close. */
+      result = win32_info->handleType ==
+                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                  ? tu_bo_init_shared(device, &mem->bo,
+                                      pAllocateInfo->allocationSize,
+                                      (uint64_t)(uintptr_t)win32_info->handle)
+                  : vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+#endif
    } else if (mem->vk.ahardware_buffer) {
 #if DETECT_OS_ANDROID
       const native_handle_t *handle = AHardwareBuffer_getNativeHandle(mem->vk.ahardware_buffer);
@@ -4709,6 +4726,42 @@ tu_GetMemoryFdKHR(VkDevice _device,
 
    return VK_SUCCESS;
 }
+
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_GetMemoryWin32HandleKHR(VkDevice _device,
+                           const VkMemoryGetWin32HandleInfoKHR *pGetWin32HandleInfo,
+                           HANDLE *pHandle)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+   VK_FROM_HANDLE(tu_device_memory, memory, pGetWin32HandleInfo->memory);
+
+   if (pGetWin32HandleInfo->handleType !=
+       VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT)
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
+   uint64_t share_key = 0;
+   VkResult result = tu_bo_export_shared(device, memory->bo, &share_key);
+   if (result != VK_SUCCESS)
+      return result;
+   *pHandle = (HANDLE)(uintptr_t)share_key;
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_GetMemoryWin32HandlePropertiesKHR(VkDevice _device,
+                                     VkExternalMemoryHandleTypeFlagBits handleType,
+                                     HANDLE handle,
+                                     VkMemoryWin32HandlePropertiesKHR *pMemoryWin32HandleProperties)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT)
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   pMemoryWin32HandleProperties->memoryTypeBits =
+      (1 << device->physical_device->memory.non_lazy_type_count) - 1;
+   return VK_SUCCESS;
+}
+#endif
 
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_GetMemoryFdPropertiesKHR(VkDevice _device,

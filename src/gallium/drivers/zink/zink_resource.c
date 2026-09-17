@@ -983,7 +983,10 @@ get_format_feature_flags(VkImageCreateInfo ici, struct zink_screen *screen, cons
 #if !defined(_WIN32)
    #define ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
 #else
-   #define ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT
+   /* KMT handles are values rather than kernel objects: the DroidVM WDDM Turnip
+    * shares native allocations across contexts as 32-bit keys, so they are
+    * never duplicated or closed below. */
+   #define ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
 #endif
 
 
@@ -1009,6 +1012,19 @@ get_export_flags(struct zink_screen *screen, const struct pipe_resource *templ, 
       else
          UNREACHABLE("unknown handle type");
    }
+#ifdef _WIN32
+   /* No dma-buf on Windows: a shared resource exports, and a winsys handle
+    * imports, the opaque KMT handle type. */
+   if (alloc_info->whandle) {
+      alloc_info->external = ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
+      alloc_info->export_types |= ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
+      return true;
+   }
+   if (templ->bind & (PIPE_BIND_SHARED | ZINK_BIND_DMABUF))
+      alloc_info->export_types |= ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
+   if (!needs_export)
+      return true;
+#endif
    if (needs_export) {
       if (alloc_info->whandle && alloc_info->whandle->type == ZINK_EXTERNAL_MEMORY_HANDLE) {
          alloc_info->external = ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
@@ -1103,19 +1119,10 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
    };
 
    if (alloc_info->whandle) {
-      HANDLE source_target = GetCurrentProcess();
-      HANDLE out_handle;
-
-      bool result = DuplicateHandle(source_target, alloc_info->whandle->handle, source_target, &out_handle, 0, false, DUPLICATE_SAME_ACCESS);
-
-      if (!result || !out_handle) {
-         mesa_loge("ZINK: failed to DuplicateHandle with winerr: %08x\n", (int)GetLastError());
-         return roc_fail_and_cleanup_object;
-      }
-
       imfi.pNext = NULL;
       imfi.handleType = alloc_info->external;
-      imfi.handle = out_handle;
+      /* A KMT handle is its value; the import does not take ownership. */
+      imfi.handle = alloc_info->whandle->handle;
 
       imfi.pNext = mai.pNext;
       mai.pNext = &imfi;
@@ -2283,7 +2290,7 @@ zink_resource_get_handle(struct pipe_screen *pscreen,
       handle_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
       //TODO: remove for wsi
       handle_info.memory = zink_bo_get_mem(obj->bo);
-      handle_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+      handle_info.handleType = ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
       VkResult result = VKSCR(GetMemoryWin32HandleKHR)(screen->dev, &handle_info, &handle);
       if (result != VK_SUCCESS)
          return false;
@@ -2324,7 +2331,13 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
 
    uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
    int modifier_count = 1;
-   if (templ->target == PIPE_BUFFER) {
+   bool use_modifiers = templ->target != PIPE_BUFFER;
+#ifdef _WIN32
+   /* No DRM format modifiers on Windows; the template's bind flags (linear
+    * tiling included) describe the layout both sides agree on. */
+   use_modifiers = false;
+#endif
+   if (!use_modifiers) {
       modifier_count = 0;
    } else {
       if (whandle->modifier != DRM_FORMAT_MOD_INVALID)
@@ -2401,11 +2414,8 @@ zink_memobj_create_from_handle(struct pipe_screen *pscreen, struct winsys_handle
 #if !defined(_WIN32)
    memobj->whandle.handle = os_dupfd_cloexec(whandle->handle);
 #else
-   HANDLE source_target = GetCurrentProcess();
-   HANDLE out_handle;
-
-   DuplicateHandle(source_target, whandle->handle, source_target, &out_handle, 0, false, DUPLICATE_SAME_ACCESS);
-   memobj->whandle.handle = out_handle;
+   /* KMT handle value: nothing to duplicate. */
+   memobj->whandle.handle = whandle->handle;
 
 #endif /* _WIN32 */
 #endif /* ZINK_USE_DMABUF */
@@ -2421,8 +2431,6 @@ zink_memobj_destroy(struct pipe_screen *pscreen, struct pipe_memory_object *pmem
 
 #if !defined(_WIN32)
    close(memobj->whandle.handle);
-#else
-   CloseHandle(memobj->whandle.handle);
 #endif /* _WIN32 */
 #endif /* ZINK_USE_DMABUF */
 

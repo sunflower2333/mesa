@@ -140,6 +140,12 @@ struct tu_wddm_allocation {
    bool resident;
    uint32_t last_residency_status;
    uint32_t residency_attempt_count;
+   /* Another context's native allocation mapped here by IMPORT_NATIVE. It has
+    * no KMT handle: it is never in a submit's allocation list, never mapped
+    * and never made resident by this device; its owner keeps it resident. */
+   bool imported;
+   /* Nonzero once exported, or the key an imported allocation came from. */
+   uint64_t share_key;
 };
 
 struct tu_wddm_render_reference {
@@ -172,6 +178,12 @@ bool tu_wddm_runtime_foreach_adapter(struct tu_wddm_runtime *runtime,
                                       void *data);
 
 bool tu_wddm_validate_adapter_info(const VIOGPU_WDDM_ADAPTER_INFO *info);
+
+/* Issues one VIOGPU_WDDM_NATIVE_SHARE escape on the context; *io carries the
+ * inputs and receives the KMD's answer. */
+bool tu_wddm_context_native_share(struct tu_wddm_context *context,
+                                  uint32_t opcode,
+                                  VIOGPU_WDDM_NATIVE_SHARE *io);
 bool tu_wddm_submitqueue_priority_is_supported(int priority);
 /* Publish the byte-exact WDDM adapter identity expected by Vulkan loader
  * interface v7.  This backend exposes one WDDM node, ordinal zero. */

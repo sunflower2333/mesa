@@ -1041,6 +1041,45 @@ tu_wddm_context_get_info(struct tu_wddm_context *context)
    return true;
 }
 
+bool
+tu_wddm_context_native_share(struct tu_wddm_context *context, uint32_t opcode,
+                             VIOGPU_WDDM_NATIVE_SHARE *io)
+{
+   if (context == NULL || context->device == NULL || context->handle == 0 ||
+       context->device->adapter.runtime == NULL || io == NULL ||
+       context->info.ResetGeneration == 0)
+      return false;
+
+   VIOGPU_WDDM_NATIVE_SHARE request = {};
+   tu_wddm_init_header(&request.Header, tu_wddm_sizeof<VIOGPU_WDDM_NATIVE_SHARE>());
+   request.Opcode = opcode;
+   request.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+   request.ExpectedResetGeneration = context->info.ResetGeneration;
+   request.ShareKey = io->ShareKey;
+   request.Iova = io->Iova;
+   request.Size = io->Size;
+
+   D3DKMT_ESCAPE escape = {};
+   escape.hAdapter = context->device->adapter.handle;
+   escape.hDevice = context->device->handle;
+   escape.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+   escape.pPrivateDriverData = &request;
+   escape.PrivateDriverDataSize = tu_wddm_sizeof<VIOGPU_WDDM_NATIVE_SHARE>();
+   escape.hContext = context->handle;
+
+   NTSTATUS status = context->device->adapter.runtime->dispatch.Escape(&escape);
+   if (!NT_SUCCESS(status) ||
+       !tu_wddm_header_is_current(&request.Header, tu_wddm_sizeof<VIOGPU_WDDM_NATIVE_SHARE>()) ||
+       request.Opcode != opcode) {
+      tu_wddm_diag("native share escape failed opcode=%u status=0x%08x key=0x%llx iova=0x%llx size=%llu",
+                   opcode, (unsigned)status, (unsigned long long)io->ShareKey,
+                   (unsigned long long)io->Iova, (unsigned long long)io->Size);
+      return false;
+   }
+   *io = request;
+   return true;
+}
+
 uint32_t
 tu_wddm_context_get_gpu_timestamp(struct tu_wddm_context *context, uint64_t *ticks)
 {
@@ -2369,7 +2408,8 @@ static inline bool
 tu_wddm_bo_valid(const struct tu_bo *bo)
 {
    return bo != NULL && bo->gem_handle != 0 && bo->wddm_allocation != NULL &&
-          bo->wddm_allocation->handle != 0 && bo->wddm_allocation->context != NULL;
+          (bo->wddm_allocation->handle != 0 || bo->wddm_allocation->imported) &&
+          bo->wddm_allocation->context != NULL;
 }
 
 static inline bool
@@ -3026,9 +3066,111 @@ tu_wddm_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 }
 
 static VkResult
+tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
+                       uint64_t size, uint64_t share_key)
+{
+   if (out_bo != NULL)
+      *out_bo = NULL;
+   if (out_bo == NULL || size == 0 || share_key == 0 || share_key > UINT32_MAX ||
+       size > UINT64_MAX - UINT64_C(4095))
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   if (vk_device_is_lost(&dev->vk))
+      return VK_ERROR_DEVICE_LOST;
+
+   const uint64_t vma_size = (size + UINT64_C(4095)) & ~UINT64_C(4095);
+   mtx_lock(&dev->vma_mutex);
+   const uint64_t iova = util_vma_heap_alloc(&dev->vma, vma_size, os_page_size);
+   mtx_unlock(&dev->vma_mutex);
+   if (iova == 0)
+      return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   struct tu_wddm_allocation *allocation = (struct tu_wddm_allocation *)vk_zalloc(
+      &dev->vk.alloc, sizeof(*allocation), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (allocation == NULL) {
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, iova, vma_size);
+      mtx_unlock(&dev->vma_mutex);
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+   allocation->context = &dev->wddm_context;
+   allocation->imported = true;
+   allocation->share_key = share_key;
+   allocation->vma_size = vma_size;
+   allocation->private_info.RequestedIova = iova;
+   allocation->private_info.Size = size;
+
+   /* Claim a sparse-array slot before the KMD maps anything at this IOVA. */
+   mtx_lock(&dev->bo_mutex);
+   uint32_t token = tu_wddm_alloc_token_locked(dev);
+   struct tu_bo *bo = token ? tu_device_lookup_bo(dev, token) : NULL;
+   if (bo != NULL) {
+      *bo = (struct tu_bo) {
+         .gem_handle = token,
+         .size = size,
+         .iova = iova,
+         .name = NULL,
+         .refcnt = 1,
+         .wddm_allocation = allocation,
+      };
+   }
+   mtx_unlock(&dev->bo_mutex);
+   if (bo == NULL) {
+      vk_free(&dev->vk.alloc, allocation);
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, iova, vma_size);
+      mtx_unlock(&dev->vma_mutex);
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   VIOGPU_WDDM_NATIVE_SHARE import = {};
+   import.ShareKey = share_key;
+   import.Iova = iova;
+   import.Size = vma_size;
+   if (!tu_wddm_context_native_share(&dev->wddm_context,
+                                     VIOGPU_WDDM_ESCAPE_IMPORT_NATIVE, &import)) {
+      mtx_lock(&dev->bo_mutex);
+      memset(bo, 0, sizeof(*bo));
+      mtx_unlock(&dev->bo_mutex);
+      vk_free(&dev->vk.alloc, allocation);
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, iova, vma_size);
+      mtx_unlock(&dev->vma_mutex);
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
+
+   bo->name = tu_debug_bos_add(dev, size, "imported");
+   *out_bo = bo;
+   return VK_SUCCESS;
+}
+
+static VkResult
+tu_wddm_bo_export_shared(struct tu_device *dev, struct tu_bo *bo,
+                         uint64_t *share_key)
+{
+   if (share_key == NULL || !tu_wddm_bo_valid_for_device(dev, bo))
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   struct tu_wddm_allocation *allocation = bo->wddm_allocation;
+   if (allocation->share_key != 0) {
+      *share_key = allocation->share_key;
+      return VK_SUCCESS;
+   }
+
+   VIOGPU_WDDM_NATIVE_SHARE share = {};
+   share.Iova = allocation->private_info.RequestedIova;
+   if (!tu_wddm_context_native_share(&dev->wddm_context,
+                                     VIOGPU_WDDM_ESCAPE_EXPORT_NATIVE, &share) ||
+       share.ShareKey == 0 || share.ShareKey > UINT32_MAX)
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   allocation->share_key = share.ShareKey;
+   *share_key = share.ShareKey;
+   return VK_SUCCESS;
+}
+
+static VkResult
 tu_wddm_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
 {
-   if (placed_addr != NULL || !tu_wddm_bo_valid_for_device(dev, bo))
+   if (placed_addr != NULL || !tu_wddm_bo_valid_for_device(dev, bo) ||
+       bo->wddm_allocation->imported)
       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
    void *map = NULL;
    if (!tu_wddm_allocation_lock(bo->wddm_allocation, &map))
@@ -3074,6 +3216,41 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
    const auto restore_owner = [bo]() {
       p_atomic_set(&bo->refcnt, 1);
    };
+
+   if (bo->wddm_allocation->imported) {
+      mtx_lock(&dev->wddm_mutex);
+      if (!tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX)) {
+         vk_device_set_lost(&dev->vk, "failed to retire WDDM queue work");
+         restore_owner();
+         mtx_unlock(&dev->wddm_mutex);
+         return;
+      }
+      struct tu_wddm_allocation *imported = bo->wddm_allocation;
+      VIOGPU_WDDM_NATIVE_SHARE release = {};
+      release.ShareKey = imported->share_key;
+      release.Iova = bo->iova;
+      /* A failed release leaves the host mapping in place until the owner
+       * destroys the allocation, which revokes every import. */
+      if (!tu_wddm_context_native_share(&dev->wddm_context,
+                                        VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE, &release))
+         tu_wddm_diag("native import release failed key=0x%llx iova=0x%llx",
+                      (unsigned long long)imported->share_key,
+                      (unsigned long long)bo->iova);
+      const uint64_t imported_iova = bo->iova;
+      const uint64_t imported_size = imported->vma_size;
+      tu_bo_release_heap_accounting(dev, bo);
+      tu_debug_bos_del(dev, bo);
+      tu_dump_bo_del(dev, bo);
+      mtx_lock(&dev->bo_mutex);
+      memset(bo, 0, sizeof(*bo));
+      mtx_unlock(&dev->bo_mutex);
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, imported_iova, imported_size);
+      mtx_unlock(&dev->vma_mutex);
+      vk_free(&dev->vk.alloc, imported);
+      mtx_unlock(&dev->wddm_mutex);
+      return;
+   }
 
    /* Generic queue preparation already owns submit_mutex and can release a
     * replaced internal BO.  Use the WDDM-specific lock to serialize this
@@ -3198,6 +3375,11 @@ tu_wddm_submit_add_reference(struct tu_device *device,
       submit->failed = true;
       return false;
    }
+
+   /* An imported BO has no KMT handle to list; the host reaches it through
+    * this context's binding and its owner keeps the pages resident. */
+   if (bo->wddm_allocation->imported)
+      return true;
 
    uint32_t index_slot = UINT32_MAX;
    const int existing_index =
@@ -3744,6 +3926,8 @@ static const struct tu_knl wddm_knl_funcs = {
    .bo_init = tu_wddm_bo_init,
    .bo_init_dmabuf = tu_wddm_bo_init_dmabuf,
    .bo_export_dmabuf = tu_wddm_bo_export_dmabuf,
+   .bo_init_shared = tu_wddm_bo_init_shared,
+   .bo_export_shared = tu_wddm_bo_export_shared,
    .bo_map = tu_wddm_bo_map,
    .bo_unmap = tu_wddm_bo_unmap,
    .bo_allow_dump = tu_wddm_bo_allow_dump,

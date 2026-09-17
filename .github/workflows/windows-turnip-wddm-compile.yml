@@ -545,6 +545,10 @@ jobs:
             src/freedreno/vulkan/tests/tu_wddm_win32_probe.cpp `
             /Fe:tu_wddm_win32_probe_arm64.exe user32.lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cl /nologo /std:c++20 /W4 /WX /EHsc /MT /I include `
+            src/freedreno/vulkan/tests/tu_wddm_share_probe.cpp `
+            /Fe:tu_wddm_share_probe_arm64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify and upload ARM64 Vulkan runtime probe
         shell: pwsh
@@ -611,6 +615,7 @@ jobs:
             tu_wddm_vulkan_compute_probe_arm64.exe
             tu_wddm_vulkan_graphics_probe_arm64.exe
             tu_wddm_win32_probe_arm64.exe
+            tu_wddm_share_probe_arm64.exe
             tu_wddm_compute.spv
             tu_wddm_graphics.vert.spv
             tu_wddm_graphics.frag.spv
@@ -733,6 +738,7 @@ jobs:
             'tu_wddm_vulkan_compute_probe_arm64.exe',
             'tu_wddm_vulkan_graphics_probe_arm64.exe',
             'tu_wddm_win32_probe_arm64.exe',
+            'tu_wddm_share_probe_arm64.exe',
             'tu_wddm_compute.spv',
             'tu_wddm_graphics.vert.spv',
             'tu_wddm_graphics.frag.spv'

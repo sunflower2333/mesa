@@ -158,8 +158,19 @@ tu_GetPhysicalDeviceExternalBufferProperties(
    VK_FROM_HANDLE(tu_physical_device, physical_device, physicalDevice);
    if (physical_device->wddm_adapter.private_info.Header.Magic ==
        VIOGPU_WDDM_ABI_MAGIC) {
+      /* Native allocations share across contexts as 32-bit KMT keys. */
       pExternalBufferProperties->externalMemoryProperties =
-         (VkExternalMemoryProperties){};
+         pExternalBufferInfo->handleType ==
+               VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+            ? (VkExternalMemoryProperties){
+            .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+                                      VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
+            .exportFromImportedHandleTypes =
+               VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
+            .compatibleHandleTypes =
+               VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
+         }
+            : (VkExternalMemoryProperties){};
       return;
    }
 #endif

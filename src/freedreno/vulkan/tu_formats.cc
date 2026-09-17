@@ -715,6 +715,22 @@ tu_get_external_image_format_properties(
 #ifdef TU_HAS_WDDM
    if (physical_device->wddm_adapter.private_info.Header.Magic ==
        VIOGPU_WDDM_ABI_MAGIC) {
+      /* Native allocations share across contexts as 32-bit KMT keys, bound
+       * to one image each. */
+      if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT &&
+          pImageFormatInfo->type == VK_IMAGE_TYPE_2D) {
+         if (external_properties)
+            external_properties->externalMemoryProperties =
+               (VkExternalMemoryProperties){
+            .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+                                      VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
+            .exportFromImportedHandleTypes =
+               VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
+            .compatibleHandleTypes =
+               VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
+         };
+         return VK_SUCCESS;
+      }
       if (external_properties)
          external_properties->externalMemoryProperties =
             (VkExternalMemoryProperties){};

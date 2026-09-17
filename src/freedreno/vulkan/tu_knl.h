@@ -166,6 +166,11 @@ struct tu_knl {
    VkResult (*bo_init_dmabuf)(struct tu_device *dev, struct tu_bo **out_bo,
                               uint64_t size, enum tu_bo_alloc_flags flags, int prime_fd);
    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
+   /* Optional: share a BO with another device as an opaque 32-bit key. */
+   VkResult (*bo_init_shared)(struct tu_device *dev, struct tu_bo **out_bo,
+                              uint64_t size, uint64_t share_key);
+   VkResult (*bo_export_shared)(struct tu_device *dev, struct tu_bo *bo,
+                                uint64_t *share_key);
    VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
    VkResult (*bo_unmap)(struct tu_device *dev, struct tu_bo *bo, bool reserve);
@@ -255,6 +260,14 @@ tu_bo_init_dmabuf(struct tu_device *dev,
 
 int
 tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo);
+
+VkResult
+tu_bo_init_shared(struct tu_device *dev, struct tu_bo **bo, uint64_t size,
+                  uint64_t share_key);
+
+VkResult
+tu_bo_export_shared(struct tu_device *dev, struct tu_bo *bo,
+                    uint64_t *share_key);
 
 void
 tu_bo_finish(struct tu_device *dev, struct tu_bo *bo);
