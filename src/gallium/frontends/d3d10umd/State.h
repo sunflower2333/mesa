@@ -225,6 +225,11 @@ struct Resource
     * import of it (opener): no copy through the D3D allocation is needed to
     * share its pixels, only a GPU synchronization after writes. */
    bool zero_copy;
+   /* This device created the shared texture and registered its key. */
+   bool zero_copy_owner;
+   /* The texture is the creator's own, referenced directly because both
+    * devices render through the same screen: nothing was imported. */
+   bool zero_copy_local;
    UINT64 zero_copy_key;
    // Only a CPU-visible allocation created by this device can be locked
    // directly. Opened handles and primaries use scheduled private staging.

@@ -96,6 +96,69 @@ ZeroCopySharedSurfaces(void)
    return value != 0;
 }
 
+/* Keys exported by this process, so an open through the same screen references
+ * the creator's texture instead of importing it: a native context cannot
+ * import its own export, and no import is needed inside one process. */
+struct ZeroCopyShare
+{
+   UINT64 key;
+   struct pipe_screen *screen;
+   struct pipe_resource *texture;
+   ZeroCopyShare *next;
+};
+
+static SRWLOCK zero_copy_lock = SRWLOCK_INIT;
+static ZeroCopyShare *zero_copy_shares;
+
+static void
+RegisterZeroCopyShare(struct pipe_screen *screen, UINT64 key, struct pipe_resource *texture)
+{
+   ZeroCopyShare *share = (ZeroCopyShare *)calloc(1, sizeof *share);
+   if (!share)
+      return;
+   share->key = key;
+   share->screen = screen;
+   pipe_resource_reference(&share->texture, texture);
+   AcquireSRWLockExclusive(&zero_copy_lock);
+   share->next = zero_copy_shares;
+   zero_copy_shares = share;
+   ReleaseSRWLockExclusive(&zero_copy_lock);
+}
+
+static struct pipe_resource *
+ReferenceZeroCopyShare(struct pipe_screen *screen, UINT64 key)
+{
+   struct pipe_resource *texture = NULL;
+   AcquireSRWLockShared(&zero_copy_lock);
+   for (ZeroCopyShare *share = zero_copy_shares; share; share = share->next) {
+      if (share->key == key && share->screen == screen) {
+         pipe_resource_reference(&texture, share->texture);
+         break;
+      }
+   }
+   ReleaseSRWLockShared(&zero_copy_lock);
+   return texture;
+}
+
+static void
+UnregisterZeroCopyShare(struct pipe_screen *screen, UINT64 key)
+{
+   ZeroCopyShare *found = NULL;
+   AcquireSRWLockExclusive(&zero_copy_lock);
+   for (ZeroCopyShare **entry = &zero_copy_shares; *entry; entry = &(*entry)->next) {
+      if ((*entry)->key == key && (*entry)->screen == screen) {
+         found = *entry;
+         *entry = found->next;
+         break;
+      }
+   }
+   ReleaseSRWLockExclusive(&zero_copy_lock);
+   if (found) {
+      pipe_resource_reference(&found->texture, NULL);
+      free(found);
+   }
+}
+
 static void
 LogZeroCopy(const char *op, UINT64 key, unsigned width, unsigned height, unsigned stride, bool ok)
 {
@@ -1026,7 +1089,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    if (kernelBacked && !pResource->scanout_primary && ZeroCopySharedSurfaces())
       pResource->resource = CreateZeroCopyTexture(pipe, &templat, &resourceShare);
    pResource->zero_copy = pResource->resource != NULL;
+   pResource->zero_copy_owner = pResource->zero_copy;
    pResource->zero_copy_key = resourceShare.ShareKey;
+   if (pResource->zero_copy_owner)
+      RegisterZeroCopyShare(screen, resourceShare.ShareKey, pResource->resource);
    if (!pResource->resource)
       pResource->resource = kernelBacked ? CreateSharedTextureCache(screen, &templat)
                                         : screen->resource_create(screen, &templat);
@@ -1349,6 +1415,15 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
       VIOGPU_WDDM_RESOURCE_SHARE share;
       memcpy(&share, pOpenResource->pPrivateDriverData, sizeof share);
       if (IsValidResourceShare(&share, info.Width)) {
+         pResource->resource = ReferenceZeroCopyShare(screen, share.ShareKey);
+         if (pResource->resource) {
+            pResource->zero_copy = true;
+            pResource->zero_copy_local = true;
+            pResource->zero_copy_key = share.ShareKey;
+            LogZeroCopy("local", share.ShareKey, info.Width, info.Height, share.Stride, true);
+         }
+      }
+      if (pResource->resource == NULL && IsValidResourceShare(&share, info.Width)) {
          struct pipe_resource shared = templat;
          shared.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
          struct winsys_handle whandle;
@@ -1452,6 +1527,10 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       if (*entry)
          *entry = pResource->shared_next;
    }
+   /* Stop handing this key out before the texture loses its last reference:
+    * the kernel can hand the same key to a later export. */
+   if (pResource->zero_copy_owner)
+      UnregisterZeroCopyShare(pipe->screen, pResource->zero_copy_key);
    /* WDDM 2.0: evict each held residency reference exactly once, then
     * release the staging allocation and any allocation this device created. */
    ReleaseResourceAllocations(device, pResource);
