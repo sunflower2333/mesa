@@ -293,8 +293,15 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
       lock_hr = E_NOTIMPL;
    } else {
       // A synchronized map waits for the GPU before publishing its pixels.
+      // A refresh overwrites the only level of a single-layer cache, so it can
+      // discard it: the driver may then upload asynchronously instead of
+      // waiting for the GPU before exposing the image's memory.
+      const unsigned refresh_usage =
+         PIPE_MAP_WRITE | (texture->last_level == 0 && texture->array_size == 1 &&
+                           texture->depth0 == 1
+                              ? PIPE_MAP_DISCARD_WHOLE_RESOURCE : 0);
       pixels = pipe->texture_map(pipe, texture, 0,
-                                publish ? PIPE_MAP_READ : PIPE_MAP_WRITE,
+                                publish ? PIPE_MAP_READ : refresh_usage,
                                 &box, &transfer);
       recordPhase(0);
       if (!pixels) {

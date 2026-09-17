@@ -2854,7 +2854,17 @@ zink_image_map(struct pipe_context *pctx,
          /* if the map region intersects with any clears then we have to apply them */
          zink_fb_clears_apply_region(ctx, pres, zink_rect_from_box(box),box->z, box->depth);
    }
-   if (!res->linear || !res->obj->host_visible) {
+   /* A write that replaces the whole resource needs neither the image's old
+    * contents nor its memory: upload through a staging buffer and let the copy
+    * run in the batch. Mapping a linear image directly costs a host-access
+    * barrier plus a fence wait on every call (1.3-1.8 ms per 1520x952 map on
+    * the Adreno native context), which alone decides whether DWM's refresh of
+    * another process's surface still makes the next vblank.
+    */
+   const bool upload_whole = (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+                             !(usage & (PIPE_MAP_READ | PIPE_MAP_UNSYNCHRONIZED)) &&
+                             res->obj->transfer_dst;
+   if (!res->linear || !res->obj->host_visible || upload_whole) {
       enum pipe_format format = pres->format;
       if (usage & PIPE_MAP_DEPTH_ONLY)
          format = util_format_get_depth_only(pres->format);
