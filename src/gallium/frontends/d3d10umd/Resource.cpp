@@ -83,14 +83,24 @@ SharedDxgiFormat(VIOGPU_WDDM_UINT32 format)
  * resource private data, and every opener imports that allocation instead of
  * copying through the D3D allocation. The file keeps the copy path the default
  * until the import path is proven on the device. */
+/* A sandboxed process (a browser's GPU process) cannot open the flag file, but
+ * it does inherit the environment, so either enables the path. */
+static bool
+ZeroCopyOptIn(const char *variable, const char *path)
+{
+   char value[8];
+   if (GetEnvironmentVariableA(variable, value, sizeof value) != 0 && value[0] != '0')
+      return true;
+   return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
 static bool
 ZeroCopySharedSurfaces(void)
 {
    static volatile LONG cached = -1;
    LONG value = cached;
    if (value < 0) {
-      value = GetFileAttributesA("C:\\ProgramData\\DroidVM\\viogpu-zero-copy") !=
-              INVALID_FILE_ATTRIBUTES;
+      value = ZeroCopyOptIn("VIOGPU_ZERO_COPY", "C:\\ProgramData\\DroidVM\\viogpu-zero-copy");
       cached = value;
    }
    return value != 0;
@@ -168,8 +178,8 @@ ZeroCopyCreatorSkipsPublish(void)
    static volatile LONG cached = -1;
    LONG value = cached;
    if (value < 0) {
-      value = GetFileAttributesA("C:\\ProgramData\\DroidVM\\viogpu-zero-copy-nopublish") !=
-              INVALID_FILE_ATTRIBUTES;
+      value = ZeroCopyOptIn("VIOGPU_ZERO_COPY_NOPUBLISH",
+                            "C:\\ProgramData\\DroidVM\\viogpu-zero-copy-nopublish");
       cached = value;
    }
    return value != 0;
@@ -1180,8 +1190,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       allocate.hResource = (HANDLE)(UINT_PTR)hRTResource.handle;
       allocate.NumAllocations = 1;
       allocate.pAllocationInfo = &allocationInfo;
-      if (pResource->zero_copy) {
-         // The runtime returns resource private data to every OpenResource.
+      if (pResource->zero_copy_owner) {
+         /* The runtime returns resource private data to every OpenResource, so
+          * the key travels with the resource whether or not this creator also
+          * keeps publishing its pixels. */
          allocate.pPrivateDriverData = &resourceShare;
          allocate.PrivateDriverDataSize = sizeof resourceShare;
       }
