@@ -114,6 +114,10 @@ struct ZeroCopyShare
    UINT64 key;
    struct pipe_screen *screen;
    struct pipe_resource *texture;
+   /* The creator plus every resource that referenced this texture locally: the
+    * entry outlives the creator's own resource, because a process can open a
+    * shared resource after the creating object is gone. */
+   unsigned refs;
    ZeroCopyShare *next;
 };
 
@@ -128,6 +132,7 @@ RegisterZeroCopyShare(struct pipe_screen *screen, UINT64 key, struct pipe_resour
       return;
    share->key = key;
    share->screen = screen;
+   share->refs = 1;
    pipe_resource_reference(&share->texture, texture);
    AcquireSRWLockExclusive(&zero_copy_lock);
    share->next = zero_copy_shares;
@@ -139,14 +144,15 @@ static struct pipe_resource *
 ReferenceZeroCopyShare(struct pipe_screen *screen, UINT64 key)
 {
    struct pipe_resource *texture = NULL;
-   AcquireSRWLockShared(&zero_copy_lock);
+   AcquireSRWLockExclusive(&zero_copy_lock);
    for (ZeroCopyShare *share = zero_copy_shares; share; share = share->next) {
       if (share->key == key && share->screen == screen) {
          pipe_resource_reference(&texture, share->texture);
+         ++share->refs;
          break;
       }
    }
-   ReleaseSRWLockShared(&zero_copy_lock);
+   ReleaseSRWLockExclusive(&zero_copy_lock);
    return texture;
 }
 
@@ -157,8 +163,10 @@ UnregisterZeroCopyShare(struct pipe_screen *screen, UINT64 key)
    AcquireSRWLockExclusive(&zero_copy_lock);
    for (ZeroCopyShare **entry = &zero_copy_shares; *entry; entry = &(*entry)->next) {
       if ((*entry)->key == key && (*entry)->screen == screen) {
-         found = *entry;
-         *entry = found->next;
+         if (--(*entry)->refs == 0) {
+            found = *entry;
+            *entry = found->next;
+         }
          break;
       }
    }
@@ -180,6 +188,23 @@ ZeroCopyCreatorSkipsPublish(void)
    if (value < 0) {
       value = ZeroCopyOptIn("VIOGPU_ZERO_COPY_NOPUBLISH",
                             "C:\\ProgramData\\DroidVM\\viogpu-zero-copy-nopublish");
+      cached = value;
+   }
+   return value != 0;
+}
+
+/* Third opt-in: a scanout primary keeps publishing (the kernel scans its
+ * allocation out) but does not pull the allocation back into the texture
+ * before a draw. Whether that is safe depends on the compositor redrawing
+ * the whole primary, which is what this switch measures. */
+static bool
+ZeroCopySkipsPrimaryRefresh(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = ZeroCopyOptIn("VIOGPU_ZERO_COPY_NO_PRIMARY_REFRESH",
+                            "C:\\ProgramData\\DroidVM\\viogpu-zero-copy-no-primary-refresh");
       cached = value;
    }
    return value != 0;
@@ -644,6 +669,8 @@ HRESULT
 RefreshSharedResource(Device *device, Resource *resource)
 {
    if (!resource || resource->hAllocation == 0 || resource->shared_dirty || resource->zero_copy)
+      return S_OK;
+   if (resource->zero_copy_owner && resource->scanout_primary && ZeroCopySkipsPrimaryRefresh())
       return S_OK;
    return TransferSharedResource(device, resource, false);
 }
@@ -1570,7 +1597,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    }
    /* Stop handing this key out before the texture loses its last reference:
     * the kernel can hand the same key to a later export. */
-   if (pResource->zero_copy_owner)
+   if (pResource->zero_copy_owner || pResource->zero_copy_local)
       UnregisterZeroCopyShare(pipe->screen, pResource->zero_copy_key);
    /* WDDM 2.0: evict each held residency reference exactly once, then
     * release the staging allocation and any allocation this device created. */
