@@ -119,7 +119,7 @@ def check_call_sites(here):
                   ['EnsureSharedCopy(device,resource)', 'SubmitSharedCopy(device,resource,false)',
                    'if(SUCCEEDED(hr))resource->staging_idle=true;'])
     require_order('Present waits for the paging fence before PresentCb', body(dxgi, '_Present'),
-                  ['PreparePresentResource(device,pSrcResource,false)', 'hr=ResidencyPrepareSubmission(device);',
+                  ['PreparePresentResource(device,pSrcResource,false,pPresentData->Flags.Flip!=0)', 'hr=ResidencyPrepareSubmission(device);',
                    'device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice,&present)'])
     require_order('SetDisplayMode waits for the paging fence', body(dxgi, '_SetDisplayMode'),
                   ['HRESULThr=ResidencyPrepareSubmission(device);',
