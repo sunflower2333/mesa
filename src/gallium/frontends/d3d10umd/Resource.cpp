@@ -660,6 +660,49 @@ subResourceBox(struct pipe_resource *resource, // IN
 
 
 /*
+ * DWM's swap-chain buffers arrive as DXGI_DDI_PRIMARY_OPTIONAL primaries.
+ * Declaring them NO_SCANOUT keeps DWM on "Legacy Copy to front buffer": its
+ * SyncInterval=1 Blt to the explicit primary is held until the next vblank,
+ * the copy completes just after that vblank, and DWM composes again only at
+ * the one after it -- so the desktop can never present on more than every
+ * second guest vblank whatever the work costs (measured 2026-09-17: 60 Hz
+ * 28/s with 14 ms spent inside Present, 120 Hz 55/s, 165 Hz 74/s).
+ *
+ * Accepting a buffer that matches the primary's mode as a real scanout primary
+ * lets DXGI flip it instead, through the miniport's FlipOnVSyncMmIo path, where
+ * the next vsync confirms the flip. The opt-in is a file so the compositor can
+ * be switched either way with a dwm.exe restart and no reinstall.
+ */
+static bool
+FlipOptionalPrimaries(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = GetFileAttributesA("C:\\ProgramData\\DroidVM\\viogpu-dwm-flip") !=
+              INVALID_FILE_ATTRIBUTES;
+      cached = value;
+   }
+   return value != 0;
+}
+
+static bool
+OptionalPrimaryCanScanOut(const Device *device, const D3D10DDIARG_CREATERESOURCE *create)
+{
+   const DXGI_DDI_PRIMARY_DESC *primary = create->pPrimaryDesc;
+   return FlipOptionalPrimaries() && device->runtime_present && primary->VidPnSourceId == 0 &&
+          (primary->Flags & ~(DXGI_DDI_PRIMARY_OPTIONAL | DXGI_DDI_PRIMARY_NONPREROTATED)) == 0 &&
+          primary->ModeDesc.Rotation == DXGI_DDI_MODE_ROTATION_IDENTITY &&
+          primary->ModeDesc.Width == create->pMipInfoList[0].TexelWidth &&
+          primary->ModeDesc.Height == create->pMipInfoList[0].TexelHeight &&
+          primary->ModeDesc.Format == create->Format &&
+          primary->ModeDesc.RefreshRate.Numerator != 0 &&
+          primary->ModeDesc.RefreshRate.Denominator != 0 &&
+          create->MipLevels == 1 && create->ArraySize == 1 && create->SampleDesc.Count == 1;
+}
+
+
+/*
  * ----------------------------------------------------------------------
  *
  * CreateResource --
@@ -737,10 +780,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    if (pCreateResource->pPrimaryDesc) {
       DXGI_DDI_PRIMARY_DESC *primary = pCreateResource->pPrimaryDesc;
       const bool optional = (primary->Flags & DXGI_DDI_PRIMARY_OPTIONAL) != 0;
-      // Optional app buffers retain copy-style presentation. DWM requires a
-      // real primary: allocate the miniport's standard scanout backing below.
-      primary->DriverFlags = optional ? DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT : 0;
-      pResource->scanout_primary = !optional;
+      // DWM's explicit primary is always a real primary. Optional swap-chain
+      // buffers stay copy-only unless flipping them is enabled and they match
+      // the primary's mode exactly (see FlipOptionalPrimaries).
+      const bool scanout =
+         !optional || OptionalPrimaryCanScanOut(CastDevice(hDevice), pCreateResource);
+      primary->DriverFlags = scanout ? 0 : DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
+      pResource->scanout_primary = scanout;
       static volatile LONG primaryCount;
       const LONG sample = InterlockedIncrement(&primaryCount);
       if (sample <= 16) {
