@@ -41,6 +41,9 @@
 #include "Debug.h"
 #include <limits.h>
 
+#include "frontend/winsys_handle.h"
+#include "util/os_time.h"
+#include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_rect.h"
 #include "util/u_surface.h"
@@ -73,6 +76,90 @@ SharedDxgiFormat(VIOGPU_WDDM_UINT32 format)
    default:
       return DXGI_FORMAT_UNKNOWN;
    }
+}
+
+/* Opt-in zero-copy sharing of kernel-backed textures between devices: the
+ * creator exports its native allocation as a KMT share key carried in the
+ * resource private data, and every opener imports that allocation instead of
+ * copying through the D3D allocation. The file keeps the copy path the default
+ * until the import path is proven on the device. */
+static bool
+ZeroCopySharedSurfaces(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = GetFileAttributesA("C:\\ProgramData\\DroidVM\\viogpu-zero-copy") !=
+              INVALID_FILE_ATTRIBUTES;
+      cached = value;
+   }
+   return value != 0;
+}
+
+static void
+LogZeroCopy(const char *op, UINT64 key, unsigned width, unsigned height, unsigned stride, bool ok)
+{
+   static volatile LONG events;
+   /* Every failure, and enough successes to show the path working. */
+   if (ok && InterlockedIncrement(&events) > 64)
+      return;
+   HANDLE log = CreateFileA("C:\\Users\\Public\\umd_zerocopy.log", FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+   if (log == INVALID_HANDLE_VALUE)
+      return;
+   char line[192];
+   int n = _snprintf_s(line, sizeof line, _TRUNCATE,
+                       "pid=%lu tick=%llu op=%s key=0x%llx size=%ux%u stride=%u ok=%u\r\n",
+                       GetCurrentProcessId(), GetTickCount64(), op, (unsigned long long)key,
+                       width, height, stride, ok ? 1u : 0u);
+   DWORD written;
+   if (n > 0)
+      WriteFile(log, line, (DWORD)n, &written, NULL);
+   CloseHandle(log);
+}
+
+static bool
+IsValidResourceShare(const VIOGPU_WDDM_RESOURCE_SHARE *share, unsigned width)
+{
+   return share->Header.Magic == VIOGPU_WDDM_ABI_MAGIC &&
+          share->Header.Version == VIOGPU_WDDM_ABI_VERSION &&
+          share->Header.Size == sizeof(*share) && share->Header.Reserved == 0 &&
+          share->ShareKey != 0 && share->ShareKey <= UINT32_MAX &&
+          share->Stride >= width * 4 && share->Flags == 0 &&
+          share->Reserved[0] == 0 && share->Reserved[1] == 0;
+}
+
+/* Creates the linear texture a zero-copy shared resource renders into and
+ * exports its native allocation. Returns NULL when the backend cannot share,
+ * and the caller then uses the copied GPU cache instead. */
+static struct pipe_resource *
+CreateZeroCopyTexture(struct pipe_context *pipe, const struct pipe_resource *templat,
+                      VIOGPU_WDDM_RESOURCE_SHARE *share)
+{
+   struct pipe_screen *screen = pipe->screen;
+   struct pipe_resource shared = *templat;
+   shared.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
+   struct pipe_resource *texture = screen->resource_create(screen, &shared);
+   struct winsys_handle whandle;
+   memset(&whandle, 0, sizeof whandle);
+   whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
+   bool ok = texture && screen->resource_get_handle &&
+             screen->resource_get_handle(screen, pipe, texture, &whandle,
+                                         PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
+   memset(share, 0, sizeof *share);
+   share->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   share->Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   share->Header.Size = sizeof(*share);
+   share->ShareKey = ok ? (UINT64)(ULONG_PTR)whandle.handle : 0;
+   share->Stride = ok ? whandle.stride : 0;
+   ok = ok && whandle.offset == 0 && IsValidResourceShare(share, templat->width0);
+   LogZeroCopy("export", share->ShareKey, templat->width0, templat->height0, share->Stride, ok);
+   if (!ok) {
+      pipe_resource_reference(&texture, NULL);
+      memset(share, 0, sizeof *share);
+   }
+   return texture;
 }
 
 static struct pipe_resource *
@@ -444,10 +531,30 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
    return hr;
 }
 
+/* Other devices read a zero-copy texture's memory directly, and there is no
+ * implicit synchronization between native contexts: finish this device's GPU
+ * work before its writes are handed over. */
+static HRESULT
+FinishZeroCopyWrites(Device *device)
+{
+   struct pipe_context *pipe = device->pipe;
+   struct pipe_screen *screen = pipe->screen;
+   struct pipe_fence_handle *fence = NULL;
+   pipe->flush(pipe, &fence, 0);
+   if (fence) {
+      screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
+      screen->fence_reference(screen, &fence, NULL);
+   }
+   if (pipe->get_device_reset_status &&
+       pipe->get_device_reset_status(pipe) != PIPE_NO_RESET)
+      return D3DDDIERR_DEVICEREMOVED;
+   return S_OK;
+}
+
 HRESULT
 RefreshSharedResource(Device *device, Resource *resource)
 {
-   if (!resource || resource->hAllocation == 0 || resource->shared_dirty)
+   if (!resource || resource->hAllocation == 0 || resource->shared_dirty || resource->zero_copy)
       return S_OK;
    return TransferSharedResource(device, resource, false);
 }
@@ -457,7 +564,8 @@ PublishSharedResource(Device *device, Resource *resource)
 {
    if (!resource || !resource->shared_dirty)
       return S_OK;
-   HRESULT hr = TransferSharedResource(device, resource, true);
+   HRESULT hr = resource->zero_copy ? FinishZeroCopyWrites(device)
+                                    : TransferSharedResource(device, resource, true);
    if (SUCCEEDED(hr))
       resource->shared_dirty = false;
    return hr;
@@ -466,28 +574,56 @@ PublishSharedResource(Device *device, Resource *resource)
 HRESULT
 PublishSharedResources(Device *device)
 {
+   bool zeroCopyDirty = false;
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
+      if (resource->zero_copy) {
+         zeroCopyDirty |= resource->shared_dirty;
+         continue;
+      }
       HRESULT hr = PublishSharedResource(device, resource);
       if (FAILED(hr))
          return hr;
+   }
+   if (!zeroCopyDirty)
+      return S_OK;
+   /* One GPU synchronization covers every zero-copy texture of the device. */
+   HRESULT hr = FinishZeroCopyWrites(device);
+   if (FAILED(hr))
+      return hr;
+   for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
+      if (resource->zero_copy)
+         resource->shared_dirty = false;
    }
    return S_OK;
 }
 
 HRESULT
-PreparePresentResource(Device *device, Resource *resource, bool refreshCache)
+PreparePresentResource(Device *device, Resource *resource, bool refreshCache, bool flip)
 {
    if (!resource || !resource->hAllocation)
       return DXGI_DDI_ERR_UNSUPPORTED;
+   // A flip-model present hands the buffer to the compositor, which imports a
+   // zero-copy texture itself. A blt present is copied by the kernel from the
+   // D3D allocation, so that allocation must still receive the pixels.
+   if (resource->zero_copy && flip)
+      return resource->shared_dirty ? PublishSharedResource(device, resource) : S_OK;
    HRESULT hr = EnsureSharedCopy(device, resource);
    if (FAILED(hr))
       return hr;
    // PresentCb consumes the kernel allocation. Clean allocation contents are
    // already authoritative, so only a subsequent UMD readback needs its GPU
    // cache refreshed. Dirty writes still publish and wait before PresentCb.
+   if (resource->shared_dirty && resource->zero_copy) {
+      // The READ map of the copy waits for this device's GPU writes, which
+      // also covers every importer of the texture.
+      hr = TransferSharedResource(device, resource, true);
+      if (SUCCEEDED(hr))
+         resource->shared_dirty = false;
+      return hr;
+   }
    if (resource->shared_dirty)
       return PublishSharedResource(device, resource);
-   return refreshCache ? RefreshSharedResource(device, resource) : S_OK;
+   return refreshCache && !resource->zero_copy ? RefreshSharedResource(device, resource) : S_OK;
 }
 
 void
@@ -884,8 +1020,16 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       }
    }
 
-   pResource->resource = kernelBacked ? CreateSharedTextureCache(screen, &templat)
-                                     : screen->resource_create(screen, &templat);
+   /* Scanout primaries keep the copy: the kernel scans out their allocation. */
+   VIOGPU_WDDM_RESOURCE_SHARE resourceShare;
+   memset(&resourceShare, 0, sizeof resourceShare);
+   if (kernelBacked && !pResource->scanout_primary && ZeroCopySharedSurfaces())
+      pResource->resource = CreateZeroCopyTexture(pipe, &templat, &resourceShare);
+   pResource->zero_copy = pResource->resource != NULL;
+   pResource->zero_copy_key = resourceShare.ShareKey;
+   if (!pResource->resource)
+      pResource->resource = kernelBacked ? CreateSharedTextureCache(screen, &templat)
+                                        : screen->resource_create(screen, &templat);
    if (!pResource->resource) {
       DebugPrintf("%s: failed to create resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);
@@ -948,6 +1092,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       allocate.hResource = (HANDLE)(UINT_PTR)hRTResource.handle;
       allocate.NumAllocations = 1;
       allocate.pAllocationInfo = &allocationInfo;
+      if (pResource->zero_copy) {
+         // The runtime returns resource private data to every OpenResource.
+         allocate.pPrivateDriverData = &resourceShare;
+         allocate.PrivateDriverDataSize = sizeof resourceShare;
+      }
 
       HRESULT ahr = pDevice->KTCallbacks.pfnAllocateCb(pDevice->hDevice, &allocate);
 
@@ -1192,7 +1341,35 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    templat.usage = PIPE_USAGE_DEFAULT;
    templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
 
-   pResource->resource = CreateSharedTextureCache(screen, &templat);
+   /* A zero-copy creator put its share key in the resource private data;
+    * import that allocation with the same linear layout the creator used. */
+   if (ZeroCopySharedSurfaces() && pOpenResource->pPrivateDriverData &&
+       pOpenResource->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_RESOURCE_SHARE) &&
+       info.Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY) {
+      VIOGPU_WDDM_RESOURCE_SHARE share;
+      memcpy(&share, pOpenResource->pPrivateDriverData, sizeof share);
+      if (IsValidResourceShare(&share, info.Width)) {
+         struct pipe_resource shared = templat;
+         shared.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
+         struct winsys_handle whandle;
+         memset(&whandle, 0, sizeof whandle);
+         whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
+         whandle.handle = (HANDLE)(ULONG_PTR)share.ShareKey;
+         whandle.stride = share.Stride;
+         // No DRM format modifier on Windows; zink reads 0 as "none".
+         whandle.format = templat.format;
+         pResource->resource = screen->resource_from_handle
+                                  ? screen->resource_from_handle(screen, &shared, &whandle,
+                                                                 PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE)
+                                  : NULL;
+         pResource->zero_copy = pResource->resource != NULL;
+         pResource->zero_copy_key = share.ShareKey;
+         LogZeroCopy("import", share.ShareKey, info.Width, info.Height, share.Stride,
+                     pResource->zero_copy);
+      }
+   }
+   if (!pResource->resource)
+      pResource->resource = CreateSharedTextureCache(screen, &templat);
    if (pResource->resource == NULL) {
       DebugPrintf("%s: could not create the backing resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);

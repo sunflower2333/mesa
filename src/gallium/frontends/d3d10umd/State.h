@@ -221,6 +221,11 @@ struct Resource
    D3DKMT_HANDLE shared_staging_allocation;
    bool shared_dirty;
    bool scanout_primary;
+   /* The texture is the creator's exported native allocation (creator) or an
+    * import of it (opener): no copy through the D3D allocation is needed to
+    * share its pixels, only a GPU synchronization after writes. */
+   bool zero_copy;
+   UINT64 zero_copy_key;
    // Only a CPU-visible allocation created by this device can be locked
    // directly. Opened handles and primaries use scheduled private staging.
    bool allocation_lockable;

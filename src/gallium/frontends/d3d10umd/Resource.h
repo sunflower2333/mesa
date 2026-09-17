@@ -42,7 +42,7 @@ struct pipe_resource;
 HRESULT RefreshSharedResource(Device *device, Resource *resource);
 HRESULT PublishSharedResource(Device *device, Resource *resource);
 HRESULT PublishSharedResources(Device *device);
-HRESULT PreparePresentResource(Device *device, Resource *resource, bool refreshCache);
+HRESULT PreparePresentResource(Device *device, Resource *resource, bool refreshCache, bool flip);
 bool PrepareSharedDraw(Device *device);
 void MarkSharedResourceWritten(Device *device, struct pipe_resource *resource);
 

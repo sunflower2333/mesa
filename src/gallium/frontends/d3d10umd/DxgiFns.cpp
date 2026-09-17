@@ -411,7 +411,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "validate", DXGI_DDI_ERR_UNSUPPORTED, started);
       device->pipe->flush(device->pipe, NULL, 0);
-      HRESULT hr = PreparePresentResource(device, pSrcResource, false);
+      HRESULT hr = PreparePresentResource(device, pSrcResource, false, pPresentData->Flags.Flip != 0);
       if (FAILED(hr))
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "prepare", hr, started);

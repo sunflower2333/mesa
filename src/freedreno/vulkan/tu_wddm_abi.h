@@ -170,6 +170,19 @@ typedef struct VIOGPU_WDDM_NATIVE_SHARE {
    VIOGPU_WDDM_UINT64 Reserved2[3];
 } VIOGPU_WDDM_NATIVE_SHARE;
 
+/* Optional resource-level private data of a zero-copy shared D3D resource.
+ * Its pixels live in the creator's exported native allocation (ShareKey, see
+ * VIOGPU_WDDM_NATIVE_SHARE); every opener imports that allocation instead of
+ * copying through the resource's own allocation. Stride is the row pitch of
+ * the linear layout both sides use. */
+typedef struct VIOGPU_WDDM_RESOURCE_SHARE {
+   VIOGPU_WDDM_ABI_HEADER Header;
+   VIOGPU_WDDM_UINT64 ShareKey;
+   VIOGPU_WDDM_UINT32 Stride;
+   VIOGPU_WDDM_UINT32 Flags;
+   VIOGPU_WDDM_UINT64 Reserved[2];
+} VIOGPU_WDDM_RESOURCE_SHARE;
+
 typedef struct VIOGPU_WDDM_RENDER_COMMAND {
    VIOGPU_WDDM_ABI_HEADER Header;
    VIOGPU_WDDM_UINT32 Opcode;
@@ -234,6 +247,8 @@ static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 64, "WDDM context-info ABI lay
 static_assert(sizeof(VIOGPU_WDDM_FENCE_INFO) == 56, "WDDM fence-info ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) == 64, "WDDM render ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) == 32, "WDDM reference ABI layout changed");
+static_assert(sizeof(VIOGPU_WDDM_NATIVE_SHARE) == 88, "WDDM native share ABI layout changed");
+static_assert(sizeof(VIOGPU_WDDM_RESOURCE_SHARE) == 48, "WDDM resource share ABI layout changed");
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, VaStart) == 32, "WDDM context VA offset changed");
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, VaSize) == 40, "WDDM context VA size offset changed");
 static_assert(offsetof(VIOGPU_WDDM_CONTEXT_INFO, ResetGeneration) == 48,

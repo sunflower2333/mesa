@@ -1228,6 +1228,13 @@ update_obj_info(struct zink_screen *screen, struct zink_resource_object *obj,
    if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE)) {
       obj->host_visible = screen->info.mem_props.memoryTypes[obj->bo->base.placement].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
    }
+#ifdef _WIN32
+   /* An imported KMT allocation lives in another process's WDDM allocation
+    * and cannot be mapped here, whatever its memory type says: CPU access
+    * goes through a staging copy instead. */
+   if (alloc_info->whandle)
+      obj->host_visible = false;
+#endif
 }
 
 static inline void
