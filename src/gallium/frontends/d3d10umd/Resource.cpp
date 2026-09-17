@@ -180,7 +180,7 @@ LogZeroCopy(const char *op, UINT64 key, unsigned width, unsigned height, unsigne
 {
    static volatile LONG events;
    /* Every failure, and enough successes to show the path working. */
-   if (ok && InterlockedIncrement(&events) > 64)
+   if (ok && InterlockedIncrement(&events) > 512)
       return;
    HANDLE log = CreateFileA("C:\\Users\\Public\\umd_zerocopy.log", FILE_APPEND_DATA,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
@@ -1213,6 +1213,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          }
       }
 
+      LogZeroCopy(pResource->zero_copy_owner ? "create-shared" : "create-copied",
+                  resourceShare.ShareKey, shared_width, shared_height,
+                  pResource->scanout_primary ? 1u : 0u, SUCCEEDED(ahr));
       if (FAILED(ahr) || allocationInfo.hAllocation == 0) {
          DebugPrintf("%s: shared allocation failed hr=0x%08lx\n",
                      __func__, (unsigned long)ahr);
@@ -1362,12 +1365,17 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
       if (log != INVALID_HANDLE_VALUE) {
          char line[256];
+         /* resPriv is the creator's resource-level private data: the zero-copy
+          * share key travels there, so its size says whether this open can
+          * share the creator's texture at all. */
          int n = _snprintf_s(line, sizeof line, _TRUNCATE,
-                             "open numAlloc=%u privSize=%u expect=%u\r\n",
+                             "open numAlloc=%u privSize=%u expect=%u resPriv=%u resExpect=%u\r\n",
                              pOpenResource ? pOpenResource->NumAllocations : 0u,
                              (pOpenResource && pOpenResource->NumAllocations && pOpenResource->pOpenAllocationInfo)
                                 ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0u,
-                             (unsigned)sizeof(VIOGPU_WDDM_ALLOCATION_INFO));
+                             (unsigned)sizeof(VIOGPU_WDDM_ALLOCATION_INFO),
+                             pOpenResource ? pOpenResource->PrivateDriverDataSize : 0u,
+                             (unsigned)sizeof(VIOGPU_WDDM_RESOURCE_SHARE));
          DWORD written = 0;
          if (n > 0)
             WriteFile(log, line, (DWORD)n, &written, NULL);
