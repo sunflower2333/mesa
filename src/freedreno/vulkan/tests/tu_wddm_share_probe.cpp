@@ -392,7 +392,7 @@ main(int argc, char **argv)
    if (result != VK_SUCCESS || handle == nullptr)
       return fail("export KMT handle from A", result);
    printf("export key=0x%llx size=%llu rowPitch=%llu\n",
-          static_cast<unsigned long long>(static_cast<uintptr_t>(handle)),
+          static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(handle)),
           static_cast<unsigned long long>(req_a.size),
           static_cast<unsigned long long>(layout.rowPitch));
 
