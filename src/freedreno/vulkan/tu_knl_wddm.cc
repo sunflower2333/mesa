@@ -3074,18 +3074,32 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
 {
    if (out_bo != NULL)
       *out_bo = NULL;
+   /* Every failure below used to return silently, which made an import that
+    * failed indistinguishable from one that was never attempted: the miniport
+    * only publishes its share counters on a refusal, so "no refusal recorded"
+    * could mean either the KMD accepted the escape or it never saw it. Name the
+    * exact site instead. */
    if (out_bo == NULL || size == 0 || share_key == 0 || share_key > UINT32_MAX ||
-       size > UINT64_MAX - UINT64_C(4095))
+       size > UINT64_MAX - UINT64_C(4095)) {
+      mesa_loge("wddm import rejected its arguments: key=0x%llx size=%llu",
+                (unsigned long long)share_key, (unsigned long long)size);
       return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
-   if (vk_device_is_lost(&dev->vk))
+   }
+   if (vk_device_is_lost(&dev->vk)) {
+      mesa_loge("wddm import on a lost device: key=0x%llx size=%llu",
+                (unsigned long long)share_key, (unsigned long long)size);
       return VK_ERROR_DEVICE_LOST;
+   }
 
    const uint64_t vma_size = (size + UINT64_C(4095)) & ~UINT64_C(4095);
    mtx_lock(&dev->vma_mutex);
    const uint64_t iova = util_vma_heap_alloc(&dev->vma, vma_size, os_page_size);
    mtx_unlock(&dev->vma_mutex);
-   if (iova == 0)
+   if (iova == 0) {
+      mesa_loge("wddm import found no free VA range: key=0x%llx vma_size=%llu",
+                (unsigned long long)share_key, (unsigned long long)vma_size);
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
 
    struct tu_wddm_allocation *allocation = (struct tu_wddm_allocation *)vk_zalloc(
       &dev->vk.alloc, sizeof(*allocation), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -3118,6 +3132,8 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
    }
    mtx_unlock(&dev->bo_mutex);
    if (bo == NULL) {
+      mesa_loge("wddm import found no free BO slot: key=0x%llx size=%llu",
+                (unsigned long long)share_key, (unsigned long long)size);
       vk_free(&dev->vk.alloc, allocation);
       mtx_lock(&dev->vma_mutex);
       util_vma_heap_free(&dev->vma, iova, vma_size);
@@ -3133,6 +3149,10 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
    import.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_ALIAS_OWNER;
    if (!tu_wddm_context_native_share(&dev->wddm_context,
                                      VIOGPU_WDDM_ESCAPE_IMPORT_NATIVE, &import)) {
+      /* The KMD refused; its own share counters name the stage. */
+      mesa_loge("wddm import escape refused: key=0x%llx size=%llu iova=0x%llx",
+                (unsigned long long)share_key, (unsigned long long)size,
+                (unsigned long long)iova);
       mtx_lock(&dev->bo_mutex);
       memset(bo, 0, sizeof(*bo));
       mtx_unlock(&dev->bo_mutex);
@@ -3147,6 +3167,11 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
       /* The kernel aliased an allocation this context owns: it mapped nothing,
        * so give back the range reserved for a mapping that never happened. */
       if (import.Iova == 0 || (import.Iova & UINT64_C(4095)) != 0 || import.Size < size) {
+         mesa_loge("wddm import rejected the alias answer: key=0x%llx want_size=%llu "
+                   "want_iova=0x%llx got_iova=0x%llx got_size=%llu",
+                   (unsigned long long)share_key, (unsigned long long)size,
+                   (unsigned long long)iova, (unsigned long long)import.Iova,
+                   (unsigned long long)import.Size);
          mtx_lock(&dev->bo_mutex);
          memset(bo, 0, sizeof(*bo));
          mtx_unlock(&dev->bo_mutex);
@@ -3163,6 +3188,12 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
       allocation->vma_size = 0;
       allocation->private_info.RequestedIova = import.Iova;
       bo->iova = import.Iova;
+      /* Reaching here proves the ALIAS_OWNER flag survived the escape helper and
+       * the KMD's alias branch ran end to end: it is the positive signal that
+       * the self-owned import path works. */
+      mesa_logi("wddm import aliased the owner's range: key=0x%llx iova=0x%llx size=%llu",
+                (unsigned long long)share_key, (unsigned long long)import.Iova,
+                (unsigned long long)import.Size);
    }
 
    bo->name = tu_debug_bos_add(dev, size, "imported");
