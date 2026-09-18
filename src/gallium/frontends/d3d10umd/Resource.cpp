@@ -249,6 +249,50 @@ LogZeroCopy(const char *op, UINT64 key, unsigned width, unsigned height, unsigne
    CloseHandle(log);
 }
 
+/* Resource lifetime, both ends. DestroyResource unregisters a ShareKey and
+ * records nothing, so no artefact says whether a primary persists or is
+ * replaced -- which is why three separate mechanisms were proposed about a
+ * turnover nobody had measured. Rotation permutes existing allocations and
+ * mints no new ShareKeys, yet set_scanout showed many distinct native ids
+ * under native scanout; create/destroy pairs distinguish "rotation permuting
+ * a stable set" from "the set turning over", which is the fact all of those
+ * guesses were reaching for.
+ *
+ * Deliberately separate from LogZeroCopy: that one stops after 512 successes,
+ * which is exactly why steady-state turnover was invisible there. The cap here
+ * is high and, when it is reached, says so on its own line -- a truncated log
+ * must never read as a quiet one. */
+static void
+LogResourceLifetime(const char *op, UINT64 key, D3DKMT_HANDLE hAllocation,
+                    unsigned width, unsigned height, bool primary,
+                    bool zero_copy, bool owner)
+{
+   static volatile LONG events;
+   const LONG seq = InterlockedIncrement(&events);
+   if (seq > 50000)
+      return;
+   HANDLE log = CreateFileA("C:\\Users\\Public\\umd_lifetime.log", FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+   if (log == INVALID_HANDLE_VALUE)
+      return;
+   char line[224];
+   int n = seq == 50000
+      ? _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "pid=%lu tick=%llu op=capped note=lifetime-log-reached-50000-lines\r\n",
+                    GetCurrentProcessId(), GetTickCount64())
+      : _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "pid=%lu tick=%llu seq=%ld op=%s key=0x%llx hAlloc=0x%x size=%ux%u "
+                    "primary=%u zc=%u owner=%u\r\n",
+                    GetCurrentProcessId(), GetTickCount64(), seq, op,
+                    (unsigned long long)key, hAllocation, width, height,
+                    primary ? 1u : 0u, zero_copy ? 1u : 0u, owner ? 1u : 0u);
+   DWORD written;
+   if (n > 0)
+      WriteFile(log, line, (DWORD)n, &written, NULL);
+   CloseHandle(log);
+}
+
 static bool
 IsValidResourceShare(const VIOGPU_WDDM_RESOURCE_SHARE *share, unsigned width)
 {
@@ -639,10 +683,20 @@ TransferSharedResource(Device *device, Resource *resource, bool publish)
                                FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
       if (log != INVALID_HANDLE_VALUE) {
-         char line[320];
+         char line[384];
+         /* pid and tick exist so this log can be joined to umd_dxgi.log's
+          * present records, which carry both. Without them the only shared key
+          * is hAllocation -- which is the thing a publish/present correlation
+          * is trying to test, so the join is circular, and two tails of
+          * different lengths cover different time ranges and manufacture
+          * confident-looking mismatches. umd_timing.log has pid and tick but
+          * samples 1 in 64, so absence there proves nothing; this log records
+          * every transfer. */
          int n = _snprintf_s(line, sizeof line, _TRUNCATE,
-                             "seq=%ld op=%s resource=%p hAllocation=0x%x map=%p transfer=%p stride=%u lock=0x%08lx data=%p unlock=0x%08lx reset=%u result=0x%08lx\r\n",
-                             transfer_sequence, publish ? "publish" : "refresh",
+                             "seq=%ld pid=%lu tick=%llu op=%s resource=%p hAllocation=0x%x map=%p transfer=%p stride=%u lock=0x%08lx data=%p unlock=0x%08lx reset=%u result=0x%08lx\r\n",
+                             transfer_sequence, GetCurrentProcessId(),
+                             (unsigned long long)GetTickCount64(),
+                             publish ? "publish" : "refresh",
                              resource, resource->hAllocation, pixels, transfer,
                              transfer_stride, (unsigned long)lock_hr,
                              lock_data, (unsigned long)unlock_hr, (unsigned)reset_status,
@@ -1303,6 +1357,12 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       pResource->shared_pitch = shared_pitch;
       pResource->shared_next = pDevice->shared_resources;
       pDevice->shared_resources = pResource;
+      /* Logged here rather than beside the allocate: the resource is fully
+       * constructed and linked, so a create line always has a matching
+       * destroy line and the pairing cannot be half-formed. */
+      LogResourceLifetime("create", pResource->zero_copy_key, pResource->hAllocation,
+                          shared_width, shared_height, pResource->scanout_primary,
+                          pResource->zero_copy, pResource->zero_copy_owner);
       // A fresh resource has no defined contents until the client writes it.
       pResource->shared_dirty = pCreateResource->pInitialDataUP != NULL;
    }
@@ -1597,6 +1657,16 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Resource *pResource = CastResource(hResource);
    Device *device = CastDevice(hDevice);
+   /* Before anything is torn down: pResource->resource still holds the texture
+    * dimensions, and hAllocation still names the allocation this key was bound
+    * to at creation. Logging after ReleaseResourceAllocations would report a
+    * destroy whose identity had already been cleared. */
+   if (pResource->hAllocation)
+      LogResourceLifetime("destroy", pResource->zero_copy_key, pResource->hAllocation,
+                          pResource->resource ? pResource->resource->width0 : 0,
+                          pResource->resource ? pResource->resource->height0 : 0,
+                          pResource->scanout_primary, pResource->zero_copy,
+                          pResource->zero_copy_owner);
    if (pResource->hAllocation) {
       if (pResource->shared_dirty) {
          pipe->flush(pipe, NULL, 0);
