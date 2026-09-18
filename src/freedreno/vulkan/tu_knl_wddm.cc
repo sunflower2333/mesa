@@ -1053,7 +1053,10 @@ tu_wddm_context_native_share(struct tu_wddm_context *context, uint32_t opcode,
    VIOGPU_WDDM_NATIVE_SHARE request = {};
    tu_wddm_init_header(&request.Header, tu_wddm_sizeof<VIOGPU_WDDM_NATIVE_SHARE>());
    request.Opcode = opcode;
-   request.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_NONE;
+   /* The caller's flags are part of the request: an importer asks for an alias
+    * with ALIAS_OWNER, and forcing NONE here made that branch unreachable. The
+    * KMD validates which flags each opcode accepts. */
+   request.Flags = io->Flags;
    request.ExpectedResetGeneration = context->info.ResetGeneration;
    request.ShareKey = io->ShareKey;
    request.Iova = io->Iova;
