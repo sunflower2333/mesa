@@ -27,6 +27,11 @@
 
 #define VIOGPU_WDDM_CONTEXT_FLAGS_NONE       0U
 #define VIOGPU_WDDM_ESCAPE_FLAGS_NONE        0U
+/* IMPORT_NATIVE: when the calling context already owns the share, map nothing
+ * and answer with the owner's existing address instead of refusing. A context
+ * cannot import its own export, and a process does open a resource it created
+ * itself. */
+#define VIOGPU_WDDM_ESCAPE_FLAGS_ALIAS_OWNER 0x00000001U
 #define VIOGPU_WDDM_RENDER_FLAGS_NONE        0U
 
 #define VIOGPU_WDDM_REFERENCE_READ           0x00000001U

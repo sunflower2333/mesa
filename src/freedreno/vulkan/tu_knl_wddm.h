@@ -144,6 +144,9 @@ struct tu_wddm_allocation {
     * no KMT handle: it is never in a submit's allocation list, never mapped
     * and never made resident by this device; its owner keeps it resident. */
    bool imported;
+   /* The import aliases an allocation this context already owns: nothing was
+    * mapped for it, so it is released without an escape and owns no VMA. */
+   bool aliased;
    /* Nonzero once exported, or the key an imported allocation came from. */
    uint64_t share_key;
 };

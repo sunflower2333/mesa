@@ -3126,6 +3126,8 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
    import.ShareKey = share_key;
    import.Iova = iova;
    import.Size = vma_size;
+   /* Accept an alias when this context turns out to own the share already. */
+   import.Flags = VIOGPU_WDDM_ESCAPE_FLAGS_ALIAS_OWNER;
    if (!tu_wddm_context_native_share(&dev->wddm_context,
                                      VIOGPU_WDDM_ESCAPE_IMPORT_NATIVE, &import)) {
       mtx_lock(&dev->bo_mutex);
@@ -3136,6 +3138,28 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
       util_vma_heap_free(&dev->vma, iova, vma_size);
       mtx_unlock(&dev->vma_mutex);
       return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
+
+   if (import.Iova != iova) {
+      /* The kernel aliased an allocation this context owns: it mapped nothing,
+       * so give back the range reserved for a mapping that never happened. */
+      if (import.Iova == 0 || (import.Iova & UINT64_C(4095)) != 0 || import.Size < size) {
+         mtx_lock(&dev->bo_mutex);
+         memset(bo, 0, sizeof(*bo));
+         mtx_unlock(&dev->bo_mutex);
+         vk_free(&dev->vk.alloc, allocation);
+         mtx_lock(&dev->vma_mutex);
+         util_vma_heap_free(&dev->vma, iova, vma_size);
+         mtx_unlock(&dev->vma_mutex);
+         return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      }
+      mtx_lock(&dev->vma_mutex);
+      util_vma_heap_free(&dev->vma, iova, vma_size);
+      mtx_unlock(&dev->vma_mutex);
+      allocation->aliased = true;
+      allocation->vma_size = 0;
+      allocation->private_info.RequestedIova = import.Iova;
+      bo->iova = import.Iova;
    }
 
    bo->name = tu_debug_bos_add(dev, size, "imported");
@@ -3226,16 +3250,18 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
          return;
       }
       struct tu_wddm_allocation *imported = bo->wddm_allocation;
-      VIOGPU_WDDM_NATIVE_SHARE release = {};
-      release.ShareKey = imported->share_key;
-      release.Iova = bo->iova;
-      /* A failed release leaves the host mapping in place until the owner
-       * destroys the allocation, which revokes every import. */
-      if (!tu_wddm_context_native_share(&dev->wddm_context,
-                                        VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE, &release))
-         tu_wddm_diag("native import release failed key=0x%llx iova=0x%llx",
-                      (unsigned long long)imported->share_key,
-                      (unsigned long long)bo->iova);
+      if (!imported->aliased) {
+         VIOGPU_WDDM_NATIVE_SHARE release = {};
+         release.ShareKey = imported->share_key;
+         release.Iova = bo->iova;
+         /* A failed release leaves the host mapping in place until the owner
+          * destroys the allocation, which revokes every import. */
+         if (!tu_wddm_context_native_share(&dev->wddm_context,
+                                           VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE, &release))
+            tu_wddm_diag("native import release failed key=0x%llx iova=0x%llx",
+                         (unsigned long long)imported->share_key,
+                         (unsigned long long)bo->iova);
+      }
       const uint64_t imported_iova = bo->iova;
       const uint64_t imported_size = imported->vma_size;
       tu_bo_release_heap_accounting(dev, bo);
@@ -3244,9 +3270,12 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       mtx_lock(&dev->bo_mutex);
       memset(bo, 0, sizeof(*bo));
       mtx_unlock(&dev->bo_mutex);
-      mtx_lock(&dev->vma_mutex);
-      util_vma_heap_free(&dev->vma, imported_iova, imported_size);
-      mtx_unlock(&dev->vma_mutex);
+      if (imported_size != 0) {
+         /* An alias owns no range: the owner's allocation still holds it. */
+         mtx_lock(&dev->vma_mutex);
+         util_vma_heap_free(&dev->vma, imported_iova, imported_size);
+         mtx_unlock(&dev->vma_mutex);
+      }
       vk_free(&dev->vk.alloc, imported);
       mtx_unlock(&dev->wddm_mutex);
       return;
