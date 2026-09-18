@@ -316,10 +316,29 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
 #ifdef TU_USE_WSI_PLATFORM
-      .KHR_present_id = true,
-      .KHR_present_id2 = true,
-      .KHR_present_wait = true,
-      .KHR_present_wait2 = true,
+      /* The win32 WSI backend implements no present-wait hook: x11, wayland,
+       * display and headless all assign wsi_swapchain::wait_for_present, and
+       * wsi_common_win32.cpp assigns neither it nor wait_for_present2.  The
+       * generic wsi_WaitForPresentKHR() asserts the hook and then calls it,
+       * so in a release build -- where the assert is compiled out -- a client
+       * that believes the extension is available branches to address 0.
+       *
+       * Observed on WDDM with vkd3d-proton: its swapchain worker took the
+       * present-wait path, called through the null hook and died with pc=0.
+       * A caller cannot defend against this, because the loader hands out a
+       * perfectly valid trampoline for the entry point.
+       *
+       * Gate on is_wddm() rather than on the WSI backend directly: the true
+       * condition is "the win32 backend has no wait_for_present", but that is
+       * a per-swapchain function pointer and wsi_device is not yet initialised
+       * when this table is built, so it cannot be queried here.  WDDM implies
+       * the win32 backend in this tree, and the same table already uses this
+       * idiom for platform-dependent extensions a few lines above.
+       */
+      .KHR_present_id = !is_wddm(device->instance),
+      .KHR_present_id2 = !is_wddm(device->instance),
+      .KHR_present_wait = !is_wddm(device->instance),
+      .KHR_present_wait2 = !is_wddm(device->instance),
 #endif
       .KHR_push_descriptor = true,
       .KHR_ray_query = has_raytracing,
@@ -688,11 +707,15 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->pipelineExecutableInfo = true;
 
 #ifdef TU_USE_WSI_PLATFORM
+   /* Keep these in step with the extension table: the win32 WSI backend has no
+    * present-wait hook, and a feature bit left true would still be visible to a
+    * client that chains the struct, which is how vkd3d-proton decided a wait
+    * path was available. */
    /* VK_KHR_present_id */
-   features->presentId = true;
+   features->presentId = !is_wddm(pdevice->instance);
 
    /* VK_KHR_present_wait */
-   features->presentWait = true;
+   features->presentWait = !is_wddm(pdevice->instance);
 #endif
 
    /* VK_KHR_shader_clock */
@@ -923,10 +946,10 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->swapchainMaintenance1 = true;
 
    /* VK_KHR_present_id2 */
-   features->presentId2 = true;
+   features->presentId2 = !is_wddm(pdevice->instance);
 
    /* VK_KHR_present_wait2 */
-   features->presentWait2 = true;
+   features->presentWait2 = !is_wddm(pdevice->instance);
 #endif
 
    /* VK_EXT_texel_buffer_alignment */
