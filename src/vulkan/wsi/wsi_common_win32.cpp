@@ -322,14 +322,42 @@ static const struct {
 };
 
 
-static void
+/* Mirrors the condition in wsi_win32_surface_create_swapchain(): when DXGI is
+ * unavailable the swapchain falls back to the CPU present path, which blits
+ * through a GDI DIB section.
+ */
+static bool
+wsi_win32_cpu_present_path(struct wsi_device *wsi_device)
+{
+   const struct wsi_win32 *wsi =
+      (const struct wsi_win32 *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
+   bool supports_dxgi = wsi && wsi->dxgi.factory && wsi->dxgi.dcomp &&
+                        wsi_device->win32.get_d3d12_command_queue;
+   return !supports_dxgi;
+}
+
+static uint32_t
 get_sorted_vk_formats(struct wsi_device *wsi_device, VkFormat *sorted_formats)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++)
-      sorted_formats[i] = available_surface_formats[i].format;
+   /* The CPU present path memcpys swapchain rows straight into a DIB section
+    * created with biBitCount = 32 / BI_RGB, which GDI defines as BGRA, and it
+    * performs no format conversion.  A B8G8R8A8 image copies correctly; an
+    * R8G8B8A8 one is displayed with its red and blue channels exchanged.  So
+    * only advertise R8G8B8A8_UNORM when a path exists that can actually
+    * present it.
+    */
+   bool skip_rgba = wsi_win32_cpu_present_path(wsi_device);
+
+   uint32_t count = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
+      VkFormat format = available_surface_formats[i].format;
+      if (skip_rgba && format == VK_FORMAT_R8G8B8A8_UNORM)
+         continue;
+      sorted_formats[count++] = format;
+   }
 
    if (wsi_device->force_bgra8_unorm_first) {
-      for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
+      for (unsigned i = 0; i < count; i++) {
          if (sorted_formats[i] == VK_FORMAT_B8G8R8A8_UNORM) {
             sorted_formats[i] = sorted_formats[0];
             sorted_formats[0] = VK_FORMAT_B8G8R8A8_UNORM;
@@ -337,6 +365,8 @@ get_sorted_vk_formats(struct wsi_device *wsi_device, VkFormat *sorted_formats)
          }
       }
    }
+
+   return count;
 }
 
 static VkResult
@@ -348,9 +378,9 @@ wsi_win32_surface_get_formats(VkIcdSurfaceBase *icd_surface,
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out, pSurfaceFormats, pSurfaceFormatCount);
 
    VkFormat sorted_formats[ARRAY_SIZE(available_surface_formats)];
-   get_sorted_vk_formats(wsi_device, sorted_formats);
+   uint32_t num_formats = get_sorted_vk_formats(wsi_device, sorted_formats);
 
-   for (unsigned i = 0; i < ARRAY_SIZE(sorted_formats); i++) {
+   for (unsigned i = 0; i < num_formats; i++) {
       vk_outarray_append_typed(VkSurfaceFormatKHR, &out, f) {
          f->format = sorted_formats[i];
          f->colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
@@ -370,9 +400,9 @@ wsi_win32_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out, pSurfaceFormats, pSurfaceFormatCount);
 
    VkFormat sorted_formats[ARRAY_SIZE(available_surface_formats)];
-   get_sorted_vk_formats(wsi_device, sorted_formats);
+   uint32_t num_formats = get_sorted_vk_formats(wsi_device, sorted_formats);
 
-   for (unsigned i = 0; i < ARRAY_SIZE(sorted_formats); i++) {
+   for (unsigned i = 0; i < num_formats; i++) {
       vk_outarray_append_typed(VkSurfaceFormat2KHR, &out, f) {
          assert(f->sType == VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR);
          f->surfaceFormat.format = sorted_formats[i];
