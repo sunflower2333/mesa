@@ -1679,6 +1679,26 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
    if (!success)
       return roc_fail_and_free_object;
 
+#ifdef _WIN32
+   /* An imported KMT allocation can never be host-mapped: tu_wddm_bo_map()
+    * refuses every allocation flagged imported, which is the same fact that
+    * makes obj->host_visible false for a winsys handle below.  Turnip's bind
+    * treats HOST_TRANSFER as a promise that the memory is mappable and calls
+    * tu_bo_map() unconditionally for an image carrying it, so leaving the bit
+    * set makes vkBindImageMemory fail for every imported image -- measured as
+    * 129 of 129 binds refused, from 8 KB up to a full 3040x1904 primary, all
+    * with need size exactly equal to have mem size.
+    *
+    * Clear the claim rather than teaching the bind to ignore it: an image that
+    * silently kept HOST_TRANSFER with no mapping would turn a clean, printable
+    * bind failure into a null dereference somewhere in a later host-copy path.
+    * Dropping a usage bit after negotiation is safe because it only relaxes
+    * what the image requires, so the configuration just negotiated remains
+    * creatable. */
+   if (alloc_info->whandle)
+      ici.usage &= ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+#endif
+
    if (ici.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT && srgb &&
       util_format_get_nr_components(srgb) == 4 &&
       !(ici.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
