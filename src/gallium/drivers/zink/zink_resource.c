@@ -1532,6 +1532,42 @@ setup_image_pnext(struct zink_screen *screen, const struct pipe_resource *templ,
    }
 }
 
+/* A bind failure says nothing about why on its own, and it is the dominant
+ * failure for an imported KMT allocation: the memory is already allocated, so
+ * the share import itself succeeded and the layout the importing image was
+ * created with is what does not fit. Re-query the requirements of the image we
+ * just built and print them beside what the imported object actually is, so the
+ * mismatch (size, alignment, or a memory type the import cannot satisfy) is
+ * readable without a debugger. Only runs on the failure path.
+ */
+static void
+log_image_bind_failure(struct zink_screen *screen, struct zink_resource_object *obj,
+                       const struct pipe_resource *templ, const VkImageCreateInfo *ici,
+                       const struct mem_alloc_info *alloc_info, const char *which,
+                       uint64_t bound_offset)
+{
+   VkMemoryRequirements reqs = {0};
+   VKSCR(GetImageMemoryRequirements)(screen->dev, obj->image, &reqs);
+   const unsigned placement = obj->bo ? obj->bo->base.placement : 0;
+   const VkMemoryPropertyFlags props =
+      obj->bo ? screen->info.mem_props.memoryTypes[placement].propertyFlags : 0;
+   mesa_loge("ZINK: %s failed: need size=%llu align=%llu typeBits=0x%x; "
+             "have mem size=%llu offset=%llu bind_offset=%llu type_idx=%u props=0x%x; "
+             "image tiling=%u usage=0x%x flags=0x%x extent=%ux%u fmt=%u; "
+             "import=%d external=0x%x dedicated=%d host_visible=%d bind=0x%x",
+             which,
+             (unsigned long long)reqs.size, (unsigned long long)reqs.alignment,
+             reqs.memoryTypeBits,
+             (unsigned long long)(obj->bo ? zink_bo_get_size(obj->bo) : 0),
+             (unsigned long long)(obj->bo ? zink_bo_get_offset(obj->bo) : 0),
+             (unsigned long long)bound_offset, placement, props,
+             (unsigned)ici->tiling, ici->usage, ici->flags,
+             ici->extent.width, ici->extent.height, (unsigned)ici->format,
+             alloc_info->whandle ? 1 : 0, alloc_info->external,
+             alloc_info->need_dedicated ? 1 : 0, obj->host_visible ? 1 : 0,
+             templ->bind);
+}
+
 static enum resource_object_create_result
 bind_image_memory(struct zink_screen *screen, struct zink_resource_object *obj,
                   const struct pipe_resource *templ, const VkImageCreateInfo *ici,
@@ -1554,7 +1590,8 @@ bind_image_memory(struct zink_screen *screen, struct zink_resource_object *obj,
          }
       }
       if (VKSCR(BindImageMemory2)(screen->dev, num_planes, infos) != VK_SUCCESS) {
-         mesa_loge("ZINK: vkBindImageMemory2 failed");
+         log_image_bind_failure(screen, obj, templ, ici, alloc_info,
+                                "vkBindImageMemory2", obj->plane_offsets[0]);
          return roc_fail_and_cleanup_all;
       }
    } else {
@@ -1562,7 +1599,8 @@ bind_image_memory(struct zink_screen *screen, struct zink_resource_object *obj,
          assert(!alloc_info->need_dedicated || obj->offset == 0);
          if (VKSCR(BindImageMemory)(screen->dev, obj->image,
                                     zink_bo_get_mem(obj->bo), obj->offset) != VK_SUCCESS) {
-            mesa_loge("ZINK: vkBindImageMemory failed");
+            log_image_bind_failure(screen, obj, templ, ici, alloc_info,
+                                   "vkBindImageMemory", obj->offset);
             return roc_fail_and_cleanup_all;
          }
       }
