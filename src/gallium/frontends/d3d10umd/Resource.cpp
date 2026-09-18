@@ -210,6 +210,22 @@ ZeroCopySkipsPrimaryRefresh(void)
    return value != 0;
 }
 
+/* Fourth opt-in, paired with the miniport's ZeroCopyScanout: the kernel scans
+ * out the creator's shared texture, so a primary's pixels no longer have to be
+ * published into its own allocation either. */
+static bool
+ZeroCopyNativeScanout(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = ZeroCopyOptIn("VIOGPU_ZERO_COPY_NATIVE_SCANOUT",
+                            "C:\\ProgramData\\DroidVM\\viogpu-zero-copy-native-scanout");
+      cached = value;
+   }
+   return value != 0;
+}
+
 static void
 LogZeroCopy(const char *op, UINT64 key, unsigned width, unsigned height, unsigned stride, bool ok)
 {
@@ -1147,8 +1163,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    /* The creator keeps publishing its pixels unless the second opt-in says
     * otherwise: an opener whose import fails still reads the allocation, and
     * the kernel scans a primary's allocation out. */
-   pResource->zero_copy = pResource->zero_copy_owner && !pResource->scanout_primary &&
-                          ZeroCopyCreatorSkipsPublish();
+   pResource->zero_copy = pResource->zero_copy_owner && ZeroCopyCreatorSkipsPublish() &&
+                          (!pResource->scanout_primary || ZeroCopyNativeScanout());
    pResource->zero_copy_key = resourceShare.ShareKey;
    if (pResource->zero_copy_owner)
       RegisterZeroCopyShare(screen, resourceShare.ShareKey, pResource->resource);
