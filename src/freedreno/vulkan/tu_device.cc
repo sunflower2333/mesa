@@ -3725,6 +3725,23 @@ tu_add_to_heap(struct tu_device *dev, struct tu_bo *bo)
    uint64_t accounting_size = bo->size;
 #ifdef TU_HAS_WDDM
    if (bo->wddm_allocation != NULL) {
+      /* An aliased import maps no new device memory.  The kernel answered the
+       * import by pointing at an allocation this device already owns, so the
+       * import path gave back the VMA range it had reserved and left vma_size
+       * 0 (tu_knl_wddm.cc, the alias branch).  The owner already accounted
+       * those bytes: accounting them again would double-count a single
+       * allocation, and the teardown path likewise skips aliased allocations.
+       * Before this check existed, a successful alias fell into the zero-size
+       * rejection below and every self-owned import failed vkAllocateMemory
+       * with VK_ERROR_UNKNOWN -- which surfaced as zink's
+       * "couldn't allocate memory: heap=0" one line after Turnip had logged
+       * the alias succeeding.
+       *
+       * Leaving heap_accounted false is what makes this safe:
+       * tu_bo_release_heap_accounting() returns early on it, so teardown is a
+       * no-op rather than a negative adjustment of someone else's bytes. */
+      if (bo->wddm_allocation->aliased)
+         return VK_SUCCESS;
       accounting_size = bo->wddm_allocation->vma_size;
       if (accounting_size == 0)
          return vk_error(dev, VK_ERROR_UNKNOWN);

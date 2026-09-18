@@ -343,6 +343,19 @@ def main() -> int:
         fail("the WDDM final owner needs an explicit heap-accounting release hook")
 
     add_heap = canonical(function_body("tu_add_to_heap", device_source))
+    # An aliased import maps no new device memory and leaves vma_size 0, so it
+    # must be skipped before the zero-size rejection rather than charged twice.
+    # Without this the zero fell into the rejection and every self-owned import
+    # failed vkAllocateMemory with VK_ERROR_UNKNOWN, one line after Turnip had
+    # logged the alias succeeding.
+    require_order(
+        add_heap,
+        (
+            "if(bo->wddm_allocation->aliased)returnVK_SUCCESS;",
+            "accounting_size=bo->wddm_allocation->vma_size;",
+        ),
+        "an aliased WDDM import must skip heap accounting, not be rejected for its zero extent",
+    )
     require_order(
         add_heap,
         (
