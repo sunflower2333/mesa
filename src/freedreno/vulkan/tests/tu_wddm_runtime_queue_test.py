@@ -47,7 +47,7 @@ def main():
             if args.sanitize:
                 command += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
         subprocess.run(command, cwd=directory, check=True)
-        result = subprocess.run([str(executable)], cwd=directory)
+        result = subprocess.run([str(executable)], cwd=directory, timeout=10)
         if args.negative_control:
             if not result.returncode:
                 raise SystemExit('negative control escaped')

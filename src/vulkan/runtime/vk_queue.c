@@ -26,6 +26,7 @@
 #include "util/perf/cpu_trace.h"
 #include "util/u_debug.h"
 #include <inttypes.h>
+#include <time.h>
 
 #include "vk_alloc.h"
 #include "vk_command_buffer.h"
@@ -581,7 +582,21 @@ vk_queue_drain(struct vk_queue *queue)
          break;
       }
 
-      int ret = cnd_wait(&queue->submit.pop, &queue->submit.mutex);
+      int ret;
+      if (queue->driver_submit_sync) {
+         /* A failed submit worker does not necessarily signal pop. Foreign
+          * runtimes must observe device loss instead of hanging their DDI. */
+         struct timespec deadline;
+         timespec_get(&deadline, TIME_UTC);
+         deadline.tv_nsec += 100000000;
+         if (deadline.tv_nsec >= 1000000000) {
+            deadline.tv_nsec -= 1000000000;
+            ++deadline.tv_sec;
+         }
+         ret = cnd_timedwait(&queue->submit.pop, &queue->submit.mutex, &deadline);
+      } else {
+         ret = cnd_wait(&queue->submit.pop, &queue->submit.mutex);
+      }
       if (ret == thrd_error) {
          result = vk_queue_set_lost(queue, "cnd_wait failed");
          break;

@@ -23,10 +23,16 @@ static int cnd_wait(cnd_t *c, mtx_t *m) {
    std::unique_lock<std::mutex> lock(*m, std::adopt_lock);
    c->wait(lock); lock.release(); return 0;
 }
+static int cnd_timedwait(cnd_t *c, mtx_t *m, const timespec *time) {
+   const auto deadline = std::chrono::system_clock::from_time_t(time->tv_sec) + std::chrono::nanoseconds(time->tv_nsec);
+   std::unique_lock<std::mutex> lock(*m, std::adopt_lock);
+   c->wait_until(lock, deadline); lock.release(); return 0;
+}
 struct vk_queue {
    struct { vk_device *device; } base{};
    struct { mtx_t mutex; cnd_t pop; list_head submits; } submit;
    void (*driver_destroy_submit_data)(vk_queue *, void *) = nullptr;
+   bool driver_submit_sync = true;
 };
 struct vk_queue_submit { void *driver_data = nullptr; };
 struct tu_device {
@@ -110,6 +116,14 @@ int main() {
    CHECK(!o.refs && o.releases == 2);
    queue.vk.submit.submits.empty = false; device.vk.lost = true;
    CHECK(vk_queue_drain(&queue.vk) == VK_ERROR_DEVICE_LOST);
+   device.vk.lost = false;
+   std::thread failed_worker([&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      std::lock_guard<std::mutex> lock(queue.vk.submit.mutex);
+      device.vk.lost = true; // No pop signal: exercise the real failure exit.
+   });
+   CHECK(vk_queue_drain(&queue.vk) == VK_ERROR_DEVICE_LOST);
+   failed_worker.join();
    std::printf("runtime queue ownership/drain: %s\n", failures ? "FAIL" : "PASS");
    return failures != 0;
 }
