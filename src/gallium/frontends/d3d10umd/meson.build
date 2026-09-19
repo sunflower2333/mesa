@@ -25,6 +25,7 @@ libd3d10umd = static_library(
     'DxgiFns.cpp',
     'Format.cpp',
     'InputAssembly.cpp',
+    'NativeRotation.cpp',
     'OutputMerger.cpp',
     'Query.cpp',
     'Rasterizer.cpp',

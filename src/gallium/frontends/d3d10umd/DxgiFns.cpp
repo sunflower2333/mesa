@@ -682,6 +682,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    QueryPerformanceFrequency(&frequency);
    QueryPerformanceCounter(&begin);
    unsigned dirtyBefore = 0;
+   bool nativeIdentity = false;
    // Kernel-backed back buffers must rotate as a homogeneous set. Validate
    // before copying pixels or changing any allocation identity.
    for (UINT i = 0; i < RotateResourceIdentities->Resources; ++i) {
@@ -690,6 +691,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
           bool(current->hAllocation) != bool(first->hAllocation))
          return E_INVALIDARG;
       dirtyBefore += current->shared_dirty;
+      nativeIdentity |= current->zero_copy || current->zero_copy_owner;
       if (first->hAllocation &&
           (current->resource->target != PIPE_TEXTURE_2D || current->MipLevels != 1 ||
            current->resource->array_size != 1 || current->Format != first->Format ||
@@ -699,6 +701,12 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
            current->scanout_primary != first->scanout_primary))
          return DXGI_DDI_ERR_UNSUPPORTED;
    }
+
+   // An exported/imported texture IS the allocation's native identity, not a
+   // disposable cache. Keep it and all runtime views paired with that handle.
+   if (nativeIdentity)
+      return RotateNativeResourceIdentities(device, RotateResourceIdentities->Resources,
+                                            RotateResourceIdentities->pResources);
 
    // A clean kernel-backed resource's allocation is authoritative; its GPU
    // texture is only a cache. All actual reads (draw, copy, Blt and Present)

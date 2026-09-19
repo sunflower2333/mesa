@@ -131,6 +131,8 @@ CreateRenderTargetView(
    }
 
    pRTView->surface = desc;
+   RegisterResourceView(CastDevice(hDevice), &pRTView->rotation,
+                        CastResource(pCreateRenderTargetView->hDrvResource), &pRTView->surface, NULL);
 }
 
 
@@ -154,6 +156,7 @@ DestroyRenderTargetView(D3D10DDI_HDEVICE hDevice,                       // IN
 
    RenderTargetView *pRTView = CastRenderTargetView(hRenderTargetView);
 
+   UnregisterResourceView(CastDevice(hDevice), &pRTView->rotation);
    pipe_resource_reference(&pRTView->surface.texture, NULL);
 }
 
@@ -320,6 +323,8 @@ CreateDepthStencilView(
    }
 
    pDSView->surface = desc;
+   RegisterResourceView(CastDevice(hDevice), &pDSView->rotation,
+                        CastResource(pCreateDepthStencilView->hDrvResource), &pDSView->surface, NULL);
 }
 
 
@@ -343,6 +348,7 @@ DestroyDepthStencilView(D3D10DDI_HDEVICE hDevice,                       // IN
 
    DepthStencilView *pDSView = CastDepthStencilView(hDepthStencilView);
 
+   UnregisterResourceView(CastDevice(hDevice), &pDSView->rotation);
    pipe_resource_reference(&pDSView->surface.texture, NULL);
 }
 
@@ -752,6 +758,8 @@ SetRenderTargets(D3D10DDI_HDEVICE hDevice,                              // IN
 
    pDevice->fb.nr_cbufs = 0;
    for (unsigned i = 0; i < RTargets; ++i) {
+      RenderTargetView *view = CastRenderTargetView(phRenderTargetView[i]);
+      pDevice->fb_views[i] = view ? &view->rotation : NULL;
       struct pipe_surface *psurf = CastPipeRenderTargetView(phRenderTargetView[i]);
       pipe_resource_reference(&pDevice->fb.cbufs[i].texture,
                               psurf && psurf->texture ? psurf->texture : NULL);
@@ -762,10 +770,13 @@ SetRenderTargets(D3D10DDI_HDEVICE hDevice,                              // IN
    }
 
    for (unsigned i = RTargets; i < PIPE_MAX_COLOR_BUFS; ++i) {
+      pDevice->fb_views[i] = NULL;
       pipe_resource_reference(&pDevice->fb.cbufs[i].texture, NULL);
    }
 
    struct pipe_surface *zsbuf = CastPipeDepthStencilView(hDepthStencilView);
+   DepthStencilView *dsview = CastDepthStencilView(hDepthStencilView);
+   pDevice->zs_view = dsview ? &dsview->rotation : NULL;
    pipe_resource_reference(&pDevice->fb.zsbuf.texture, zsbuf && zsbuf->texture ? zsbuf->texture : NULL);
    if(zsbuf && zsbuf->texture) {
       pDevice->fb.zsbuf = *zsbuf;

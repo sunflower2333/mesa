@@ -37,7 +37,14 @@
 
 struct Device;
 struct Resource;
+struct ResourceView;
+struct pipe_surface;
+struct pipe_sampler_view;
 struct pipe_resource;
+
+void RegisterResourceView(Device *, ResourceView *, Resource *, struct pipe_surface *, struct pipe_sampler_view **);
+void UnregisterResourceView(Device *, ResourceView *);
+HRESULT RotateNativeResourceIdentities(Device *, UINT, const DXGI_DDI_HRESOURCE *);
 
 HRESULT RefreshSharedResource(Device *device, Resource *resource);
 HRESULT PublishSharedResource(Device *device, Resource *resource);

@@ -250,6 +250,8 @@ SetShaderResources(mesa_shader_stage shader_type,                  // IN
             CastPipeShaderResourceView(phShaderResourceViews[i]);
       if (Offset + i < PIPE_MAX_SHADER_SAMPLER_VIEWS) {
          sampler_views[Offset + i] = sampler_view;
+         ShaderResourceView *view = CastShaderResourceView(phShaderResourceViews[i]);
+         pDevice->sampler_resource_views[shader_type][Offset + i] = view ? &view->rotation : NULL;
       } else {
          if (sampler_view) {
             LOG_UNSUPPORTED(true);
@@ -1265,6 +1267,9 @@ CreateShaderResourceView(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   if (pSRView->handle)
+      RegisterResourceView(CastDevice(hDevice), &pSRView->rotation,
+                           CastResource(pCreateSRView->hDrvResource), NULL, &pSRView->handle);
 }
 
 
@@ -1347,6 +1352,9 @@ CreateShaderResourceView1(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   if (pSRView->handle)
+      RegisterResourceView(CastDevice(hDevice), &pSRView->rotation,
+                           CastResource(pCreateSRView->hDrvResource), NULL, &pSRView->handle);
 }
 
 
@@ -1374,6 +1382,7 @@ DestroyShaderResourceView(D3D10DDI_HDEVICE hDevice,                           //
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
+   UnregisterResourceView(pDevice, &pSRView->rotation);
    pipe->sampler_view_release(pipe, pSRView->handle);
    pSRView->handle = NULL;
 }

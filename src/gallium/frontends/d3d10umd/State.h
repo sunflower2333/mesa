@@ -74,6 +74,7 @@ struct Shader
 struct Query;
 struct ElementLayout;
 struct Resource;
+struct ResourceView;
 
 struct Device
 {
@@ -124,6 +125,10 @@ struct Device
    bool runtime_present;
    unsigned runtime_present_count;
    Resource *shared_resources;
+   ResourceView *resource_views;
+   ResourceView *fb_views[PIPE_MAX_COLOR_BUFS];
+   ResourceView *zs_view;
+   ResourceView *sampler_resource_views[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
    D3DDDICB_CREATECONTEXT shared_copy_context;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;
    DXGI_DDI_BASE_CALLBACKS *pDXGIBaseCallbacks;
@@ -294,8 +299,19 @@ CastPipeBuffer(D3D10DDI_HRESOURCE hResource)
 }
 
 
+/* Runtime views stay with their Resource object when its allocation rotates.
+ * Track unbound views too; matching only bound texture pointers loses aliases. */
+struct ResourceView
+{
+   ResourceView *next;
+   Resource *owner;
+   struct pipe_surface *surface;
+   struct pipe_sampler_view **sampler;
+};
+
 struct RenderTargetView
 {
+   ResourceView rotation;
    struct pipe_surface surface;
    D3D10DDI_HRTRENDERTARGETVIEW hRTRenderTargetView;
 };
@@ -318,6 +334,7 @@ CastPipeRenderTargetView(D3D10DDI_HRENDERTARGETVIEW hRenderTargetView)
 
 struct DepthStencilView
 {
+   ResourceView rotation;
    struct pipe_surface surface;
    D3D10DDI_HRTDEPTHSTENCILVIEW hRTDepthStencilView;
 };
@@ -451,6 +468,7 @@ CastPipeSamplerState(D3D10DDI_HSAMPLER hSampler)
 
 struct ShaderResourceView
 {
+   ResourceView rotation;
    struct pipe_sampler_view *handle;
 };
 
