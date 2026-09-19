@@ -102,6 +102,16 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-alignment
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Execute native import alignment and exact backing regression
+        shell: pwsh
+        run: |
+          $test = 'src/freedreno/vulkan/tests/tu_wddm_import_alignment_test.py'
+          python $test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($control in @('legacy-rejection', 'drop-address-check')) {
+            python $test --negative-control $control
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
       - name: Execute compute shader conversion failure regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_compute_compile_failure_test.py

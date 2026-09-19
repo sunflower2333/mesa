@@ -4000,6 +4000,43 @@ tu_memory_bda_alignment(struct tu_device *device,
    return VK_SUCCESS;
 }
 
+#ifdef TU_HAS_WDDM
+static VkResult
+tu_memory_import_runtime(struct tu_device *device, struct tu_device_memory *mem,
+                         const VkMemoryAllocateInfo *info,
+                         const struct mwd_import_memory_info *import,
+                         enum tu_bo_alloc_flags alloc_flags, bool has_fd)
+{
+   if (!is_wddm(device->instance) || has_fd || mem->vk.ahardware_buffer ||
+       (alloc_flags & ~TU_BO_ALLOC_BDA_64K) != 0 ||
+       vk_find_struct_const(info->pNext, EXPORT_MEMORY_ALLOCATE_INFO) ||
+       vk_find_struct_const(info->pNext, MEMORY_DEDICATED_ALLOCATE_INFO))
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+
+   VkResult result = tu_wddm_bo_import_runtime(device, &mem->bo, mem->size,
+                                              import->owner, import->token);
+   if (result != VK_SUCCESS)
+      return result;
+
+   const VkBufferDeviceAddressAlignmentAllocateInfoVALVE *alignment =
+      vk_find_struct_const(info->pNext, BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE);
+   /* Imported backing keeps its exact address and size. Accept an alignment
+    * request only when that existing address satisfies it; never allocate a
+    * replacement BO or silently realign the runtime's allocation. */
+   const bool misaligned = alignment && alignment->alignment &&
+      mem->bo->iova % alignment->alignment;
+   const bool invisible =
+      (device->physical_device->memory.types[info->memoryTypeIndex] & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+      !(mem->bo->wddm_allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE);
+   if (misaligned || invisible) {
+      tu_bo_finish(device, mem->bo);
+      mem->bo = NULL;
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+   return VK_SUCCESS;
+}
+#endif
+
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_AllocateMemory(VkDevice _device,
                   const VkMemoryAllocateInfo *pAllocateInfo,
@@ -4062,21 +4099,7 @@ tu_AllocateMemory(VkDevice _device,
       }
    }
    if (runtime_import) {
-      if (!is_wddm(device->instance) || fd_info || mem->vk.ahardware_buffer ||
-          alloc_flags != TU_BO_ALLOC_NO_FLAGS ||
-          vk_find_struct_const(pAllocateInfo->pNext, EXPORT_MEMORY_ALLOCATE_INFO) ||
-          vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO)) {
-         result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-         goto fail;
-      }
-      result = tu_wddm_bo_import_runtime(device, &mem->bo, mem->size,
-                                          runtime_import->owner, runtime_import->token);
-      if (result == VK_SUCCESS &&
-          (device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex] & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
-          !(mem->bo->wddm_allocation->private_info.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE)) {
-         tu_bo_finish(device, mem->bo); mem->bo = NULL;
-         result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-      }
+      result = tu_memory_import_runtime(device, mem, pAllocateInfo, runtime_import, alloc_flags, fd_info != NULL);
    } else
 #endif
 
