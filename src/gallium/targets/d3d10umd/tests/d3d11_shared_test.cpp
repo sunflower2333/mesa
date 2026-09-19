@@ -683,6 +683,7 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
    const bool keyed = nt || !strcmp(mode, "--keyed") || asyncHandoff;
    const bool sample = strcmp(mode, "--sample") == 0;
    const bool partial = strcmp(mode, "--partial") == 0;
+   const bool overwrite = strcmp(mode, "--overwrite") == 0;
    Device producer = CreateDevice(adapter);
    Device consumer;
    if (!local)
@@ -777,7 +778,47 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
          SampleTexture(consumer, opened.Get(), colors[frame]);
       else
          VerifyPixels(consumer, opened.Get(), colors[frame], "consumer");
-      if (partial) {
+      if (overwrite) {
+         const float *changed = colors[(frame + 1) % ARRAYSIZE(colors)];
+         std::vector<unsigned char> data((size_t)desc.Width * desc.Height * 4);
+         for (size_t p = 0; p < data.size() / 4; ++p)
+            PixelBytes(desc.Format, changed, data.data() + p * 4);
+         const D3D11_BOX full = {0, 0, 0, desc.Width, desc.Height, 1};
+         // Alternate implicit and explicit full boxes; verify the other
+         // device sees every pixel, then change backing before the next write.
+         consumer.context->UpdateSubresource(opened.Get(), 0,
+               frame & 1 ? &full : NULL, data.data(), desc.Width * 4, 0);
+         consumer.context->Flush();
+         CheckDevice(consumer, "full shared UpdateSubresource");
+         VerifyPixels(producer, texture.Get(), changed, "reverse full update");
+         producer.context->ClearRenderTargetView(target.Get(), colors[frame]);
+         producer.context->Flush();
+         VerifyPixels(producer, texture.Get(), colors[frame], "external overwrite before full copy");
+
+         D3D11_TEXTURE2D_DESC sourceDesc = desc;
+         sourceDesc.MiscFlags = 0;
+         D3D11_SUBRESOURCE_DATA initial = {data.data(), desc.Width * 4, 0};
+         ComPtr<ID3D11Texture2D> source;
+         Check(consumer.device->CreateTexture2D(&sourceDesc, &initial, &source), "full copy source");
+         consumer.context->CopySubresourceRegion(opened.Get(), 0, 0, 0, 0,
+               source.Get(), 0, frame & 1 ? &full : NULL);
+         consumer.context->Flush();
+         CheckDevice(consumer, "full shared CopySubresourceRegion");
+         VerifyPixels(producer, texture.Get(), changed, "reverse full copy");
+         // Also write through the creator, not only the imported resource.
+         const float *creatorChanged = colors[(frame + 2) % ARRAYSIZE(colors)];
+         for (size_t p = 0; p < data.size() / 4; ++p)
+            PixelBytes(desc.Format, creatorChanged, data.data() + p * 4);
+         producer.context->UpdateSubresource(texture.Get(), 0, NULL,
+               data.data(), desc.Width * 4, 0);
+         producer.context->Flush();
+         CheckDevice(producer, "creator full UpdateSubresource");
+         VerifyPixels(consumer, opened.Get(), creatorChanged, "creator full update");
+         producer.context->ClearRenderTargetView(target.Get(), colors[frame]);
+         producer.context->Flush();
+         VerifyPixels(producer, texture.Get(), colors[frame], "external overwrite before partial update");
+      }
+      if (partial || overwrite) {
          const float *changed = colors[(frame + 1) % ARRAYSIZE(colors)];
          unsigned char data[32 * 32 * 4];
          for (unsigned p = 0; p < 32 * 32; ++p)
@@ -1634,6 +1675,7 @@ int main(int argc, char **argv)
       {"--rgba-keyed", "--keyed"}, {"--rgba-nt", "--nt"},
       {"--rgba-keyed-async", "--keyed-async"}, {"--rgba-nt-async", "--nt-async"},
       {"--rgba-partial", "--partial"}, {"--rgba-process", "--process"},
+      {"--rgba-overwrite", "--overwrite"},
       {"--rgba-process-child", "--process-child"}, {"--rgba-dcomp", "--dcomp"},
       {"--rgba-local-warp", "--local"},
    };
@@ -1659,12 +1701,13 @@ int main(int argc, char **argv)
        strcmp(mode, "--buffer-signatures") && strcmp(mode, "--format-caps") && strcmp(mode, "--format-caps-warp") &&
        strcmp(mode, "--msaa") && strcmp(mode, "--msaa-warp") &&
        strcmp(mode, "--texture-result") && strcmp(mode, "--texture-result-warp") &&
-       strcmp(mode, "--partial") && strcmp(mode, "--lifetime") &&
+       strcmp(mode, "--partial") && strcmp(mode, "--overwrite") && strcmp(mode, "--lifetime") &&
        strcmp(mode, "--shader-lifetime") && strcmp(mode, "--timestamp") &&
        strcmp(mode, "--query-poll") && strcmp(mode, "--dwm-timing")))) {
       printf("Usage: d3d11_shared_test [--local|--shared|--process|--keyed|--nt|--sample|--sample-reuse|--buffer-reuse|--buffer-rebind|--buffer-first|--buffer-static|--buffer-vertexid|--buffer-nocull|--buffer-arrays|--buffer-zero-offset|--partial|--lifetime|--shader-lifetime|--dcomp|--timestamp|--query-poll|--dwm-timing]\n");
       printf("Additional buffer isolation: --buffer-fetch|--buffer-large|--buffer-fetch-large|--buffer-signatures\n");
       printf("Shared sampling controls: --sample-reuse-unbind|--sample-reuse-wait|--sample-reuse-warp\n");
+      printf("Shared full-copy/update then partial preservation: --overwrite|--rgba-overwrite\n");
       printf("Format capability contract: --format-caps|--format-caps-warp (reference only)\n");
       printf("Multisample render/resolve/load: --msaa|--msaa-warp (reference only)\n");
       printf("Texture return swizzles: --texture-result|--texture-result-warp (reference only)\n");
