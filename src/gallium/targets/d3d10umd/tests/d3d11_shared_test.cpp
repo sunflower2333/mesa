@@ -669,8 +669,9 @@ static void ShaderLifetimeTest(IDXGIAdapter *adapter)
 static void SharedTest(IDXGIAdapter *adapter, const char *mode)
 {
    const bool local = strcmp(mode, "--local") == 0;
-   const bool nt = strcmp(mode, "--nt") == 0;
-   const bool keyed = nt || strcmp(mode, "--keyed") == 0;
+   const bool asyncHandoff = !strcmp(mode, "--keyed-async") || !strcmp(mode, "--nt-async");
+   const bool nt = !strcmp(mode, "--nt") || !strcmp(mode, "--nt-async");
+   const bool keyed = nt || !strcmp(mode, "--keyed") || asyncHandoff;
    const bool sample = strcmp(mode, "--sample") == 0;
    const bool partial = strcmp(mode, "--partial") == 0;
    Device producer = CreateDevice(adapter);
@@ -701,6 +702,19 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
    if (keyed)
       Check(texture.As(&producerMutex), "Producer keyed mutex");
 
+   // Keep private snapshots until after ownership has returned to the writer.
+   // Mapping the shared texture before ReleaseSync would hide missing waits
+   // for native-context reads in the UMD ownership handoff.
+   ComPtr<ID3D11Texture2D> snapshots[ARRAYSIZE(colors)];
+   if (asyncHandoff) {
+      D3D11_TEXTURE2D_DESC snapshotDesc = desc;
+      snapshotDesc.MiscFlags = 0;
+      for (auto &snapshot : snapshots)
+         Check(consumer.device->CreateTexture2D(&snapshotDesc, NULL, &snapshot),
+               "Create private handoff snapshot");
+      printf("ASYNC_HANDOFF: no CPU readback before either ReleaseSync\n");
+   }
+
    for (unsigned frame = 0; frame < ARRAYSIZE(colors); ++frame) {
       printf("FRAME %u\n", frame);
       if (keyed)
@@ -709,7 +723,8 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
       producer.context->Flush();
       CheckDevice(producer, "producer after Flush");
       // Blocking readback proves the producer finished before a legacy shared read.
-      VerifyPixels(producer, texture.Get(), colors[frame], "producer");
+      if (!asyncHandoff)
+         VerifyPixels(producer, texture.Get(), colors[frame], "producer");
       if (keyed)
          Check(producerMutex->ReleaseSync(frame + 1), "Producer ReleaseSync");
       if (local) {
@@ -747,7 +762,9 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
       }
       if (keyed)
          Acquire(consumerMutex.Get(), frame + 1, "Consumer AcquireSync");
-      if (sample)
+      if (asyncHandoff)
+         consumer.context->CopyResource(snapshots[frame].Get(), opened.Get());
+      else if (sample)
          SampleTexture(consumer, opened.Get(), colors[frame]);
       else
          VerifyPixels(consumer, opened.Get(), colors[frame], "consumer");
@@ -764,6 +781,16 @@ static void SharedTest(IDXGIAdapter *adapter, const char *mode)
       }
       if (keyed)
          Check(consumerMutex->ReleaseSync(0), "Consumer ReleaseSync");
+   }
+   if (asyncHandoff) {
+      // Overwrite even the final shared frame before any blocking readback.
+      Acquire(producerMutex.Get(), 0, "Final writer AcquireSync");
+      producer.context->ClearRenderTargetView(target.Get(), colors[0]);
+      Check(producerMutex->ReleaseSync(ARRAYSIZE(colors) + 1), "Final writer ReleaseSync");
+      for (unsigned frame = 0; frame < ARRAYSIZE(colors); ++frame)
+         VerifyPixels(consumer, snapshots[frame].Get(), colors[frame], "deferred handoff snapshot");
+      CheckDevice(producer, "async producer completed");
+      CheckDevice(consumer, "async consumer completed");
    }
    if (!strcmp(mode, "--lifetime")) {
       producer.context->ClearState();
@@ -1596,6 +1623,7 @@ int main(int argc, char **argv)
    const struct { const char *requested; const char *operation; } rgbaModes[] = {
       {"--rgba-shared", "--shared"}, {"--rgba-sample", "--sample"},
       {"--rgba-keyed", "--keyed"}, {"--rgba-nt", "--nt"},
+      {"--rgba-keyed-async", "--keyed-async"}, {"--rgba-nt-async", "--nt-async"},
       {"--rgba-partial", "--partial"}, {"--rgba-process", "--process"},
       {"--rgba-process-child", "--process-child"}, {"--rgba-dcomp", "--dcomp"},
       {"--rgba-local-warp", "--local"},
@@ -1611,6 +1639,7 @@ int main(int argc, char **argv)
    if (!child && ((argc != 1 && argc != 2) ||
        (strcmp(mode, "--local") && strcmp(mode, "--shared") && strcmp(mode, "--process") &&
        strcmp(mode, "--keyed") && strcmp(mode, "--nt") && strcmp(mode, "--dcomp") &&
+       strcmp(mode, "--keyed-async") && strcmp(mode, "--nt-async") &&
        strcmp(mode, "--sample") && strcmp(mode, "--sample-reuse") &&
        strcmp(mode, "--sample-reuse-unbind") && strcmp(mode, "--sample-reuse-wait") &&
        strcmp(mode, "--sample-reuse-warp") && strcmp(mode, "--buffer-reuse") &&
@@ -1631,6 +1660,7 @@ int main(int argc, char **argv)
       printf("Multisample render/resolve/load: --msaa|--msaa-warp (reference only)\n");
       printf("Texture return swizzles: --texture-result|--texture-result-warp (reference only)\n");
       printf("RGBA shared atlas: --rgba-shared|--rgba-sample|--rgba-keyed|--rgba-nt|--rgba-partial|--rgba-process|--rgba-dcomp|--rgba-local-warp\n");
+      printf("Deferred readback handoff: --keyed-async|--nt-async|--rgba-keyed-async|--rgba-nt-async\n");
       return 2;
    }
    DWORD session;
