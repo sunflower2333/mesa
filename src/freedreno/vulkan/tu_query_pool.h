@@ -49,6 +49,9 @@ struct tu_perf_query_derived {
 struct tu_query_pool
 {
    struct vk_query_pool vk;
+#ifdef TU_HAS_WDDM
+   struct tu_pageable_record wddm_pageable;
+#endif
 
    uint64_t size;
    uint32_t query_stride;

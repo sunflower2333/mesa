@@ -271,6 +271,9 @@ tu_query_pool_destroy(struct tu_device *device, struct tu_query_pool *pool,
       fd_release_derived_counter_collection(device->perfcntrs, collection);
    }
 
+#ifdef TU_HAS_WDDM
+   tu_wddm_pageable_unregister(device, &pool->wddm_pageable);
+#endif
    if (pool->bo)
       tu_bo_finish(device, pool->bo);
    vk_query_pool_destroy(&device->vk, pAllocator, &pool->vk);
@@ -425,6 +428,10 @@ tu_CreateQueryPool(VkDevice _device,
 
    TU_RMV(query_pool_create, device, pool);
 
+#ifdef TU_HAS_WDDM
+   tu_wddm_pageable_register(device, &pool->wddm_pageable, MWD_PAGEABLE_QUERY_POOL,
+                            (uint64_t)tu_query_pool_to_handle(pool), pool->bo, false);
+#endif
    *pQueryPool = tu_query_pool_to_handle(pool);
 
    return VK_SUCCESS;

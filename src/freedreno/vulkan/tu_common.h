@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <tuple>
+#ifdef TU_HAS_WDDM
+#include "tu_wddm_pageable.h"
+#endif
 #ifdef HAVE_VALGRIND
 #include <memcheck.h>
 #include <valgrind.h>

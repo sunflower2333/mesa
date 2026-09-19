@@ -85,6 +85,16 @@ jobs:
             python $test --negative-control $control
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
+      - name: Execute optional pageable backing ownership and reset regression
+        shell: pwsh
+        run: |
+          $test = 'src/freedreno/vulkan/tests/tu_wddm_pageable_test.py'
+          python $test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($control in @('drop-bo-pin', 'drop-token-pin', 'ignore-owner')) {
+            python $test --negative-control $control
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
       - name: Execute large command-buffer submission regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_queue_batch_test.py

@@ -3908,6 +3908,9 @@ static void
 _tu_destroy_memory(struct tu_device *device,
                   struct tu_device_memory *mem)
 {
+#ifdef TU_HAS_WDDM
+   tu_wddm_pageable_unregister(device, &mem->wddm_pageable);
+#endif
    if (mem->bo) {
 #ifdef TU_HAS_WDDM
       if (mem->bo->wddm_allocation == NULL)
@@ -4216,6 +4219,10 @@ fail:
 
    tu_memory_emit_report(device, mem, pAllocateInfo, VK_SUCCESS);
 
+#ifdef TU_HAS_WDDM
+   tu_wddm_pageable_register(device, &mem->wddm_pageable, MWD_PAGEABLE_MEMORY,
+                            (uint64_t)tu_device_memory_to_handle(mem), mem->bo, false);
+#endif
    *pMem = tu_device_memory_to_handle(mem);
 
    return VK_SUCCESS;
@@ -4229,6 +4236,16 @@ tu_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
    vk_common_GetPhysicalDeviceProperties2(physicalDevice, properties);
    VK_FROM_HANDLE(tu_physical_device, physical, physicalDevice);
    vk_foreach_struct(ext, properties->pNext) {
+      if (ext->sType == MWD_STYPE_PAGEABLE_SUPPORT) {
+         auto *reply = reinterpret_cast<mwd_pageable_support *>(ext);
+         reply->magic = reply->version = reply->size = reply->flags = 0;
+         reply->acquire = NULL;
+         if (is_wddm(physical->instance)) {
+            reply->magic = MWD_PAGEABLE_MAGIC; reply->version = MWD_PAGEABLE_VERSION;
+            reply->size = sizeof(*reply);
+            reply->acquire = tu_wddm_pageable_acquire;
+         }
+      }
       if (ext->sType == MWD_STYPE_SUPPORT) {
          auto *reply = reinterpret_cast<mwd_support *>(ext);
          reply->magic = reply->version = reply->size = reply->flags = 0;

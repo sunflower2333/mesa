@@ -144,6 +144,9 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(tu_descriptor_set, base, VkDescriptorSet,
 struct tu_descriptor_pool
 {
    struct vk_object_base base;
+#ifdef TU_HAS_WDDM
+   struct tu_pageable_record wddm_pageable;
+#endif
 
    struct tu_bo *bo;
    uint64_t current_offset;

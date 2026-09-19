@@ -834,6 +834,10 @@ tu_CreateDescriptorPool(VkDevice _device,
 
    TU_RMV(descriptor_pool_create, device, pCreateInfo, pool);
 
+#ifdef TU_HAS_WDDM
+   tu_wddm_pageable_register(device, &pool->wddm_pageable, MWD_PAGEABLE_DESCRIPTOR_POOL,
+                            (uint64_t)tu_descriptor_pool_to_handle(pool), pool->bo, !pool->bo);
+#endif
    *pDescriptorPool = tu_descriptor_pool_to_handle(pool);
    return VK_SUCCESS;
 
@@ -872,6 +876,10 @@ tu_DestroyDescriptorPool(VkDevice _device,
    TU_RMV(resource_destroy, device, pool);
 
    tu_destroy_descriptor_pool_entries(device, pool);
+
+#ifdef TU_HAS_WDDM
+   tu_wddm_pageable_unregister(device, &pool->wddm_pageable);
+#endif
 
    if (pool->size) {
       if (!pool->host_memory_base)
