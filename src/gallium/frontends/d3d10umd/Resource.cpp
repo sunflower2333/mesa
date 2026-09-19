@@ -2007,6 +2007,22 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
  * ----------------------------------------------------------------------
  */
 
+/* A partial write needs the authoritative shared backing first. Only a
+ * complete overwrite of the sole 2D subresource can discard those pixels.
+ * Keep arrays, mips and other targets on the existing preservation path. */
+static bool
+SharedWriteCoversResource(const struct pipe_resource *texture, unsigned subresource,
+                         unsigned x, unsigned y, unsigned z,
+                         const struct pipe_box *box)
+{
+   return texture->target == PIPE_TEXTURE_2D && texture->last_level == 0 &&
+          texture->array_size == 1 && texture->depth0 == 1 &&
+          subresource == 0 && x == 0 && y == 0 && z == 0 &&
+          box->width > 0 && box->height > 0 && box->depth == 1 &&
+          (unsigned)box->width == texture->width0 &&
+          (unsigned)box->height == texture->height0;
+}
+
 void APIENTRY
 ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
                    D3D10DDI_HRESOURCE hDstResource,         // IN
@@ -2036,15 +2052,6 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
    unsigned src_level = SrcSubResource % (src_resource->last_level + 1);
    unsigned src_layer = SrcSubResource / (src_resource->last_level + 1);
 
-   HRESULT shared_hr = RefreshSharedResource(pDevice, pSrcResource);
-   if (SUCCEEDED(shared_hr))
-      shared_hr = RefreshSharedResource(pDevice, pDstResource);
-   if (FAILED(shared_hr)) {
-      SetError(hDevice, shared_hr);
-      return;
-   }
-   MarkSharedResourceWritten(pDevice, dst_resource);
-
    struct pipe_box src_box;
    if (pSrcBox) {
       src_box.x = pSrcBox->left;
@@ -2061,6 +2068,16 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
       src_box.height = u_minify(src_resource->height0, src_level);
       src_box.depth  = u_minify(src_resource->depth0,  src_level);
    }
+
+   HRESULT shared_hr = RefreshSharedResource(pDevice, pSrcResource);
+   if (SUCCEEDED(shared_hr) &&
+       !SharedWriteCoversResource(dst_resource, DstSubResource, DstX, DstY, DstZ, &src_box))
+      shared_hr = RefreshSharedResource(pDevice, pDstResource);
+   if (FAILED(shared_hr)) {
+      SetError(hDevice, shared_hr);
+      return;
+   }
+   MarkSharedResourceWritten(pDevice, dst_resource);
 
    if (areResourcesCompatible(src_resource, dst_resource)) {
       pipe->resource_copy_region(pipe,
@@ -2259,13 +2276,6 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
    Resource *pDstResource = CastResource(hDstResource);
    struct pipe_resource *dst_resource = pDstResource->resource;
 
-   HRESULT shared_hr = RefreshSharedResource(pDevice, pDstResource);
-   if (FAILED(shared_hr)) {
-      SetError(hDevice, shared_hr);
-      return;
-   }
-   MarkSharedResourceWritten(pDevice, dst_resource);
-
    unsigned level;
    struct pipe_box box;
 
@@ -2283,6 +2293,14 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       subResourceBox(dst_resource, DstSubResource, &level, &box);
    }
 
+   if (!SharedWriteCoversResource(dst_resource, DstSubResource,
+                                 box.x, box.y, box.z, &box)) {
+      HRESULT shared_hr = RefreshSharedResource(pDevice, pDstResource);
+      if (FAILED(shared_hr)) {
+         SetError(hDevice, shared_hr);
+         return;
+      }
+   }
    struct pipe_transfer *transfer;
    void *map;
    if (pDstResource->buffer) {
@@ -2300,8 +2318,15 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
                               &box,
                               &transfer);
    }
-   assert(map);
-   if (map) {
+   if (!map) {
+      // A failed full overwrite must not publish the old private cache as if
+      // it contained the requested new pixels. Preserve prior dirty state.
+      const bool lost = pipe->get_device_reset_status &&
+                        pipe->get_device_reset_status(pipe) != PIPE_NO_RESET;
+      SetError(hDevice, lost ? D3DDDIERR_DEVICEREMOVED : E_OUTOFMEMORY);
+      return;
+   }
+   {
       for (int z = 0; z < box.depth; ++z) {
          uint8_t *dst = (uint8_t*)map + z*transfer->layer_stride;
          const uint8_t *src = (const uint8_t*)pSysMemUP + z*DepthPitch;
@@ -2318,5 +2343,6 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       } else {
          pipe_texture_unmap(pipe, transfer);
       }
+      MarkSharedResourceWritten(pDevice, dst_resource);
    }
 }
