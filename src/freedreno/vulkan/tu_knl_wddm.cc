@@ -2076,7 +2076,7 @@ tu_wddm_context_render_on_queue(struct tu_wddm_context *context,
       const int32_t hr = runtime_queue ?
          device->callbacks.submit_queue(device->runtime_owner, runtime_queue, fence, command_stream,
                                           command_stream_size, shared, reference_count) :
-         device->callbacks.submit(device->runtime_owner, command_stream,
+         device->callbacks.submit(device->runtime_owner, fence, command_stream,
                                     command_stream_size, shared, reference_count);
       if (hr < 0) return false;
       context->last_submitted_fence = fence;

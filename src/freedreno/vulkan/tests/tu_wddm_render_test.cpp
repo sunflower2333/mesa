@@ -2251,10 +2251,11 @@ int32_t MWD_CALL shared_unmap(void *owner, void *token) {
    CHECK(token == &f->allocation && f->maps > 0); --f->maps;
    return 0;
 }
-int32_t MWD_CALL shared_submit(void *owner, const void *stream, uint32_t size,
+int32_t MWD_CALL shared_submit(void *owner, uint32_t fence, const void *stream, uint32_t size,
                               const mwd_reference *refs, uint32_t count) {
    auto *f = static_cast<shared_fixture *>(owner);
    CHECK(stream && size == sizeof(test_msm_submit_one_bo) && count == 1);
+   CHECK(fence == static_cast<const test_msm_submit_one_bo *>(stream)->request.fence);
    CHECK(refs[0].token == &f->allocation && refs[0].patch_offset == 44 && refs[0].length == 65536);
    ++f->submits;
    return 0;
@@ -2268,7 +2269,7 @@ int32_t MWD_CALL shared_queue_submit(void *owner, void *queue, uint32_t fence,
    if (queue != owner) return -1;
    auto *f = static_cast<shared_fixture *>(owner);
    ++f->queue_submits; f->queue_fence = fence;
-   return shared_submit(owner, stream, size, refs, count);
+   return shared_submit(owner, fence, stream, size, refs, count);
 }
 void test_shared_runtime() {
    shared_fixture f;

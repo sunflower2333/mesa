@@ -44,7 +44,7 @@ struct mwd_callbacks {
    int32_t (MWD_CALL *release)(void *owner, void *token);
    int32_t (MWD_CALL *map)(void *owner, void *token, void **mapping, uint32_t *handle);
    int32_t (MWD_CALL *unmap)(void *owner, void *token);
-   int32_t (MWD_CALL *submit)(void *owner, const void *stream, uint32_t stream_size,
+   int32_t (MWD_CALL *submit)(void *owner, uint32_t fence, const void *stream, uint32_t stream_size,
                              const struct mwd_reference *references, uint32_t count);
    int32_t (MWD_CALL *completed)(void *owner, uint32_t *fence);
    int32_t (MWD_CALL *status)(void *owner);
