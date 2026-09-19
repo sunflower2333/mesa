@@ -17,6 +17,7 @@
 #include "tu_wddm_abi.h"
 #include "tu_wddm_lifetime.h"
 #include "tu_wddm_residency.h"
+#include "mesa_wddm_runtime.h"
 
 /* ---- Minimal D3DKMT surface with the SDK field names production uses ---- */
 using NTSTATUS = int32_t;
@@ -110,6 +111,10 @@ template <typename T> static constexpr uint32_t tu_wddm_sizeof() { return static
 // PRODUCTION_CONSTANTS
 
 // PRODUCTION_STRUCTS
+
+/* This suite owns direct KMT devices; shared transport is exercised by the
+ * complete tu_wddm_render_test fixture. Fail if this boundary is crossed. */
+static bool tu_wddm_context_get_info(tu_wddm_context *) { std::abort(); }
 
 /* Public transport prototypes, as declared by tu_knl_wddm.h. */
 bool tu_wddm_adapter_close(tu_wddm_adapter *adapter);
