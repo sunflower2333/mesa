@@ -32,9 +32,11 @@ fixture = r'''
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 using HRESULT = int;
 constexpr HRESULT S_OK=0, E_FAIL=-1, D3DDDIERR_DEVICEREMOVED=-2;
 #define SUCCEEDED(x) ((x)>=0)
+#define FAILED(x) ((x)<0)
 constexpr uint64_t OS_TIMEOUT_INFINITE=UINT64_MAX;
 enum pipe_reset_status { PIPE_NO_RESET, PIPE_UNKNOWN_CONTEXT_RESET };
 struct pipe_context;
@@ -48,14 +50,20 @@ struct pipe_context {
  void (*flush)(pipe_context*,pipe_fence_handle**,unsigned);
  pipe_reset_status (*get_device_reset_status)(pipe_context*);
 };
-struct Device { pipe_context* pipe; };
-struct Resource { bool shared_dirty, zero_copy; };
+struct Resource {
+ bool shared_dirty, zero_copy;
+ bool zero_copy_owner=true;
+ Resource* shared_next=nullptr;
+};
+struct Device { pipe_context* pipe; Resource* shared_resources=nullptr; };
 struct DXGI_DDI_ARG_RESOLVESHAREDRESOURCE { Device* hDevice; Resource* hResource; };
 Device* CastDevice(Device* d) { return d; }
 Resource* CastResource(Resource* r) { return r; }
 #define LOG_ENTRYPOINT() ((void)0)
 bool ready, lost;
 unsigned releases;
+unsigned transfers;
+HRESULT transferResult=S_OK;
 pipe_context* observed;
 pipe_fence_handle handle;
 void flush(pipe_context*,pipe_fence_handle** f,unsigned) { if (f) *f=&handle; }
@@ -68,7 +76,9 @@ void release(pipe_screen*,pipe_fence_handle** f,pipe_fence_handle*) {
 pipe_reset_status reset(pipe_context*) {
  return lost ? PIPE_UNKNOWN_CONTEXT_RESET : PIPE_NO_RESET;
 }
-HRESULT TransferSharedResource(Device*,Resource*,bool) { return S_OK; }
+HRESULT TransferSharedResource(Device*,Resource*,bool publish) {
+ assert(publish); ++transfers; return transferResult;
+}
 // FUNCTIONS
 int main() {
  pipe_screen screen{finish,release}; pipe_context pipe{&screen,flush,reset};
@@ -98,11 +108,26 @@ int main() {
  }
  std::printf("shared read/write handoff: 8 scenarios, %u failures\n", handoffFailures);
  failures += handoffFailures;
+ unsigned shadowFailures=0;
+ for (unsigned route=0; route<3; ++route) {
+  for (bool fail : {false,true}) {
+   ready=true; lost=false; releases=transfers=0;
+   transferResult=fail ? E_FAIL : S_OK;
+   Resource imported{true,true,false}; device.shared_resources=&imported;
+   DXGI_DDI_ARG_RESOLVESHAREDRESOURCE args{&device,&imported};
+   HRESULT hr=route==0 ? PublishSharedResource(&device,&imported) :
+              route==1 ? PublishSharedResources(&device) : _ResolveSharedResource(&args);
+   if (hr!=transferResult || imported.shared_dirty!=fail || transfers!=1)
+    ++shadowFailures;
+  }
+ }
+ std::printf("imported writes shadow publication: 6 scenarios, %u failures\n", shadowFailures);
+ failures += shadowFailures;
  return failures ? 1 : 0;
 }
 '''
 fixture = fixture.replace('// FUNCTIONS', '\n'.join(
-    extract(source, name) for name in ('FinishZeroCopyWrites', 'PublishSharedResource')) +
+    extract(source, name) for name in ('FinishZeroCopyWrites', 'PublishSharedResource', 'PublishSharedResources')) +
     (extract(source, 'ResolveSharedResourceAccess') if '\nResolveSharedResourceAccess(' in source else '') +
     extract(dxgi, '_ResolveSharedResource'))
 with tempfile.TemporaryDirectory(prefix='shared-finish-') as temporary:

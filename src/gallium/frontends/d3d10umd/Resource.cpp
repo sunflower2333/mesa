@@ -753,8 +753,13 @@ PublishSharedResource(Device *device, Resource *resource)
 {
    if (!resource || !resource->shared_dirty)
       return S_OK;
-   HRESULT hr = resource->zero_copy ? FinishZeroCopyWrites(device)
-                                    : TransferSharedResource(device, resource, true);
+   // Native import avoids a refresh before reads, but an imported writer must
+   // also update the WDDM backing: the creator, copied openers and GDI still
+   // consume that backing. Fence-only publication would lose reverse writes
+   // when the creator next refreshes its texture from the stale allocation.
+   HRESULT hr = resource->zero_copy && resource->zero_copy_owner
+                   ? FinishZeroCopyWrites(device)
+                   : TransferSharedResource(device, resource, true);
    if (SUCCEEDED(hr))
       resource->shared_dirty = false;
    return hr;
@@ -768,6 +773,10 @@ ResolveSharedResourceAccess(Device *device, Resource *resource)
       // flight. Runtime keyed-mutex ownership does not track that native queue.
       // Complete reads as well as writes before ReleaseSync lets a writer in.
       HRESULT hr = FinishZeroCopyWrites(device);
+      if (FAILED(hr))
+         return hr;
+      if (resource->shared_dirty && !resource->zero_copy_owner)
+         return PublishSharedResource(device, resource);
       if (SUCCEEDED(hr))
          resource->shared_dirty = false;
       return hr;
@@ -781,7 +790,7 @@ PublishSharedResources(Device *device)
 {
    bool zeroCopyDirty = false;
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
-      if (resource->zero_copy) {
+      if (resource->zero_copy && resource->zero_copy_owner) {
          zeroCopyDirty |= resource->shared_dirty;
          continue;
       }
@@ -796,7 +805,7 @@ PublishSharedResources(Device *device)
    if (FAILED(hr))
       return hr;
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
-      if (resource->zero_copy)
+      if (resource->zero_copy && resource->zero_copy_owner)
          resource->shared_dirty = false;
    }
    return S_OK;
