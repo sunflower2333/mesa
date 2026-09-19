@@ -284,6 +284,10 @@ bool tu_wddm_context_render(struct tu_wddm_context *context,
                             uint32_t command_stream_size,
                             const struct tu_wddm_render_reference *references,
                             uint32_t reference_count);
+bool tu_wddm_context_render_on_queue(struct tu_wddm_context *context,
+                                      const void *command_stream, uint32_t command_stream_size,
+                                      const struct tu_wddm_render_reference *references,
+                                      uint32_t reference_count, void *runtime_queue);
 
 #ifdef __cplusplus
 }

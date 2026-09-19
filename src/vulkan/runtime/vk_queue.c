@@ -198,9 +198,21 @@ vk_queue_submit_alloc(struct vk_queue *queue,
 }
 
 static void
+vk_queue_submit_finish_driver_data(struct vk_queue *queue,
+                                  struct vk_queue_submit *submit)
+{
+   if (submit->driver_data != NULL) {
+      void *data = submit->driver_data;
+      submit->driver_data = NULL;
+      queue->driver_destroy_submit_data(queue, data);
+   }
+}
+
+static void
 vk_queue_submit_cleanup(struct vk_queue *queue,
                         struct vk_queue_submit *submit)
 {
+   vk_queue_submit_finish_driver_data(queue, submit);
    for (uint32_t i = 0; i < submit->wait_count; i++) {
       if (submit->_wait_temps[i] != NULL)
          vk_sync_destroy(queue->base.device, submit->_wait_temps[i]);
@@ -424,6 +436,10 @@ vk_queue_submits_merge(struct vk_queue *queue,
                        struct vk_queue_submit *first,
                        struct vk_queue_submit *second)
 {
+   /* Driver metadata is independently owned. Do not erase a scheduler queue
+    * identity in no-op merges or merge independently retained submissions. */
+   if (first->driver_data != NULL || second->driver_data != NULL)
+      return NULL;
    /* Don't merge if there are signals in between: see 'Signal operation order' */
    if (first->signal_count > 0 &&
        (second->command_buffer_count ||
@@ -943,6 +959,13 @@ vk_queue_submit_create(struct vk_queue *queue,
 
    assert(signal_count == submit->signal_count);
 
+   if (queue->driver_create_submit_data) {
+      assert(queue->driver_destroy_submit_data);
+      result = queue->driver_create_submit_data(queue, info->pNext, &submit->driver_data);
+      if (unlikely(result != VK_SUCCESS))
+         goto fail;
+   }
+
    *submit_out = submit;
 
    return VK_SUCCESS;
@@ -1135,7 +1158,15 @@ vk_queue_submit(struct vk_queue *queue,
 
    case VK_QUEUE_SUBMIT_MODE_DEFERRED:
       vk_queue_push_submit(queue, submit);
-      return vk_device_flush(queue->base.device);
+      result = vk_device_flush(queue->base.device);
+      if (result == VK_SUCCESS && queue->driver_submit_sync) {
+         mtx_lock(&queue->submit.mutex);
+         const bool pending = !list_is_empty(&queue->submit.submits);
+         mtx_unlock(&queue->submit.mutex);
+         if (pending)
+            return vk_queue_set_lost(queue, "foreign runtime submit remained deferred");
+      }
+      return result;
 
    case VK_QUEUE_SUBMIT_MODE_THREADED:
       result = vk_queue_submit_move_binary_waits_to_temps(device, submit, true);
@@ -1144,7 +1175,7 @@ vk_queue_submit(struct vk_queue *queue,
 
       vk_queue_push_submit(queue, submit);
 
-      return VK_SUCCESS;
+      return queue->driver_submit_sync ? vk_queue_drain(queue) : VK_SUCCESS;
 
    case VK_QUEUE_SUBMIT_MODE_THREADED_ON_DEMAND:
       UNREACHABLE("Invalid vk_queue::submit.mode");
@@ -1269,6 +1300,9 @@ vk_queue_set_emulated(struct vk_queue *emulated, struct vk_queue *real)
     */
    real->real_queue = real;
    emulated->real_queue = real;
+   emulated->driver_create_submit_data = real->driver_create_submit_data;
+   emulated->driver_destroy_submit_data = real->driver_destroy_submit_data;
+   emulated->driver_submit_sync = real->driver_submit_sync;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

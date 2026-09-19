@@ -2214,6 +2214,7 @@ struct shared_fixture {
    mwd_context_info context = {};
    mwd_allocation allocation = {};
    unsigned creates = 0, refs = 0, maps = 0, submits = 0;
+   unsigned queue_submits = 0, queue_fence = 0;
    int32_t status = 0;
    unsigned char memory[65536] = {};
 };
@@ -2260,6 +2261,15 @@ int32_t MWD_CALL shared_submit(void *owner, const void *stream, uint32_t size,
 }
 int32_t MWD_CALL shared_completed(void *, uint32_t *fence) { *fence = 7; return 0; }
 int32_t MWD_CALL shared_status(void *owner) { return static_cast<shared_fixture *>(owner)->status; }
+int32_t MWD_CALL shared_queue_retain(void *owner, void *queue) { return owner == queue ? 0 : -1; }
+int32_t MWD_CALL shared_queue_release(void *owner, void *queue) { return owner == queue ? 0 : -1; }
+int32_t MWD_CALL shared_queue_submit(void *owner, void *queue, uint32_t fence,
+      const void *stream, uint32_t size, const mwd_reference *refs, uint32_t count) {
+   if (queue != owner) return -1;
+   auto *f = static_cast<shared_fixture *>(owner);
+   ++f->queue_submits; f->queue_fence = fence;
+   return shared_submit(owner, stream, size, refs, count);
+}
 void test_shared_runtime() {
    shared_fixture f;
    tu_wddm_runtime runtime = {}; // No KMT dispatch: any accidental direct call fails this fixture.
@@ -2273,7 +2283,8 @@ void test_shared_runtime() {
    f.allocation = {&f.allocation, kVaStart, 65536, kResetGeneration, 101, 6};
    mwd_callbacks callbacks = {MWD_RUNTIME_MAGIC, MWD_RUNTIME_ABI_VERSION, sizeof(mwd_callbacks), 0,
       shared_context, shared_allocate, shared_retain, shared_release, shared_map, shared_unmap,
-      shared_submit, shared_completed, shared_status};
+      shared_submit, shared_completed, shared_status,
+      shared_queue_retain, shared_queue_release, shared_queue_submit};
    tu_wddm_device device = {};
    tu_wddm_context context = {};
    CHECK(tu_wddm_runtime_device_open(&runtime, &identity, &callbacks, &f, &device, &context));
@@ -2293,8 +2304,13 @@ void test_shared_runtime() {
    CHECK(tu_wddm_context_render(&context, &submit, sizeof(submit), &ref, 1));
    CHECK(f.submits == 1);
    CHECK(!tu_wddm_context_render(&context, &submit, sizeof(submit), &ref, 1)); // Duplicate fence.
+   ++submit.request.fence;
+   CHECK(!tu_wddm_context_render_on_queue(&context, &submit, sizeof(submit), &ref, 1, &device));
+   CHECK(f.submits == 1 && !f.queue_submits); // Reject foreign queue; serial stays reusable.
+   CHECK(tu_wddm_context_render_on_queue(&context, &submit, sizeof(submit), &ref, 1, &f));
+   CHECK(f.submits == 2 && f.queue_submits == 1 && f.queue_fence == submit.request.fence);
    ++submit.request.fence; f.status = -1;
-   CHECK(!tu_wddm_context_render(&context, &submit, sizeof(submit), &ref, 1) && f.submits == 1);
+   CHECK(!tu_wddm_context_render(&context, &submit, sizeof(submit), &ref, 1) && f.submits == 2);
    f.status = 0; ++f.context.generation;
    CHECK(!tu_wddm_context_get_info(&context));
    --f.context.generation;

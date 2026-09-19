@@ -350,6 +350,9 @@ queue_submit_sparse(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
+   if (device->instance->knl->submit_set_driver_data)
+      device->instance->knl->submit_set_driver_data(device, submit, vk_submit->driver_data);
+
    for (uint32_t i = 0; i < vk_submit->buffer_bind_count; i++) {
       const VkSparseBufferMemoryBindInfo *bind = &vk_submit->buffer_binds[i];
       VK_FROM_HANDLE(tu_buffer, buffer, bind->buffer);
@@ -464,6 +467,9 @@ queue_submit_single(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       mtx_unlock(&device->submit_mutex);
       goto fail_create_submit;
    }
+
+   if (device->instance->knl->submit_set_driver_data)
+      device->instance->knl->submit_set_driver_data(device, submit, vk_submit->driver_data);
 
    result = resolve_vis_stream_patchpoints(queue, submit, &dump_cmds,
                                            cmd_buffers, cmdbuf_count);

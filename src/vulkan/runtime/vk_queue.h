@@ -71,6 +71,16 @@ struct vk_queue {
    VkResult (*driver_submit)(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
 
+   /* Optional owned submission metadata. Unlike a borrowed pNext or a queue
+    * selector, this survives software deferral and command batching. */
+   VkResult (*driver_create_submit_data)(struct vk_queue *queue,
+                                         const void *pNext, void **data);
+   void (*driver_destroy_submit_data)(struct vk_queue *queue, void *data);
+   /* Some foreign runtimes order external scheduler packets immediately after
+    * QueueSubmit returns. Drain software jobs before returning to them. This
+    * does not wait for GPU completion. */
+   bool driver_submit_sync;
+
    struct {
       /** Current submit mode
        *
@@ -269,6 +279,7 @@ vk_queue_is_lost(struct vk_queue *queue)
 
 struct vk_queue_submit {
    struct list_head link;
+   void *driver_data;
 
    uint32_t wait_count;
    uint32_t command_buffer_count;

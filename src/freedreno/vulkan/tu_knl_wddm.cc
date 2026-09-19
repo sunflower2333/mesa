@@ -2048,11 +2048,11 @@ tu_wddm_render_replacements_valid(const D3DKMT_RENDER *render)
 }
 
 bool
-tu_wddm_context_render(struct tu_wddm_context *context,
+tu_wddm_context_render_on_queue(struct tu_wddm_context *context,
                        const void *command_stream,
                        uint32_t command_stream_size,
                        const struct tu_wddm_render_reference *references,
-                       uint32_t reference_count)
+                       uint32_t reference_count, void *runtime_queue)
 {
    if (tu_wddm_shared_context(context)) {
       uint32_t fence = 0;
@@ -2072,11 +2072,18 @@ tu_wddm_context_render(struct tu_wddm_context *context,
           !tu_wddm_native_submit_valid(command_stream, command_stream_size, references, reference_count,
                                        context->info.SubmitQueueId, &fence) ||
           (context->last_submitted_fence && !tu_wddm_fence_after(fence, context->last_submitted_fence))) return false;
-      if (context->device->callbacks.submit(context->device->runtime_owner, command_stream,
-                                             command_stream_size, shared, reference_count) < 0) return false;
+      auto *device = context->device;
+      const int32_t hr = runtime_queue ?
+         device->callbacks.submit_queue(device->runtime_owner, runtime_queue, fence, command_stream,
+                                          command_stream_size, shared, reference_count) :
+         device->callbacks.submit(device->runtime_owner, command_stream,
+                                    command_stream_size, shared, reference_count);
+      if (hr < 0) return false;
       context->last_submitted_fence = fence;
       return true;
    }
+   if (runtime_queue != NULL)
+      return false;
    auto rejected = [&](const char *reason) {
       tu_wddm_diag("render rejected reason=%s packet_bytes=%u references=%u",
                    reason, command_stream_size, reference_count);
@@ -2228,6 +2235,16 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    return NT_SUCCESS(status) && replacements_valid;
 }
 
+bool
+tu_wddm_context_render(struct tu_wddm_context *context,
+                       const void *command_stream, uint32_t command_stream_size,
+                       const struct tu_wddm_render_reference *references,
+                       uint32_t reference_count)
+{
+   return tu_wddm_context_render_on_queue(context, command_stream, command_stream_size,
+                                           references, reference_count, NULL);
+}
+
 #ifdef TU_HAS_WDDM
 
 /* The WDDM path deliberately starts with one context and one engine.  These
@@ -2305,6 +2322,8 @@ struct tu_wddm_submit {
    struct util_dynarray references;
    uint16_t reference_index[TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE];
    bool failed;
+   /* Borrowed from the retained vk_queue_submit until its driver call ends. */
+   void *runtime_queue;
 };
 
 /* Hash a BO pointer for the submit-local open-addressing table. */
@@ -2981,6 +3000,43 @@ tu_wddm_device_check_status(struct tu_device *dev)
    return VK_SUCCESS;
 }
 
+static VkResult
+tu_wddm_runtime_submit_data_create(struct vk_queue *base, const void *pNext, void **data)
+{
+   auto *queue = list_entry(base, struct tu_queue, vk);
+   auto *device = &queue->device->wddm_device;
+   *data = NULL;
+   const mwd_submit_info *found = NULL;
+   unsigned count = 0;
+   for (auto *node = static_cast<const VkBaseInStructure *>(pNext); node; node = node->pNext) {
+      if (++count > 64)
+         return VK_ERROR_INITIALIZATION_FAILED;
+      if (static_cast<int32_t>(node->sType) != MWD_STYPE_SUBMIT)
+         continue;
+      if (found)
+         return VK_ERROR_INITIALIZATION_FAILED;
+      found = reinterpret_cast<const mwd_submit_info *>(node);
+   }
+   if (!found)
+      return VK_SUCCESS; /* Device initialization work uses the owner context. */
+   /* A callback may reenter caller code; never reread its pNext storage. */
+   void *token = found->queue;
+   if (found->owner != device->runtime_owner || !token ||
+       device->callbacks.queue_retain(device->runtime_owner, token) < 0)
+      return VK_ERROR_DEVICE_LOST;
+   *data = token;
+   return VK_SUCCESS;
+}
+
+static void
+tu_wddm_runtime_submit_data_destroy(struct vk_queue *base, void *data)
+{
+   auto *queue = list_entry(base, struct tu_queue, vk);
+   auto *device = &queue->device->wddm_device;
+   if (device->callbacks.queue_release(device->runtime_owner, data) < 0)
+      vk_device_set_lost(&queue->device->vk, "runtime queue release failed");
+}
+
 static int
 tu_wddm_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
 {
@@ -2990,6 +3046,11 @@ tu_wddm_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
        dev->wddm_context.info.SubmitQueueId == 0)
       return -EINVAL;
    queue->msm_queue_id = dev->wddm_context.info.SubmitQueueId;
+   if (dev->wddm_runtime_owner) {
+      queue->vk.driver_create_submit_data = tu_wddm_runtime_submit_data_create;
+      queue->vk.driver_destroy_submit_data = tu_wddm_runtime_submit_data_destroy;
+      queue->vk.driver_submit_sync = true;
+   }
    return 0;
 }
 
@@ -3745,6 +3806,13 @@ tu_wddm_submit_create(struct tu_device *device)
 }
 
 static void
+tu_wddm_submit_set_driver_data(struct tu_device *device, void *_submit, void *data)
+{
+   (void) device;
+   static_cast<struct tu_wddm_submit *>(_submit)->runtime_queue = data;
+}
+
+static void
 tu_wddm_submit_finish(struct tu_device *device, void *_submit)
 {
    struct tu_wddm_submit *submit = (struct tu_wddm_submit *)_submit;
@@ -3976,9 +4044,9 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
              sizeof(command));
    }
 
-   bool rendered = tu_wddm_context_render(&device->wddm_context, packet,
+   bool rendered = tu_wddm_context_render_on_queue(&device->wddm_context, packet,
                                           packet_size, render_refs,
-                                          reference_count);
+                                          reference_count, submit->runtime_queue);
    return rendered ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
 }
 
@@ -4252,6 +4320,7 @@ static const struct tu_knl wddm_knl_funcs = {
    .bo_get_metadata = tu_wddm_bo_get_metadata,
    .max_submit_entries = TU_WDDM_MAX_SUBMIT_COMMANDS,
    .submit_create = tu_wddm_submit_create,
+   .submit_set_driver_data = tu_wddm_submit_set_driver_data,
    .submit_finish = tu_wddm_submit_finish,
    .submit_add_entries = tu_wddm_submit_add_entries,
    .submit_add_bos = tu_wddm_submit_add_bos,

@@ -75,6 +75,16 @@ jobs:
       - name: Execute empty-submit queue ordering regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_wddm_empty_submit_test.py
+      - name: Execute runtime queue ownership and software enqueue ordering
+        shell: pwsh
+        run: |
+          $test = 'src/freedreno/vulkan/tests/tu_wddm_runtime_queue_test.py'
+          python $test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($control in @('reread-token', 'double-release', 'skip-drain')) {
+            python $test --negative-control $control
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
       - name: Execute large command-buffer submission regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_queue_batch_test.py

@@ -251,7 +251,7 @@ def main() -> int:
         "WDDM submit must close residency before handing the packet to KMT",
     )
 
-    render = canonical(function_body("tu_wddm_context_render", wddm_source))
+    render = canonical(function_body("tu_wddm_context_render_on_queue", wddm_source))
     require_order(
         render,
         (

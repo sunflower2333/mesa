@@ -7,11 +7,12 @@
 /* Private, matched UMD/ICD in-process protocol. Not a public Vulkan extension
  * or KMD ABI. No runtime opaque HANDLE is represented as a KMT handle here.
  * These private pNext tags are intentionally outside registered Vulkan ranges. */
-#define MWD_RUNTIME_ABI_VERSION 1u
+#define MWD_RUNTIME_ABI_VERSION 2u
 #define MWD_RUNTIME_MAGIC 0x3152574du
 #define MWD_STYPE_SUPPORT 0x7fff2330
 #define MWD_STYPE_DEVICE  0x7fff2331
 #define MWD_STYPE_IMPORT  0x7fff2332
+#define MWD_STYPE_SUBMIT  0x7fff2333
 #ifdef _WIN32
 #define MWD_CALL __stdcall
 #else
@@ -47,6 +48,11 @@ struct mwd_callbacks {
                              const struct mwd_reference *references, uint32_t count);
    int32_t (MWD_CALL *completed)(void *owner, uint32_t *fence);
    int32_t (MWD_CALL *status)(void *owner);
+   int32_t (MWD_CALL *queue_retain)(void *owner, void *queue);
+   int32_t (MWD_CALL *queue_release)(void *owner, void *queue);
+   int32_t (MWD_CALL *submit_queue)(void *owner, void *queue, uint32_t fence,
+                                   const void *stream, uint32_t stream_size,
+                                   const struct mwd_reference *references, uint32_t count);
 };
 /* VkPhysicalDeviceProperties2 query. A zero reply means unsupported. */
 struct mwd_support {
@@ -71,13 +77,22 @@ struct mwd_import_memory_info {
    void *token;
 };
 
+/* VkSubmitInfo2 input. The ICD retains this queue token before copying the
+ * submission and releases it after actual kernel enqueue or cancellation.
+ * Completion remains a separate OS-ordered domain timeline. */
+struct mwd_submit_info {
+   int32_t sType;
+   const void *pNext;
+   void *owner;
+   void *queue;
+};
+
 static inline int mwd_callbacks_valid(const struct mwd_callbacks *cb)
 {
    return cb && cb->magic == MWD_RUNTIME_MAGIC &&
       cb->version == MWD_RUNTIME_ABI_VERSION && cb->size == sizeof(*cb) &&
       !cb->reserved && cb->context && cb->allocate && cb->retain &&
       cb->release && cb->map && cb->unmap && cb->submit &&
-      cb->completed && cb->status;
+      cb->completed && cb->status && cb->queue_retain && cb->queue_release && cb->submit_queue;
 }
 #endif
-

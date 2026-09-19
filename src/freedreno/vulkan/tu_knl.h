@@ -184,6 +184,7 @@ struct tu_knl {
     * CS entry budget, including command streams generated at submit time. */
    uint32_t max_submit_entries;
    void *(*submit_create)(struct tu_device *device);
+   void (*submit_set_driver_data)(struct tu_device *device, void *submit, void *data);
    void (*submit_finish)(struct tu_device *device, void *_submit);
    void (*submit_add_entries)(struct tu_device *device, void *_submit,
                               struct tu_cs_entry *entries,
