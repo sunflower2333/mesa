@@ -98,6 +98,24 @@ CalcPrivateDeviceSize(D3D10DDI_HADAPTER hAdapter,                          // IN
  * ----------------------------------------------------------------------
  */
 
+static HRESULT
+CreateRuntimeContext(Device *device)
+{
+   if (device->shared_copy_context.hContext)
+      return S_OK;
+   if (!device->KTCallbacks.pfnCreateContextCb || !device->KTCallbacks.pfnDestroyContextCb)
+      return E_NOTIMPL;
+   D3DDDICB_CREATECONTEXT create = {};
+   create.EngineAffinity = 1;
+   HRESULT hr = device->KTCallbacks.pfnCreateContextCb(device->hDevice, &create);
+   if (FAILED(hr))
+      return hr;
+   if (!create.hContext)
+      return E_FAIL;
+   device->shared_copy_context = create;
+   return S_OK;
+}
+
 HRESULT APIENTRY
 CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
              __in D3D10DDIARG_CREATEDEVICE *pCreateData) // IN
@@ -361,6 +379,17 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
     * opt-out now that shared publication and redirection copies are supported. */
    {
       char buf[8];
+      // DXGI keyed-mutex release needs a context belonging to the runtime's
+      // device even when native imports bypass all staging copies. Turnip's
+      // private D3DKMT device/context does not register one with this runtime.
+      // Reuse this context for copies; DestroyDevice owns its destruction.
+      HRESULT context_hr = CreateRuntimeContext(pDevice);
+      if (FAILED(context_hr)) {
+         DebugPrintf("CreateDevice: runtime context failed hr=0x%08lx\n",
+                     (unsigned long)context_hr);
+         DestroyDevice(pCreateData->hDrvDevice);
+         return context_hr;
+      }
       if (GetEnvironmentVariableA("VIOGPU_DXGI_REDIRECTION", buf, sizeof buf) > 0 &&
          buf[0] == '0') {
          DebugPrintf("CreateDevice: returning DXGI_STATUS_NO_REDIRECTION\n");
