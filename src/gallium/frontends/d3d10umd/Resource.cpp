@@ -761,6 +761,22 @@ PublishSharedResource(Device *device, Resource *resource)
 }
 
 HRESULT
+ResolveSharedResourceAccess(Device *device, Resource *resource)
+{
+   if (resource && resource->zero_copy) {
+      // A read-only importer is clean but may still have native GPU reads in
+      // flight. Runtime keyed-mutex ownership does not track that native queue.
+      // Complete reads as well as writes before ReleaseSync lets a writer in.
+      HRESULT hr = FinishZeroCopyWrites(device);
+      if (SUCCEEDED(hr))
+         resource->shared_dirty = false;
+      return hr;
+   }
+   device->pipe->flush(device->pipe, NULL, 0);
+   return PublishSharedResource(device, resource);
+}
+
+HRESULT
 PublishSharedResources(Device *device)
 {
    bool zeroCopyDirty = false;

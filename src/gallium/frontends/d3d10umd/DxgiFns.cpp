@@ -507,8 +507,7 @@ _ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *resolve)
    LOG_ENTRYPOINT();
    Device *device = CastDevice(resolve->hDevice);
    Resource *resource = CastResource(resolve->hResource);
-   device->pipe->flush(device->pipe, NULL, 0);
-   return PublishSharedResource(device, resource);
+   return ResolveSharedResourceAccess(device, resource);
 }
 
 
