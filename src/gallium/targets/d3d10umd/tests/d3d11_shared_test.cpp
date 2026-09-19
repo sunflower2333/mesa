@@ -63,7 +63,8 @@ static void PrintClientIdentity()
 
 static void PrintDriverModules()
 {
-   const wchar_t *names[] = {L"viogpud3d.dll", L"viogpud3dec.dll",
+   const wchar_t *names[] = {L"viogpud3d.dll", L"viogpud3dec.dll", L"viogpud3dx.dll",
+                            L"viogpud3d_x64.dll", L"viogpud3d_x86.dll",
                             L"vulkan-1.dll", L"vulkan_freedreno.dll", L"d3d10warp.dll"};
    for (const wchar_t *name : names) {
       char path[MAX_PATH] = {};
@@ -107,6 +108,14 @@ static Device CreateDevice(IDXGIAdapter *adapter)
    Check(hr, "D3D11CreateDevice");
    char path[MAX_PATH] = {};
    HMODULE umd = GetModuleHandleW(L"viogpud3d.dll");
+   // The flat package uses distinct payload names behind its ARM64X entry.
+   // Requiring only the ARM64 filename falsely rejects successful x64/x86 devices.
+   if (!umd)
+      umd = GetModuleHandleW(L"viogpud3d_x64.dll");
+   if (!umd)
+      umd = GetModuleHandleW(L"viogpud3d_x86.dll");
+   if (!umd)
+      umd = GetModuleHandleW(L"viogpud3dx.dll");
    if (umd)
       GetModuleFileNameA(umd, path, ARRAYSIZE(path));
    printf("device: feature_level=0x%x umd=%s reference_warp=%d\n", level, path, warpControl);
