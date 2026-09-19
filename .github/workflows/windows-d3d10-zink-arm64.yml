@@ -22,7 +22,17 @@ permissions:
   contents: read
 
 jobs:
+  shared-completion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shared publication and device-loss regression tests
+        run: |
+          python3 src/gallium/frontends/d3d10umd/shared_finish_test.py
+          python3 src/gallium/frontends/d3d10umd/device_loss_test.py
+
   build:
+    needs: shared-completion
     name: ARM64 D3D10 UMD link (clang-cl, zink)
     runs-on: windows-2025-vs2026
 

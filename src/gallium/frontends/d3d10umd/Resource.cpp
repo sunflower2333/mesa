@@ -725,14 +725,17 @@ FinishZeroCopyWrites(Device *device)
    struct pipe_screen *screen = pipe->screen;
    struct pipe_fence_handle *fence = NULL;
    pipe->flush(pipe, &fence, 0);
+   bool ready = true;
    if (fence) {
-      screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
+      ready = screen->fence_finish(screen, pipe, fence, OS_TIMEOUT_INFINITE);
       screen->fence_reference(screen, &fence, NULL);
    }
    if (pipe->get_device_reset_status &&
        pipe->get_device_reset_status(pipe) != PIPE_NO_RESET)
       return D3DDDIERR_DEVICEREMOVED;
-   return S_OK;
+   // A failed wait does not transfer ownership, even before reset is visible.
+   // Keep shared_dirty set so callers cannot expose incomplete GPU writes.
+   return ready ? S_OK : E_FAIL;
 }
 
 HRESULT
