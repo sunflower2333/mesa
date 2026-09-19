@@ -27,6 +27,8 @@ parser.add_argument('--sanitize', action='store_true')
 parser.add_argument('--negative-control-oom', action='store_true')
 parser.add_argument('--negative-control-rollback-status', action='store_true')
 parser.add_argument('--negative-control-alignment', action='store_true')
+parser.add_argument('--negative-control-shared-alignment', action='store_true')
+parser.add_argument('--negative-control-shared-reply', action='store_true')
 args = parser.parse_args()
 here = Path(__file__).resolve().parent
 root = here.parents[3]
@@ -56,6 +58,14 @@ elif args.negative_control_alignment:
     original = 'util_vma_heap_alloc(&dev->vma, vma_size, iova_alignment)'
     assert production.count(original) == 1
     production = production.replace(original, 'util_vma_heap_alloc(&dev->vma, vma_size, os_page_size)')
+elif args.negative_control_shared_alignment:
+    original = 'desc.alignment = (flags & TU_BO_ALLOC_BDA_64K) ? 65536 : 4096;'
+    assert production.count(original) == 1
+    production = production.replace(original, 'desc.alignment = 4096;')
+elif args.negative_control_shared_reply:
+    original = 'reply.address % desc->alignment == 0 &&'
+    assert production.count(original) == 1
+    production = production.replace(original, '')
 structs = '\n\n'.join(re.search(r'struct ' + name + r'\s*\{.*?\n\};', header, re.S).group()
                        for name in ['tu_wddm_allocation_desc', 'tu_wddm_allocation'])
 fixture = (here / 'tu_wddm_allocation_status_test.cpp').read_text().replace(
@@ -97,6 +107,10 @@ with tempfile.TemporaryDirectory(prefix='turnip-allocation-status-') as temporar
         expected = 'FAIL successful partial-create rollback preserves original status classification'
     elif args.negative_control_alignment:
         expected = 'FAIL requested buffer address alignment is honored by actual VMA'
+    elif args.negative_control_shared_alignment:
+        expected = 'FAIL shared runtime receives and honors requested BDA alignment'
+    elif args.negative_control_shared_reply:
+        expected = 'FAIL misaligned shared reply rejected with exact reference unwind'
     else:
         raise SystemExit(result.returncode)
     if result.returncode != 1 or expected not in result.stdout:

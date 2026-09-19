@@ -102,6 +102,10 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-alignment
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-shared-alignment
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py --negative-control-shared-reply
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Execute native import alignment and exact backing regression
         shell: pwsh
         run: |

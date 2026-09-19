@@ -1595,7 +1595,8 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
    /* A rejected local descriptor did not complete a successful KMT call. */
    allocation->last_create_status = UINT32_C(0xc000000d); /* STATUS_INVALID_PARAMETER */
    if (tu_wddm_shared_context(context)) {
-      if (!desc || !desc->size || desc->alignment != 4096 || desc->format || desc->width ||
+      if (!desc || !desc->size || desc->alignment < 4096 || desc->alignment > 65536 ||
+          (desc->alignment & (desc->alignment - 1)) || desc->format || desc->width ||
           desc->height || desc->pitch || desc->refresh_rate_numerator || desc->refresh_rate_denominator ||
           (desc->flags & ~14u) || !(desc->flags & 4u)) return false;
       mwd_allocation reply = {};
@@ -1604,7 +1605,8 @@ tu_wddm_allocation_create(struct tu_wddm_context *context,
                                                desc->requested_iova, desc->flags, &reply);
       allocation->last_create_status = static_cast<uint32_t>(hr);
       if (hr < 0) return false;
-      if ((!desc->requested_iova || reply.address == desc->requested_iova) &&
+      if (reply.address % desc->alignment == 0 &&
+          (!desc->requested_iova || reply.address == desc->requested_iova) &&
           reply.flags == desc->flags && tu_wddm_shared_allocation(context, &reply, desc->size, allocation))
          return true;
       if (reply.token) device->callbacks.release(device->runtime_owner, reply.token);
@@ -3140,7 +3142,9 @@ tu_wddm_bo_shared(struct tu_device *dev, struct vk_object_base *base,
    bo->never_unmap = true;
    mtx_unlock(&dev->bo_mutex);
    tu_wddm_allocation_desc desc = {};
-   desc.size = size; desc.alignment = 4096; desc.requested_iova = client_iova;
+   desc.size = size;
+   desc.alignment = (flags & TU_BO_ALLOC_BDA_64K) ? 65536 : 4096;
+   desc.requested_iova = client_iova;
    desc.flags = VIOGPU_WDDM_ALLOCATION_NATIVE | VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE |
       ((flags & TU_BO_ALLOC_GPU_READ_ONLY) ? VIOGPU_WDDM_ALLOCATION_GPU_READ_ONLY : 0);
    bool ok = import_token ? tu_wddm_allocation_import(&dev->wddm_context, import_token, size, allocation) :

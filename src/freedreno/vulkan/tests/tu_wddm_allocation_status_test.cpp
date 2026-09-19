@@ -141,6 +141,9 @@ struct state {
    uint32_t make_resident_calls, make_resident_status[4];
    uint32_t allocations, frees, vmas, vma_frees, names;
    uint64_t requested_iova, backing_alignment;
+   uint64_t shared_size, shared_address, shared_alignment;
+   uint32_t shared_calls, shared_refs, shared_releases;
+   bool shared_misaligned;
    tu_bo slot;
 } current;
 static unsigned checks, failures;
@@ -242,6 +245,28 @@ static NTSTATUS destroy_allocation(D3DKMT_DESTROYALLOCATION2 *destroy) {
 #undef util_vma_heap_free
 
 static tu_wddm_runtime runtime = {{create_allocation, destroy_allocation, make_resident}};
+static int32_t MWD_CALL shared_allocate(void *owner, uint64_t size, uint64_t alignment,
+                                      uint64_t address, uint32_t flags, mwd_allocation *reply) {
+   check(owner == active_device && !active_device->bo_mutex && !active_device->vma_mutex,
+         "runtime allocation preserves owner outside bookkeeping locks");
+   check(!address && flags == 14, "runtime allocation preserves native CPU visible read only flags");
+   ++current.shared_calls;
+   current.shared_alignment = alignment;
+   current.shared_size = size;
+   current.shared_address = util_vma_heap_alloc(&active_device->vma, size,
+                                               current.shared_misaligned ? 4096 : alignment);
+   if (!current.shared_address) return static_cast<int32_t>(0x8007000eu);
+   ++current.shared_refs;
+   *reply = {&current, current.shared_address, size, 7, 101, flags};
+   return 0;
+}
+static int32_t MWD_CALL shared_release(void *owner, void *token) {
+   check(owner == active_device && token == &current && current.shared_refs == 1,
+         "runtime allocation failure releases exact retained token once");
+   --current.shared_refs; ++current.shared_releases;
+   util_vma_heap_free(&active_device->vma, current.shared_address, current.shared_size);
+   return 0;
+}
 static tu_instance instance = {true};
 static tu_physical_device physical = {&instance};
 static bool vma_initialized;
@@ -466,6 +491,59 @@ int main() {
             VK_ERROR_OUT_OF_DEVICE_MEMORY && dev.vma.free_size == free_before,
          "aligned allocation failure restores exact VMA reservation");
    no_owner(&dev, bo);
+   for (uint32_t requested : {0u, 1u, 4096u, 8192u, 16384u, 32768u, 65536u}) {
+      for (uint64_t bytes : {4096ull, 12288ull, 69632ull}) {
+         init(&dev); dev.wddm_runtime_owner = &dev;
+         dev.wddm_device.runtime_owner = &dev;
+         dev.wddm_device.callbacks.allocate = shared_allocate;
+         dev.wddm_device.callbacks.release = shared_release;
+         alignment.alignment = requested;
+         alloc_flags = TU_BO_ALLOC_GPU_READ_ONLY;
+         check(tu_memory_bda_alignment(&dev, &memory, &alloc_flags) == VK_SUCCESS,
+               "shared allocation parses real BDA alignment");
+         check(util_vma_heap_alloc_addr(&dev.vma, 0x100ff0000ull, 4096),
+               "shared allocation reserves actual fragmentation guard");
+         free_before = dev.vma.free_size;
+         check(tu_wddm_bo_init(&dev, nullptr, &bo, bytes, 0, 0, alloc_flags,
+                              nullptr, "shared alignment") == VK_SUCCESS && bo,
+               "shared runtime allocation succeeds with requested alignment");
+         if (bo) {
+            check(current.shared_alignment == (requested ? 65536u : 4096u) &&
+                  (!requested || !(bo->iova % requested)),
+                  "shared runtime receives and honors requested BDA alignment");
+            check(bo->iova == current.shared_address && bo->size == bytes &&
+                  bo->wddm_allocation->private_info.Alignment == 4096 &&
+                  bo->wddm_allocation->runtime_token == &current &&
+                  current.shared_refs == 1 && !current.create_calls &&
+                  dev.vma.free_size == free_before - bytes,
+                  "shared overalignment preserves exact backing and unchanged KMD packet");
+            shared_release(&dev, &current);
+            free(bo->wddm_allocation);
+         }
+      }
+   }
+   init(&dev); dev.wddm_runtime_owner = &dev;
+   dev.wddm_device.runtime_owner = &dev;
+   dev.wddm_device.callbacks.allocate = shared_allocate;
+   dev.wddm_device.callbacks.release = shared_release;
+   current.shared_misaligned = true;
+   free_before = dev.vma.free_size;
+   alloc_flags = static_cast<tu_bo_alloc_flags>(TU_BO_ALLOC_GPU_READ_ONLY | TU_BO_ALLOC_BDA_64K);
+   check(tu_wddm_bo_init(&dev, nullptr, &bo, 4096, 0, 0, alloc_flags,
+                        nullptr, "malformed shared alignment") != VK_SUCCESS && !bo &&
+         current.shared_calls == 1 && !current.shared_refs && current.shared_releases == 1 &&
+         dev.vma.free_size == free_before && !dev.wddm_bo_count,
+         "misaligned shared reply rejected with exact reference unwind");
+   // Make mutation fixtures leak-free after they intentionally accept a bad reply.
+   if (bo) { shared_release(&dev, &current); free(bo->wddm_allocation); }
+   for (uint64_t bad_alignment : std::initializer_list<uint64_t>{0, 1, 4095, 4097, 131072, UINT64_MAX}) {
+      tu_wddm_allocation_desc invalid_desc = {};
+      invalid_desc.size = 4096; invalid_desc.alignment = bad_alignment; invalid_desc.flags = 14;
+      const auto calls = current.shared_calls;
+      check(!tu_wddm_allocation_create(&dev.wddm_context, &invalid_desc, &invalid) &&
+            current.shared_calls == calls && !invalid.handle && !invalid.runtime_token,
+            "invalid shared alignment rejected before runtime callback");
+   }
    util_vma_heap_finish(&dev.vma);
    vma_initialized = false;
    printf("%s production WDDM allocation classification and rollback: %u checks, %u failures\n",
