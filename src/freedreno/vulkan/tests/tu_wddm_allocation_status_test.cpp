@@ -8,6 +8,7 @@
 #include "tu_wddm_abi.h"
 #include "tu_wddm_lifetime.h"
 #include "tu_wddm_residency.h"
+#include "mesa_wddm_runtime.h"
 #include "util/vma.h"
 
 using NTSTATUS = int32_t;
@@ -45,6 +46,8 @@ struct tu_wddm_runtime {
    } dispatch;
 };
 struct tu_wddm_device {
+   mwd_callbacks callbacks;
+   void *runtime_owner;
    struct { tu_wddm_runtime *runtime; VIOGPU_WDDM_ADAPTER_INFO private_info; uint32_t driver_version; } adapter;
    D3DKMT_HANDLE handle;
    D3DKMT_HANDLE paging_queue;
@@ -97,7 +100,7 @@ struct tu_bo {
    uint64_t size, iova;
    const char *name;
    int refcnt;
-   bool gpu_read_only;
+   bool gpu_read_only, never_unmap;
    vk_object_base *base;
    tu_wddm_allocation *wddm_allocation;
 };
@@ -115,6 +118,7 @@ struct tu_device {
    tu_wddm_device wddm_device;
    tu_wddm_context wddm_context;
    bool wddm_initialized;
+   void *wddm_runtime_owner;
    uint32_t wddm_bo_count;
    tu_bo *wddm_bos[1];
    uint32_t adapter_driver_version() const { return wddm_device.adapter.driver_version; }
@@ -190,6 +194,8 @@ static bool tu_wddm_add_bo_locked(tu_device *dev, tu_bo *bo) {
    dev->wddm_bos[dev->wddm_bo_count++] = bo; return true;
 }
 static const char *tu_debug_bos_add(tu_device *, uint64_t, const char *name) { current.names++; return name; }
+static int p_atomic_read(int *value) { return *value; }
+static void p_atomic_inc(int *value) { ++*value; }
 static void tu_dump_bo_init(tu_device *, tu_bo *) {}
 using BOOL = int;
 struct MEMORYSTATUSEX {

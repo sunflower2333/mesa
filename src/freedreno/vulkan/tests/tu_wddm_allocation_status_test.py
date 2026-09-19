@@ -10,7 +10,7 @@ import tempfile
 
 
 def definition(source, name):
-    match = re.search(r'(?:static\s+)?(?:bool|void|NTSTATUS|VkResult|enum tu_wddm_residency_outcome)\s+' +
+    match = re.search(r'(?:static\s+)?(?:inline\s+)?(?:bool|void|NTSTATUS|VkResult|enum tu_wddm_residency_outcome)\s+' +
                       name + r'\([^;]*?\)\s*\{', source)
     if not match:
         raise ValueError('Missing production function: ' + name)
@@ -36,9 +36,11 @@ names = ['tu_wddm_init_header', 'tu_wddm_header_is_current', 'tu_wddm_validate_c
          'tu_wddm_allocation_desc_valid', 'tu_wddm_destroy_allocation_handle',
          'tu_wddm_device_requires_residency', 'tu_wddm_device_note_paging_fence',
          'tu_wddm_allocation_make_resident_attempt', 'tu_wddm_allocation_make_resident',
+         'tu_wddm_shared_allocation', 'tu_wddm_allocation_import',
          'tu_wddm_allocation_create', 'tu_wddm_device_check_status',
-         'tu_wddm_allocation_error', 'tu_wddm_remove_bo_locked', 'tu_wddm_bo_init']
-production = '\n\n'.join(definition(source, name) for name in names)
+         'tu_wddm_allocation_error', 'tu_wddm_remove_bo_locked', 'tu_wddm_bo_shared', 'tu_wddm_bo_init']
+production = definition(header, 'tu_wddm_shared_context') + '\n\n'
+production += '\n\n'.join(definition(source, name) for name in names)
 production += '\n\n' + definition((here.parent / 'tu_device.cc').read_text(), 'tu_memory_bda_alignment')
 if args.negative_control_oom:
     original = 'return tu_wddm_allocation_error(dev, create_status);'
