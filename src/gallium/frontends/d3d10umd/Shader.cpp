@@ -34,6 +34,7 @@
 #include "Shader.h"
 #include "ShaderParse.h"
 #include "State.h"
+#include "Resource.h"
 #include "Query.h"
 
 #include "Debug.h"
