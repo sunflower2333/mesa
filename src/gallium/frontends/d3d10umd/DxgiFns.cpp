@@ -424,7 +424,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
           (pDstResource && !pDstResource->hAllocation))
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
                                      "validate", DXGI_DDI_ERR_UNSUPPORTED, started, timing);
-      device->pipe->flush(device->pipe, NULL, 0);
+      FlushBeforePresent(device, pSrcResource, pPresentData->Flags.Flip != 0);
       timing.mark();
       HRESULT hr = PreparePresentResource(device, pSrcResource, false, pPresentData->Flags.Flip != 0);
       timing.mark();

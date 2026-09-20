@@ -51,6 +51,7 @@ HRESULT PublishSharedResource(Device *device, Resource *resource);
 HRESULT ResolveSharedResourceAccess(Device *device, Resource *resource);
 HRESULT PublishSharedResources(Device *device);
 HRESULT PreparePresentResource(Device *device, Resource *resource, bool refreshCache, bool flip);
+void FlushBeforePresent(Device *device, Resource *resource, bool flip);
 bool PrepareSharedDraw(Device *device);
 void MarkSharedResourceWritten(Device *device, struct pipe_resource *resource);
 

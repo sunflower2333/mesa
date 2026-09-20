@@ -841,6 +841,20 @@ PreparePresentResource(Device *device, Resource *resource, bool refreshCache, bo
 }
 
 void
+FlushBeforePresent(Device *device, Resource *resource, bool flip)
+{
+   // PreparePresentResource publishes this dirty owner with
+   // FinishZeroCopyWrites: one flush with a fence, then a mandatory GPU wait.
+   // Avoid draining the threaded context once here and again for that fence.
+   // Do not extend this to clean resources, imported writers or blt presents:
+   // their preparation need not take that same completion path.
+   if (resource && resource->hAllocation && flip && resource->zero_copy &&
+       resource->zero_copy_owner && resource->shared_dirty)
+      return;
+   device->pipe->flush(device->pipe, NULL, 0);
+}
+
+void
 MarkSharedResourceWritten(Device *device, struct pipe_resource *texture)
 {
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
