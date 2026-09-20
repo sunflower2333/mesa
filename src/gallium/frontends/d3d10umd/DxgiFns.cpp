@@ -367,8 +367,8 @@ RecordRuntimePresent(Device *device, const DXGI_DDI_ARG_PRESENT *present,
                      ULONGLONG started, const PresentTiming &timing)
 {
    const unsigned sample = device->runtime_present_count;
-   // Bounded startup/error sampling: DWM has no console for stderr, and a
-   // file write per frame would contaminate the responsiveness measurement.
+   // Disabled by default: even sampled synchronous log I/O can stall DWM.
+   // The explicit diagnostic mode retains bounded startup/error sampling.
    if (timing.sample(sample, FAILED(hr))) {
       HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
@@ -416,7 +416,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
 
    if (device->runtime_present) {
       const ULONGLONG started = GetTickCount64();
-      PresentTiming timing;
+      PresentTiming timing(PresentDiagnosticsEnabled());
       ++device->runtime_present_count;
       if (!device->pDXGIBaseCallbacks || !device->pDXGIBaseCallbacks->pfnPresentCb ||
           !pSrcResource || pPresentData->SrcSubResourceIndex != 0 ||
