@@ -9,6 +9,12 @@ permissions:
   contents: read
 
 jobs:
+  fence-event-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise production fence event lifetime and wake rechecks
+        run: python3 src/freedreno/vulkan/tests/tu_wddm_fence_event_test.py
   source-regressions:
     runs-on: windows-2025-vs2026
     steps:
@@ -30,8 +36,17 @@ jobs:
           if ($LASTEXITCODE) { throw 'Turnip WDDM 2.0 residency regression failed' }
           python src/freedreno/vulkan/tests/check_tu_wddm_policy.py
           if ($LASTEXITCODE) { throw 'Turnip WDDM residency policy failed' }
+      - name: Exercise actual KMT transport and empty-submit ordering
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++17 /W4 /WX /EHsc /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C /I src/freedreno/vulkan src/freedreno/vulkan/tu_knl_wddm.cc src/freedreno/vulkan/tests/tu_wddm_render_test.cpp /Fe:tu_wddm_render_test_x64.exe
+          if ($LASTEXITCODE) { throw 'Actual KMT transport compilation failed' }
+          ./tu_wddm_render_test_x64.exe
+          if ($LASTEXITCODE) { throw 'Actual KMT transport regression failed' }
+          python src/freedreno/vulkan/tests/tu_wddm_empty_submit_test.py
+          if ($LASTEXITCODE) { throw 'Empty-submit ordering regression failed' }
   candidate:
-    needs: source-regressions
+    needs: [source-regressions, fence-event-tests]
     runs-on: windows-2025-vs2026
     timeout-minutes: 60
     strategy:

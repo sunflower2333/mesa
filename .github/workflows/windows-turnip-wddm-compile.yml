@@ -44,6 +44,12 @@ permissions:
   contents: read
 
 jobs:
+  fence-event-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise production fence event lifetime and wake rechecks
+        run: python3 src/freedreno/vulkan/tests/tu_wddm_fence_event_test.py
   cs-failure-tests:
     name: Command stream allocation failure regression
     runs-on: windows-2025-vs2026

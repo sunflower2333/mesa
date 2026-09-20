@@ -1192,6 +1192,116 @@ tu_wddm_context_get_completed_fence(struct tu_wddm_context *context,
    return true;
 }
 
+/* The active D3D frontend uses Zink's ordinary Vulkan device, hence these
+ * private KMT contexts. ABI-v2 runtime-owned contexts have no event callback;
+ * preserve their polling fallback rather than treating opaque handles as KMT.
+ * Registrations are wake hints only: every caller rechecks authoritative fence
+ * and execution state after wait(). Never block inside a kernel Escape. */
+class tu_wddm_fence_event_wait {
+public:
+   tu_wddm_fence_event_wait() = default;
+   tu_wddm_fence_event_wait(const tu_wddm_fence_event_wait &) = delete;
+   tu_wddm_fence_event_wait &operator=(const tu_wddm_fence_event_wait &) = delete;
+   ~tu_wddm_fence_event_wait()
+   {
+      cancel();
+      if (event)
+         CloseHandle(event);
+   }
+
+   void add(struct tu_wddm_context *context, uint32_t fence)
+   {
+      if (fallback || !usable || !context || !context->device || !fence ||
+          tu_wddm_shared_context(context) || !context->handle ||
+          !context->device->adapter.runtime || count == sizeof(registrations) / sizeof(registrations[0])) {
+         fallback = true;
+         return;
+      }
+      if (count == 0) {
+         if (!event)
+            event = CreateEventW(NULL, FALSE, FALSE, NULL);
+         if (!event || !ResetEvent(event)) {
+            usable = false;
+            fallback = true;
+            return;
+         }
+      }
+      VIOGPU_WDDM_FENCE_EVENT request = {};
+      tu_wddm_init_header(&request.Header, sizeof(request));
+      request.Opcode = VIOGPU_WDDM_ESCAPE_ARM_FENCE_EVENT;
+      request.ExpectedResetGeneration = context->info.ResetGeneration;
+      request.Fence = fence;
+      request.EventHandle = reinterpret_cast<uintptr_t>(event);
+      if (!escape(context, &request)) {
+         fallback = true;
+         usable = false; // old KMD, capacity or reset: don't retry every poll
+         return;
+      }
+      registrations[count++] = {context, request.Cookie};
+   }
+
+   void wait(uint64_t remaining_ns = UINT64_MAX)
+   {
+      if (remaining_ns != 0) {
+         if (!fallback && count) {
+            // Recheck reset/device loss at least every 32 ms, even when reset
+            // has no pending submission to deliver a failure notification.
+            uint64_t bounded = std::min(remaining_ns, UINT64_C(32000000));
+            DWORD milliseconds = static_cast<DWORD>((bounded + 999999) / 1000000);
+            DWORD result = WaitForSingleObject(event, milliseconds);
+            if (result != 0 && result != WAIT_TIMEOUT)
+               usable = false;
+         } else {
+            poll.wait(remaining_ns);
+         }
+      }
+      cancel();
+      fallback = false;
+   }
+
+private:
+   static bool escape(struct tu_wddm_context *context, VIOGPU_WDDM_FENCE_EVENT *request)
+   {
+      D3DKMT_ESCAPE call = {};
+      call.hAdapter = context->device->adapter.handle;
+      call.hDevice = context->device->handle;
+      call.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+      call.hContext = context->handle;
+      call.pPrivateDriverData = request;
+      call.PrivateDriverDataSize = sizeof(*request);
+      return NT_SUCCESS(context->device->adapter.runtime->dispatch.Escape(&call));
+   }
+
+   void cancel()
+   {
+      for (unsigned i = 0; i < count; ++i) {
+         if (!registrations[i].cookie)
+            continue;
+         VIOGPU_WDDM_FENCE_EVENT request = {};
+         tu_wddm_init_header(&request.Header, sizeof(request));
+         request.Opcode = VIOGPU_WDDM_ESCAPE_CANCEL_FENCE_EVENT;
+         request.Cookie = registrations[i].cookie;
+         if (!escape(registrations[i].context, &request))
+            usable = false;
+      }
+      count = 0;
+      // A failed cancel must not allow a late signal to affect a new wait.
+      // The kernel keeps its own object reference until completion/rundown.
+      if (!usable && event) {
+         CloseHandle(event);
+         event = NULL;
+      }
+   }
+
+   struct registration { struct tu_wddm_context *context; uint64_t cookie; };
+   registration registrations[64] = {};
+   unsigned count = 0;
+   HANDLE event = NULL;
+   bool fallback = false;
+   bool usable = true;
+   tu_wddm_fence_poll_wait poll;
+};
+
 bool
 tu_wddm_context_wait_fence(struct tu_wddm_context *context,
                            uint32_t fence,
@@ -1208,7 +1318,7 @@ tu_wddm_context_wait_fence(struct tu_wddm_context *context,
                                   ? UINT64_MAX
                                   : timeout_ns / UINT64_C(1000000) +
                                        (timeout_ns % UINT64_C(1000000) != 0);
-   tu_wddm_fence_poll_wait poll_wait;
+   tu_wddm_fence_event_wait poll_wait;
 
    for (;;) {
       uint32_t completed = 0;
@@ -1223,7 +1333,9 @@ tu_wddm_context_wait_fence(struct tu_wddm_context *context,
       if (timeout_ms != UINT64_MAX && elapsed_ms >= timeout_ms)
          return false;
 
-      poll_wait.wait();
+      poll_wait.add(context, fence);
+      poll_wait.wait(timeout_ms == UINT64_MAX ? UINT64_MAX :
+                     std::min(timeout_ms - elapsed_ms, UINT64_C(32)) * UINT64_C(1000000));
    }
 }
 
@@ -2471,7 +2583,7 @@ tu_wddm_sync_wait(struct vk_device *_device, struct vk_sync *base,
    (void)wait_value;
    struct tu_wddm_sync *sync = tu_wddm_sync_from_vk(base);
 
-   tu_wddm_fence_poll_wait poll_wait;
+   tu_wddm_fence_event_wait poll_wait;
    for (;;) {
       if (!tu_wddm_sync_belongs_to_device(sync, _device))
          return vk_device_set_lost(_device,
@@ -2509,6 +2621,7 @@ tu_wddm_sync_wait(struct vk_device *_device, struct vk_sync *base,
       const uint64_t now = static_cast<uint64_t>(os_time_get_nano());
       if (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns)
          return VK_TIMEOUT;
+      poll_wait.add(sync->context, fence);
       poll_wait.wait(abs_timeout_ns == OS_TIMEOUT_INFINITE
                         ? UINT64_MAX : abs_timeout_ns - now);
    }
@@ -2524,7 +2637,7 @@ tu_wddm_sync_wait_many(struct vk_device *device, uint32_t wait_count,
       return VK_SUCCESS;
 
    if (wait_flags & VK_SYNC_WAIT_ANY) {
-      tu_wddm_fence_poll_wait poll_wait;
+      tu_wddm_fence_event_wait poll_wait;
       for (;;) {
          for (uint32_t i = 0; i < wait_count; i++) {
             if (waits[i].sync == NULL)
@@ -2540,6 +2653,12 @@ tu_wddm_sync_wait_many(struct vk_device *device, uint32_t wait_count,
          const uint64_t now = static_cast<uint64_t>(os_time_get_nano());
          if (abs_timeout_ns != OS_TIMEOUT_INFINITE && now >= abs_timeout_ns)
             return VK_TIMEOUT;
+         for (uint32_t i = 0; i < wait_count; ++i) {
+            if (!waits[i].sync)
+               continue;
+            auto *sync = tu_wddm_sync_from_vk(waits[i].sync);
+            poll_wait.add(sync->context, static_cast<uint32_t>(tu_wddm_sync_state_read(sync)));
+         }
          poll_wait.wait(abs_timeout_ns == OS_TIMEOUT_INFINITE
                            ? UINT64_MAX : abs_timeout_ns - now);
       }
@@ -4091,7 +4210,7 @@ tu_wddm_pending_fence_count(uint32_t submitted, uint32_t completed,
 static VkResult
 tu_wddm_wait_submission_slot(struct tu_device *device)
 {
-   tu_wddm_fence_poll_wait poll_wait;
+   tu_wddm_fence_event_wait poll_wait;
    while (device->wddm_pending_submission_upper_bound >=
           TU_WDDM_MAX_PENDING_SUBMISSIONS) {
       uint32_t completed = 0;
@@ -4114,8 +4233,10 @@ tu_wddm_wait_submission_slot(struct tu_device *device)
       }
 
       device->wddm_pending_submission_upper_bound = pending;
-      if (pending >= TU_WDDM_MAX_PENDING_SUBMISSIONS)
+      if (pending >= TU_WDDM_MAX_PENDING_SUBMISSIONS) {
+         poll_wait.add(&device->wddm_context, completed == UINT32_MAX ? 1 : completed + 1);
          poll_wait.wait();
+      }
    }
 
    return VK_SUCCESS;
@@ -4256,7 +4377,7 @@ tu_wddm_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
          &queue->device->vk, "WDDM queue wait targeted an unsubmitted fence");
 
    const uint64_t start = (uint64_t)os_time_get_nano();
-   tu_wddm_fence_poll_wait poll_wait;
+   tu_wddm_fence_event_wait poll_wait;
    for (;;) {
       uint32_t completed = 0;
       if (!tu_wddm_context_get_completed_fence(&queue->device->wddm_context,
@@ -4272,6 +4393,7 @@ tu_wddm_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
       uint64_t elapsed = (uint64_t)os_time_get_nano() - start;
       if (timeout_ns != UINT64_MAX && elapsed >= timeout_ns)
          return VK_TIMEOUT;
+      poll_wait.add(&queue->device->wddm_context, fence);
       poll_wait.wait(timeout_ns == UINT64_MAX ? UINT64_MAX : timeout_ns - elapsed);
    }
 }

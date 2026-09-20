@@ -62,6 +62,8 @@ typedef enum VIOGPU_WDDM_ESCAPE_OPCODE {
    VIOGPU_WDDM_ESCAPE_EXPORT_NATIVE = 5,
    VIOGPU_WDDM_ESCAPE_IMPORT_NATIVE = 6,
    VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE = 7,
+   VIOGPU_WDDM_ESCAPE_ARM_FENCE_EVENT = 8,
+   VIOGPU_WDDM_ESCAPE_CANCEL_FENCE_EVENT = 9,
 } VIOGPU_WDDM_ESCAPE_OPCODE;
 
 #pragma pack(push, 4)
@@ -142,6 +144,20 @@ typedef struct VIOGPU_WDDM_FENCE_INFO {
    VIOGPU_WDDM_UINT32 ContextId;
    VIOGPU_WDDM_UINT32 Reserved;
 } VIOGPU_WDDM_FENCE_INFO;
+
+/* One-shot wake hint; always requery completion and execution/reset status.
+ * Cancel the cookie before closing or reusing the event. Zero cookie means
+ * completion was already published and the event was signaled inline. */
+typedef struct VIOGPU_WDDM_FENCE_EVENT {
+   VIOGPU_WDDM_ABI_HEADER Header;
+   VIOGPU_WDDM_UINT32 Opcode;
+   VIOGPU_WDDM_UINT32 Flags;
+   VIOGPU_WDDM_UINT64 ExpectedResetGeneration;
+   VIOGPU_WDDM_UINT64 Fence;
+   VIOGPU_WDDM_UINT64 EventHandle;
+   VIOGPU_WDDM_UINT64 Cookie;
+   VIOGPU_WDDM_UINT64 Reserved[2];
+} VIOGPU_WDDM_FENCE_EVENT;
 
 /* Additive context escape; no changes to older ABI v0 buffer prefixes/caps. */
 typedef struct VIOGPU_WDDM_TIMESTAMP_INFO {

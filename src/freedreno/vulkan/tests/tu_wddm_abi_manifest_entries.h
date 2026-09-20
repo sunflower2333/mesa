@@ -80,6 +80,17 @@ ABI_OFFSET(offset.context_info.context_id, VIOGPU_WDDM_CONTEXT_INFO, ContextId, 
 ABI_OFFSET(offset.context_info.submit_queue_id, VIOGPU_WDDM_CONTEXT_INFO, SubmitQueueId, 60);
 
 ABI_SIZE(size.fence_info, VIOGPU_WDDM_FENCE_INFO, 56);
+ABI_VALUE(escape.arm_fence_event, VIOGPU_WDDM_ESCAPE_ARM_FENCE_EVENT, 8);
+ABI_VALUE(escape.cancel_fence_event, VIOGPU_WDDM_ESCAPE_CANCEL_FENCE_EVENT, 9);
+ABI_SIZE(size.fence_event, VIOGPU_WDDM_FENCE_EVENT, 72);
+ABI_OFFSET(offset.fence_event.header, VIOGPU_WDDM_FENCE_EVENT, Header, 0);
+ABI_OFFSET(offset.fence_event.opcode, VIOGPU_WDDM_FENCE_EVENT, Opcode, 16);
+ABI_OFFSET(offset.fence_event.flags, VIOGPU_WDDM_FENCE_EVENT, Flags, 20);
+ABI_OFFSET(offset.fence_event.generation, VIOGPU_WDDM_FENCE_EVENT, ExpectedResetGeneration, 24);
+ABI_OFFSET(offset.fence_event.fence, VIOGPU_WDDM_FENCE_EVENT, Fence, 32);
+ABI_OFFSET(offset.fence_event.event, VIOGPU_WDDM_FENCE_EVENT, EventHandle, 40);
+ABI_OFFSET(offset.fence_event.cookie, VIOGPU_WDDM_FENCE_EVENT, Cookie, 48);
+ABI_OFFSET(offset.fence_event.reserved, VIOGPU_WDDM_FENCE_EVENT, Reserved, 56);
 ABI_OFFSET(offset.fence_info.header, VIOGPU_WDDM_FENCE_INFO, Header, 0);
 ABI_OFFSET(offset.fence_info.opcode, VIOGPU_WDDM_FENCE_INFO, Opcode, 16);
 ABI_OFFSET(offset.fence_info.flags, VIOGPU_WDDM_FENCE_INFO, Flags, 20);

@@ -94,7 +94,8 @@ static bool tu_wddm_device_execution_active(vk_device *device) { return device->
 static bool tu_wddm_fence_after(uint32_t a, uint32_t b) { return int32_t(a - b) > 0; }
 static VkResult vk_device_set_lost(vk_device *, const char *) { return VK_ERROR_DEVICE_LOST; }
 static int64_t os_time_get_nano() { return 1; }
-struct tu_wddm_fence_poll_wait {
+struct tu_wddm_fence_event_wait {
+   void add(tu_wddm_context *, uint32_t) { std::abort(); }
    void wait(uint64_t) { std::abort(); } // Zero-deadline probes must never block.
 };
 static bool tu_wddm_submit_add_live_bos(tu_device *, tu_wddm_submit *) { return true; }
