@@ -35,6 +35,7 @@
 #include "DxgiFns.h"
 #include "Residency.h"
 #include "Resource.h"
+#include "PresentTiming.h"
 #include "util/u_memory.h"
 #ifndef UMDF_USING_NTSTATUS
 #define UMDF_USING_NTSTATUS
@@ -363,12 +364,12 @@ PublishPresentFrame(struct Device *device, Resource *pSrcResource)
 static HRESULT
 RecordRuntimePresent(Device *device, const DXGI_DDI_ARG_PRESENT *present,
                      Resource *src, Resource *dst, const char *stage, HRESULT hr,
-                     ULONGLONG started)
+                     ULONGLONG started, const PresentTiming &timing)
 {
    const unsigned sample = device->runtime_present_count;
    // Bounded startup/error sampling: DWM has no console for stderr, and a
    // file write per frame would contaminate the responsiveness measurement.
-   if (sample <= 16 || (sample % 64) == 0) {
+   if (timing.sample(sample, FAILED(hr))) {
       HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
                                FILE_ATTRIBUTE_NORMAL, NULL);
@@ -385,6 +386,18 @@ RecordRuntimePresent(Device *device, const DXGI_DDI_ARG_PRESENT *present,
          DWORD written;
          if (len > 0)
             WriteFile(log, line, (DWORD)len, &written, NULL);
+         // Reuse the sampled log handle; do not open a second file per sample.
+         char phases[512];
+         int phaseLen = _snprintf_s(phases, sizeof phases, _TRUNCATE,
+            "runtime_present pid=%lu tid=%lu n=%u stage=%s allocation=0x%x hr=0x%08lx "
+            "qpc=%lld/%lld frequency=%lld completed=%u flush=%lld prepare=%lld residency=%lld callback=%lldus\r\n",
+            GetCurrentProcessId(), GetCurrentThreadId(), sample, stage,
+            src ? src->hAllocation : 0, (unsigned long)hr,
+            timing.stamps[0].QuadPart, timing.stamps[timing.completed].QuadPart,
+            timing.frequency.QuadPart, timing.completed,
+            timing.usec(0), timing.usec(1), timing.usec(2), timing.usec(3));
+         if (phaseLen > 0)
+            WriteFile(log, phases, (DWORD)phaseLen, &written, NULL);
          CloseHandle(log);
       }
    }
@@ -403,25 +416,29 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
 
    if (device->runtime_present) {
       const ULONGLONG started = GetTickCount64();
+      PresentTiming timing;
       ++device->runtime_present_count;
       if (!device->pDXGIBaseCallbacks || !device->pDXGIBaseCallbacks->pfnPresentCb ||
           !pSrcResource || pPresentData->SrcSubResourceIndex != 0 ||
           pPresentData->DstSubResourceIndex != 0 ||
           (pDstResource && !pDstResource->hAllocation))
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
-                                     "validate", DXGI_DDI_ERR_UNSUPPORTED, started);
+                                     "validate", DXGI_DDI_ERR_UNSUPPORTED, started, timing);
       device->pipe->flush(device->pipe, NULL, 0);
+      timing.mark();
       HRESULT hr = PreparePresentResource(device, pSrcResource, false, pPresentData->Flags.Flip != 0);
+      timing.mark();
       if (FAILED(hr))
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
-                                     "prepare", hr, started);
+                                     "prepare", hr, started, timing);
 
       // WDDM 2.0: the present packet names both allocations; they are resident
       // since creation/open, but a pending paging operation must finish first.
       hr = ResidencyPrepareSubmission(device);
+      timing.mark();
       if (FAILED(hr))
          return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
-                                     "residency", hr, started);
+                                     "residency", hr, started, timing);
 
       DXGIDDICB_PRESENT present = {};
       present.hSrcAllocation = pSrcResource->hAllocation;
@@ -430,6 +447,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       // Use the same VidSch context that submitted the host-to-allocation copy.
       present.hContext = device->shared_copy_context.hContext;
       hr = device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice, &present);
+      timing.mark();
       const unsigned sample = device->runtime_present_count;
       if (sample <= 16 || FAILED(hr)) {
          fprintf(stderr, "DXGI runtime Present n=%u src=0x%x dst=0x%x flags=0x%x hr=0x%08lx\n",
@@ -440,7 +458,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       // when hDstResource is null. PresentCb owns that copy and its completion;
       // a global escape here would overwrite DWM with one application's frame.
       return RecordRuntimePresent(device, pPresentData, pSrcResource, pDstResource,
-                                  "callback", hr, started);
+                                  "callback", hr, started, timing);
    }
 
    /* Split the present into its three parts and report a running average.

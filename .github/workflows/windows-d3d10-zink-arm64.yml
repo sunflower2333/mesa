@@ -30,6 +30,7 @@ jobs:
         run: |
           python3 src/gallium/frontends/d3d10umd/shared_finish_test.py
           python3 src/gallium/frontends/d3d10umd/native_rotation_test.py
+          python3 src/gallium/frontends/d3d10umd/present_timing_test.py
           python3 src/gallium/frontends/d3d10umd/shared_overwrite_test.py
           python3 src/gallium/frontends/d3d10umd/runtime_context_test.py
           python3 src/gallium/frontends/d3d10umd/device_loss_test.py
