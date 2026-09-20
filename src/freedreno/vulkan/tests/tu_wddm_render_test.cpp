@@ -427,6 +427,9 @@ struct test_fixture {
    unsigned unlock_calls;
    unsigned render_calls;
    unsigned escape_calls;
+   unsigned event_arm_calls;
+   unsigned event_cancel_calls;
+   bool fence_events_supported;
    unsigned get_device_state_calls;
    UINT execution_state;
    uint32_t completed_fence;
@@ -825,7 +828,6 @@ fake_escape(const D3DKMT_ESCAPE *escape)
    if (fixture == NULL || escape == NULL)
       return kStatusInvalidParameter;
 
-   fixture->escape_calls++;
    CHECK(escape->hAdapter == kAdapterHandle);
    CHECK(escape->hDevice == kDeviceHandle);
    CHECK(escape->hContext == kContextHandle);
@@ -834,6 +836,34 @@ fake_escape(const D3DKMT_ESCAPE *escape)
    CHECK(escape->pPrivateDriverData != NULL);
    if (escape->pPrivateDriverData == NULL)
       return kStatusInvalidParameter;
+
+   // Keep completion-query progression separate from wake-hint operations.
+   // The default fixture models an old KMD; opt-in exercises real Win32 events.
+   if (escape->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_FENCE_EVENT)) {
+      auto *request = static_cast<VIOGPU_WDDM_FENCE_EVENT *>(escape->pPrivateDriverData);
+      CHECK(request->Header.Magic == VIOGPU_WDDM_ABI_MAGIC);
+      CHECK(request->Header.Version == VIOGPU_WDDM_ABI_VERSION);
+      CHECK(request->Header.Size == 72 && !request->Header.Reserved);
+      CHECK(!request->Flags && !request->Reserved[0] && !request->Reserved[1]);
+      if (request->Opcode == VIOGPU_WDDM_ESCAPE_ARM_FENCE_EVENT) {
+         ++fixture->event_arm_calls;
+         CHECK(request->ExpectedResetGeneration == kResetGeneration);
+         CHECK(request->Fence && request->EventHandle && !request->Cookie);
+         if (!fixture->fence_events_supported)
+            return kStatusInvalidParameter;
+         request->Cookie = fixture->event_arm_calls;
+         CHECK(SetEvent(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(request->EventHandle))) != 0);
+         // Deliberately do not advance completion. A wake must cause a requery.
+      } else {
+         ++fixture->event_cancel_calls;
+         CHECK(request->Opcode == VIOGPU_WDDM_ESCAPE_CANCEL_FENCE_EVENT);
+         CHECK(!request->ExpectedResetGeneration && !request->Fence && !request->EventHandle);
+         CHECK(request->Cookie != 0);
+      }
+      return kStatusSuccess;
+   }
+
+   fixture->escape_calls++;
 
    if (escape->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_CONTEXT_INFO)) {
       VIOGPU_WDDM_CONTEXT_INFO *info =
@@ -2077,8 +2107,10 @@ test_completed_fence_query_and_wait()
 void
 test_pending_fence_wait_requeries_completion()
 {
+   for (bool events : {false, true}) {
    test_fixture fixture;
    init_fixture(&fixture);
+   fixture.fence_events_supported = events;
    fixture.completed_fence = 6;
    fixture.context.last_submitted_fence = 7;
    fixture.complete_after_escape = 3;
@@ -2086,6 +2118,9 @@ test_pending_fence_wait_requeries_completion()
    CHECK(tu_wddm_context_wait_fence(&fixture.context, 7, UINT64_C(1000000000)));
    CHECK(fixture.escape_calls == 3);
    CHECK(fixture.get_device_state_calls == 3);
+   CHECK(fixture.event_arm_calls == (events ? 2u : 1u));
+   CHECK(fixture.event_cancel_calls == (events ? 2u : 0u));
+   }
 }
 
 void
