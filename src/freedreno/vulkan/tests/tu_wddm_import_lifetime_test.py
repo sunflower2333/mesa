@@ -33,13 +33,17 @@ fixture = r'''
 #include <set>
 constexpr unsigned TU_WDDM_MAX_RENDER_ALLOCATIONS=16;
 constexpr uint64_t os_page_size=4096;
+constexpr uint64_t TU_WDDM_DESTROY_WAIT_TIMEOUT_NS=1000;
 struct vk_device { int alloc; bool lost; };
-struct tu_wddm_device {};
+struct tu_wddm_device { unsigned handle; struct { unsigned handle; } adapter; };
 struct tu_wddm_context {
  tu_wddm_device *device; VIOGPU_WDDM_CONTEXT_INFO info; unsigned last_submitted_fence;
+ unsigned handle, last_destroy_status, destroy_attempt_count;
 };
 struct tu_wddm_allocation {
  tu_wddm_context *context; uint32_t handle; bool imported, aliased, locked;
+ uint32_t imported_resource; bool import_released, resident;
+ unsigned last_destroy_status;
  uint64_t share_key, vma_size, imported_size; VIOGPU_WDDM_ALLOCATION_INFO private_info;
  struct { uint64_t reset_generation; unsigned fence; bool pending, fence_ready; } retirement;
 };
@@ -53,17 +57,22 @@ struct tu_device {
  tu_bo slots[32]{}; tu_bo **wddm_bos=nullptr;
  uint32_t wddm_bo_count=0, wddm_bo_capacity=0, wddm_retired_count=0;
  bool wddm_deferred_bo_destroy=false;
- struct { unsigned queued, pending_peak; } wddm_lifetime_stats{};
+ struct { unsigned queued, pending_peak, reaped; } wddm_lifetime_stats{};
+ bool wddm_initialized=true, wddm_teardown_failed=false;
+ void *wddm_submit_scratch=nullptr;
  tu_wddm_device wddm_device; tu_wddm_context wddm_context{};
 };
 unsigned importCalls, releaseCalls, waitCalls, freeCalls;
 bool importOk=true, releaseOk=true, waitOk=true;
 bool aliasAnswer=false;
+bool openOk=true, closeOk=true;
+unsigned openCalls, closeCalls;
 uint64_t nextIova=4096;
 void mtx_lock(int *m) { assert(*m==0); *m=1; }
 void mtx_unlock(int *m) { assert(*m==1); *m=0; }
 int p_atomic_read(int *p) { return *p; }
 void p_atomic_inc(int *p) { ++*p; }
+void p_atomic_dec(int *p) { --*p; }
 bool p_atomic_dec_zero(int *p) { return --*p==0; }
 void p_atomic_set(int *p,int n) { *p=n; }
 void *vk_zalloc(int*,size_t n,unsigned,VkSystemAllocationScope) { return calloc(1,n); }
@@ -74,6 +83,10 @@ bool vk_device_is_lost(vk_device *v) { return v->lost; }
 void vk_device_set_lost(vk_device *v,const char*) { v->lost=true; }
 void mesa_loge(const char*,...) {}
 void mesa_logi(const char*,...) {}
+void tu_wddm_diag(const char*,...) {}
+void tu_wddm_report_lifetime_stats(tu_device*) {}
+bool tu_wddm_context_close(tu_wddm_context*) { return true; }
+bool tu_wddm_device_close(tu_wddm_device*) { return true; }
 uint64_t util_vma_heap_alloc(std::set<uint64_t> *v,uint64_t size,uint64_t) {
  uint64_t iova=nextIova; nextIova+=size; assert(v->insert(iova).second); return iova;
 }
@@ -87,6 +100,17 @@ bool tu_wddm_context_wait_submissions(tu_wddm_context*,uint64_t) { ++waitCalls; 
 bool tu_wddm_allocation_unlock(tu_wddm_allocation*) { assert(false); return false; }
 bool tu_wddm_allocation_destroy(tu_wddm_allocation*) { assert(false); return false; }
 bool tu_wddm_reap_retired_bos_locked(tu_device*,unsigned) { assert(false); return false; }
+bool tu_wddm_open_import_resource(tu_wddm_allocation *a,uintptr_t h,uint64_t size) {
+ assert(h==42 && size==8192); ++openCalls;
+ a->share_key=10; a->handle=100+openCalls; a->imported_resource=200+openCalls;
+ a->resident=openOk; return openOk;
+}
+bool tu_wddm_close_import_resource(tu_wddm_allocation *a) {
+ if (!a->imported_resource && !a->handle) return true;
+ ++closeCalls;
+ if (!closeOk) return false;
+ a->handle=a->imported_resource=0; a->resident=false; return true;
+}
 #define MAX2(a,b) ((a)>(b) ? (a) : (b))
 bool tu_wddm_context_native_share(tu_wddm_context*,uint32_t opcode,VIOGPU_WDDM_NATIVE_SHARE *s) {
  if (opcode==VIOGPU_WDDM_ESCAPE_IMPORT_NATIVE) {
@@ -98,6 +122,9 @@ bool tu_wddm_context_native_share(tu_wddm_context*,uint32_t opcode,VIOGPU_WDDM_N
  ++releaseCalls; return releaseOk;
 }
 // FUNCTIONS
+VkResult tu_wddm_bo_init_shared(tu_device *d,tu_bo **bo,uint64_t size,uint64_t key) {
+ return tu_wddm_bo_init_shared(d,bo,size,key,false);
+}
 int main() {
  tu_device d{}; d.wddm_context.device=&d.wddm_device; d.wddm_context.info.ResetGeneration=1;
  tu_bo *first=nullptr, *second=nullptr;
@@ -135,14 +162,52 @@ int main() {
  releases=releaseCalls;
  tu_wddm_bo_finish(&d,first);
  assert(releaseCalls==releases && d.wddm_bo_count==0 && d.vma.empty());
- free(d.wddm_bos);
- puts("PASS production imported BO lifetime: reuse, size mismatch, failed import/fence/release, alias ownership");
+ d.vk.lost=false; aliasAnswer=false;
+ assert(tu_wddm_bo_init_shared(&d,&first,8192,42,true)==VK_SUCCESS);
+ assert(first->iova!=0 && !first->wddm_allocation->import_released);
+ assert(first->wddm_allocation->imported_resource==201 && d.wddm_bo_count==1);
+ unsigned imports=importCalls;
+ assert(tu_wddm_bo_init_shared(&d,&second,8192,42,true)==VK_SUCCESS);
+ assert(first==second && first->refcnt==2 && importCalls==imports);
+ assert(openCalls==2 && closeCalls==1 && d.wddm_bo_count==1);
+ tu_wddm_bo_finish(&d,first);
+ assert(closeCalls==1 && second->refcnt==1);
+ closeOk=false;
+ tu_wddm_bo_finish(&d,second);
+ assert(second->refcnt==1 && second->wddm_allocation->import_released);
+ releases=releaseCalls; closeOk=true;
+ tu_wddm_bo_finish(&d,second);
+ assert(releaseCalls==releases && d.vma.empty() && d.wddm_bo_count==0);
+ d.vk.lost=false;
+ assert(tu_wddm_bo_init_shared(&d,&first,8192,42,true)==VK_SUCCESS);
+ closeOk=false;
+ assert(tu_wddm_bo_init_shared(&d,&bad,8192,42,true)==VK_ERROR_DEVICE_LOST);
+ assert(!bad && first->refcnt==1 && d.wddm_bo_count==2 && d.vma.size()==1);
+ closeOk=true;
+ tu_wddm_bo_finish(&d,first);
+ assert(d.wddm_bo_count==1 && d.vma.empty());
+ tu_wddm_bo_finish(&d,d.wddm_bos[0]);
+ assert(d.wddm_bo_count==0);
+ releases=releaseCalls;
+ d.vk.lost=false; openOk=false; closeOk=false;
+ assert(tu_wddm_bo_init_shared(&d,&bad,8192,42,true)==VK_ERROR_DEVICE_LOST);
+ assert(!bad && d.wddm_bo_count==1 && d.vma.empty());
+ assert(d.wddm_bos[0]->wddm_allocation->imported_resource &&
+        d.wddm_bos[0]->wddm_allocation->import_released);
+ tu_wddm_device_finish(&d);
+ assert(d.wddm_teardown_failed && d.wddm_bo_count==1);
+ closeOk=true;
+ tu_wddm_device_finish(&d);
+ assert(!d.wddm_initialized && !d.wddm_teardown_failed && !d.wddm_bos);
+ assert(d.wddm_bo_count==0 && releaseCalls==releases && d.vma.empty());
+ puts("PASS production imported BO lifetime: dedup, NT open ownership, failed import/fence/release/close, device teardown retry");
 }
 '''
 names = ('tu_wddm_allocation_release_import', 'tu_wddm_bo_valid',
          'tu_wddm_bo_valid_for_device', 'tu_wddm_remove_bo_locked',
          'tu_wddm_alloc_token_locked', 'tu_wddm_add_bo_locked',
-         'tu_wddm_bo_init_shared_locked', 'tu_wddm_bo_init_shared', 'tu_wddm_bo_finish')
+         'tu_wddm_bo_init_shared_locked', 'tu_wddm_bo_init_shared_nt_locked',
+         'tu_wddm_bo_init_shared', 'tu_wddm_bo_finish', 'tu_wddm_device_finish')
 fixture = fixture.replace('// FUNCTIONS', '\n\n'.join(definition(n) for n in names))
 with tempfile.TemporaryDirectory(prefix='turnip-import-lifetime-') as temporary:
     output = Path(temporary)

@@ -54,6 +54,8 @@ struct tu_wddm_dispatch {
    PFND3DKMT_ESCAPE Escape;
    PFND3DKMT_RENDER Render;
    PFND3DKMT_GETDEVICESTATE GetDeviceState;
+   PFND3DKMT_QUERYRESOURCEINFOFROMNTHANDLE QueryResourceInfoFromNtHandle;
+   PFND3DKMT_OPENRESOURCEFROMNTHANDLE OpenResourceFromNtHandle;
 
    /* WDDM 2.0 residency thunks.  They are loaded when gdi32 exports them but
     * are optional here: a WDDM 1.x adapter never calls them, so a missing

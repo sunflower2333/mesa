@@ -140,10 +140,12 @@ struct tu_wddm_allocation {
    bool resident;
    uint32_t last_residency_status;
    uint32_t residency_attempt_count;
-   /* Another context's native allocation mapped here by IMPORT_NATIVE. It has
-    * no KMT handle: it is never in a submit's allocation list, never mapped
-    * and never made resident by this device; its owner keeps it resident. */
+   /* Another context's allocation mapped here by IMPORT_NATIVE. HostSurface
+    * imports additionally own an open of the same VidMm resource on this
+    * device, with their own residency reference and submit allocation entry. */
    bool imported;
+   D3DKMT_HANDLE imported_resource;
+   bool import_released;
    /* The import aliases an allocation this context already owns: nothing was
     * mapped for it, so it is released without an escape and owns no VMA. */
    bool aliased;
@@ -275,7 +277,8 @@ bool tu_wddm_context_render_imports(struct tu_wddm_context *context,
                                     const struct tu_wddm_render_reference *references,
                                     uint32_t reference_count,
                                     const VIOGPU_WDDM_IMPORTED_REFERENCE *imports,
-                                    uint32_t import_count);
+                                    uint32_t import_count,
+                                    const struct tu_wddm_allocation *const *import_allocations);
 
 #ifdef __cplusplus
 }

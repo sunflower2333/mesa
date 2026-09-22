@@ -100,6 +100,7 @@ enum { TU_WDDM_MAX_SUBMIT_REFERENCES = 1024 };
 struct tu_wddm_submit_reference { tu_bo *bo; uint32_t access; };
 struct tu_wddm_submit {
    util_dynarray references, imports;
+   const tu_wddm_allocation *import_allocations[VIOGPU_WDDM_MAX_IMPORTED_REFERENCES]{};
    uint16_t reference_index[2048]{};
    bool failed = false;
 };

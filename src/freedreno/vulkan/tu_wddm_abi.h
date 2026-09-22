@@ -34,7 +34,7 @@
 #define VIOGPU_WDDM_ESCAPE_FLAGS_ALIAS_OWNER 0x00000001U
 #define VIOGPU_WDDM_RENDER_FLAGS_NONE        0U
 #define VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES 0x00000001U
-#define VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION 1U
+#define VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION 2U
 #define VIOGPU_WDDM_MAX_IMPORTED_REFERENCES 256U
 
 #define VIOGPU_WDDM_REFERENCE_READ           0x00000001U
@@ -274,7 +274,9 @@ typedef struct VIOGPU_WDDM_ALLOCATION_REFERENCE {
 } VIOGPU_WDDM_ALLOCATION_REFERENCE;
 
 /* RENDER_IMPORTED_REFERENCES uses Reserved[0:2] as offset, count, version;
- * Reserved[3] remains zero. This table follows owned allocation references. */
+ * Reserved[3] remains zero. This table follows owned allocation references.
+ * Version 2: each HostSurface entry's Reserved is its D3DKMTRender allocation
+ * list index plus one. Zero remains valid for non-HostSurface imports. */
 typedef struct VIOGPU_WDDM_IMPORTED_REFERENCE {
    VIOGPU_WDDM_UINT64 ShareKey;
    VIOGPU_WDDM_UINT64 Iova;

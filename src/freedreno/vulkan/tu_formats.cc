@@ -724,17 +724,18 @@ tu_get_external_image_format_properties(
        VIOGPU_WDDM_ABI_MAGIC) {
       /* Native allocations share across contexts as 32-bit KMT keys, bound
        * to one image each. */
-      if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT &&
+      if ((handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT ||
+           handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT) &&
           pImageFormatInfo->type == VK_IMAGE_TYPE_2D) {
          if (external_properties)
             external_properties->externalMemoryProperties =
                (VkExternalMemoryProperties){
-            .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+            .externalMemoryFeatures = (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                         ? VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT : 0) |
                                       VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
-            .exportFromImportedHandleTypes =
-               VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
-            .compatibleHandleTypes =
-               VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
+            .exportFromImportedHandleTypes = handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+                                                ? handleType : 0,
+            .compatibleHandleTypes = handleType,
          };
          return VK_SUCCESS;
       }

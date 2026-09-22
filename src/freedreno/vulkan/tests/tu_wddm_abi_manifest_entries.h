@@ -166,7 +166,7 @@ ABI_OFFSET(offset.native_surface.layout_flags, VIOGPU_WDDM_NATIVE_SURFACE, Layou
 ABI_OFFSET(offset.native_surface.reserved, VIOGPU_WDDM_NATIVE_SURFACE, Reserved, 104);
 
 ABI_VALUE(render.flags.imported_references, VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES, 1);
-ABI_VALUE(imported_references.version, VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION, 1);
+ABI_VALUE(imported_references.version, VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION, 2);
 ABI_VALUE(imported_references.maximum, VIOGPU_WDDM_MAX_IMPORTED_REFERENCES, 256);
 ABI_SIZE(size.imported_reference, VIOGPU_WDDM_IMPORTED_REFERENCE, 40);
 ABI_OFFSET(offset.imported_reference.share_key, VIOGPU_WDDM_IMPORTED_REFERENCE, ShareKey, 0);

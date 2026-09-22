@@ -1083,16 +1083,23 @@ tu_wddm_context_native_share(struct tu_wddm_context *context, uint32_t opcode,
    return true;
 }
 
+static bool tu_wddm_close_import_resource(struct tu_wddm_allocation *allocation);
+
 static bool
 tu_wddm_allocation_release_import(struct tu_wddm_allocation *allocation)
 {
-   if (!allocation->imported || allocation->aliased)
+   if (!allocation->imported)
       return true;
-   VIOGPU_WDDM_NATIVE_SHARE release = {};
-   release.ShareKey = allocation->share_key;
-   release.Iova = allocation->private_info.RequestedIova;
-   return tu_wddm_context_native_share(allocation->context,
-                                      VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE, &release);
+   if (!allocation->aliased && !allocation->import_released) {
+      VIOGPU_WDDM_NATIVE_SHARE release = {};
+      release.ShareKey = allocation->share_key;
+      release.Iova = allocation->private_info.RequestedIova;
+      if (!tu_wddm_context_native_share(allocation->context,
+                                       VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE, &release))
+         return false;
+      allocation->import_released = true;
+   }
+   return tu_wddm_close_import_resource(allocation);
 }
 
 uint32_t
@@ -1506,6 +1513,91 @@ tu_wddm_allocation_evict(struct tu_wddm_allocation *allocation)
 
    allocation->resident = false;
    return true;
+}
+
+static bool
+tu_wddm_close_import_resource(struct tu_wddm_allocation *allocation)
+{
+   if (!allocation->imported_resource && !allocation->handle)
+      return true;
+   if (!tu_wddm_allocation_evict(allocation))
+      return false;
+   D3DKMT_DESTROYALLOCATION2 destroy = {};
+   destroy.hDevice = allocation->context->device->handle;
+   destroy.hResource = allocation->imported_resource;
+   if (!destroy.hResource) {
+      destroy.AllocationCount = 1;
+      destroy.phAllocationList = &allocation->handle;
+   }
+   const NTSTATUS status =
+      allocation->context->device->adapter.runtime->dispatch.DestroyAllocation2(&destroy);
+   allocation->last_destroy_status = static_cast<uint32_t>(status);
+   if (status != TU_WDDM_STATUS_SUCCESS)
+      return false;
+   allocation->imported_resource = 0;
+   allocation->handle = 0;
+   return true;
+}
+
+/* Open the exact VidMm allocation on this device. A raw share key establishes
+ * the host IOVA identity only; it cannot substitute for this Windows open. */
+static bool
+tu_wddm_open_import_resource(struct tu_wddm_allocation *allocation,
+                              uintptr_t nt_handle, uint64_t size)
+{
+   struct tu_wddm_context *context = allocation->context;
+   const struct tu_wddm_dispatch *dispatch = &context->device->adapter.runtime->dispatch;
+   if (!nt_handle || !tu_wddm_device_requires_residency(context->device) ||
+       !dispatch->QueryResourceInfoFromNtHandle || !dispatch->OpenResourceFromNtHandle)
+      return false;
+
+   D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE query = {};
+   query.hDevice = context->device->handle;
+   query.hNtHandle = reinterpret_cast<HANDLE>(nt_handle);
+   if (dispatch->QueryResourceInfoFromNtHandle(&query) != TU_WDDM_STATUS_SUCCESS ||
+       query.NumAllocations != 1 || query.PrivateRuntimeDataSize > 1024 * 1024 ||
+       query.ResourcePrivateDriverDataSize != sizeof(VIOGPU_WDDM_RESOURCE_SHARE) ||
+       query.TotalPrivateDriverDataSize != sizeof(VIOGPU_WDDM_ALLOCATION_INFO))
+      return false;
+
+   void *runtime_data = query.PrivateRuntimeDataSize ? calloc(1, query.PrivateRuntimeDataSize) : NULL;
+   if (query.PrivateRuntimeDataSize && !runtime_data)
+      return false;
+   VIOGPU_WDDM_RESOURCE_SHARE share = {};
+   VIOGPU_WDDM_ALLOCATION_INFO info = {};
+   D3DDDI_OPENALLOCATIONINFO2 opened = {};
+   D3DKMT_OPENRESOURCEFROMNTHANDLE request = {};
+   request.hDevice = context->device->handle;
+   request.hNtHandle = query.hNtHandle;
+   request.NumAllocations = 1;
+   request.pOpenAllocationInfo2 = &opened;
+   request.pPrivateRuntimeData = runtime_data;
+   request.PrivateRuntimeDataSize = query.PrivateRuntimeDataSize;
+   request.pResourcePrivateDriverData = &share;
+   request.ResourcePrivateDriverDataSize = sizeof(share);
+   request.pTotalPrivateDriverDataBuffer = &info;
+   request.TotalPrivateDriverDataBufferSize = sizeof(info);
+   const NTSTATUS status = dispatch->OpenResourceFromNtHandle(&request);
+   free(runtime_data);
+   /* Preserve partial handles even on failure; the caller's registered BO
+    * owns retries if the compensating close is not confirmed. */
+   allocation->imported_resource = request.hResource;
+   allocation->handle = opened.hAllocation;
+   if (status != TU_WDDM_STATUS_SUCCESS || !request.hResource || !opened.hAllocation ||
+       opened.pPrivateDriverData != &info || opened.PrivateDriverDataSize != sizeof(info) ||
+       request.TotalPrivateDriverDataBufferSize != sizeof(info) ||
+       !tu_wddm_header_is_current(&share.Header, sizeof(share)) ||
+       !tu_wddm_header_is_current(&info.Header, sizeof(info)) ||
+       share.Flags != VIOGPU_WDDM_RESOURCE_SHARE_NATIVE_SURFACE ||
+       !share.ShareKey || share.ShareKey > UINT32_MAX ||
+       share.Reserved[0] || share.Reserved[1] ||
+       (info.Flags != 0 && info.Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY) ||
+       info.Size != size || !info.Width || info.Width > UINT32_MAX / 4 || !info.Height ||
+       info.Pitch < info.Width * 4 || (info.Pitch & 3) ||
+       info.Pitch != share.Stride || (uint64_t)info.Pitch * info.Height > info.Size)
+      return false;
+   allocation->share_key = share.ShareKey;
+   return tu_wddm_allocation_make_resident(allocation);
 }
 
 bool
@@ -1960,7 +2052,8 @@ tu_wddm_context_render_imports(struct tu_wddm_context *context,
                        const struct tu_wddm_render_reference *references,
                        uint32_t reference_count,
                        const VIOGPU_WDDM_IMPORTED_REFERENCE *imports,
-                       uint32_t import_count)
+                       uint32_t import_count,
+                       const struct tu_wddm_allocation *const *import_allocations)
 {
    auto rejected = [&](const char *reason) {
       tu_wddm_diag("render rejected reason=%s packet_bytes=%u references=%u",
@@ -1979,6 +2072,30 @@ tu_wddm_context_render_imports(struct tu_wddm_context *context,
    if (!tu_wddm_import_references_valid(context, imports, import_count))
       return rejected("imported-reference");
 
+   uint32_t allocation_count = reference_count;
+   for (uint32_t i = 0; i < import_count; i++) {
+      const struct tu_wddm_allocation *allocation = import_allocations ? import_allocations[i] : NULL;
+      if (!allocation || !allocation->imported_resource)
+         continue;
+      if (!allocation->imported || allocation->import_released || !allocation->handle ||
+          !allocation->resident || !allocation->context || allocation->context->device != context->device ||
+          allocation->share_key != imports[i].ShareKey ||
+          allocation->private_info.RequestedIova != imports[i].Iova ||
+          allocation->imported_size != imports[i].Size ||
+          allocation->private_info.ExpectedResetGeneration != imports[i].ResetGeneration)
+         return rejected("imported-residency-owner");
+      for (uint32_t j = 0; j < reference_count; j++) {
+         if (references[j].allocation && references[j].allocation->handle == allocation->handle)
+            return rejected("imported-allocation-alias");
+      }
+      for (uint32_t j = 0; j < i; j++) {
+         if (import_allocations[j] && import_allocations[j]->handle == allocation->handle)
+            return rejected("imported-allocation-alias");
+      }
+      if (++allocation_count > TU_WDDM_MAX_RENDER_ALLOCATIONS)
+         return rejected("imported-allocation-capacity");
+   }
+
    /* Render is the only path that can publish a new Host submission.  Keep
     * the execution-state check adjacent to the context/epoch validation so a
     * reset or stopped device cannot consume a DMA buffer or mutate the KMT
@@ -1994,7 +2111,7 @@ tu_wddm_context_render_imports(struct tu_wddm_context *context,
    const uint64_t command_length = command_offset + command_stream_size;
    if (command_length > TU_WDDM_MAX_RENDER_COMMAND_SIZE ||
        command_length > context->command_buffer_size ||
-       reference_count > context->allocation_list_size ||
+       allocation_count > context->allocation_list_size ||
        reference_count > context->patch_location_list_size)
       return rejected("replacement-capacity");
 
@@ -2065,11 +2182,26 @@ tu_wddm_context_render_imports(struct tu_wddm_context *context,
          static_cast<UINT>(command_offset + reference->patch_offset);
    }
 
+   uint32_t imported_index = reference_count;
+   VIOGPU_WDDM_IMPORTED_REFERENCE *wire_imports =
+      reinterpret_cast<VIOGPU_WDDM_IMPORTED_REFERENCE *>(packet + import_offset);
+   for (uint32_t i = 0; i < import_count; i++) {
+      const struct tu_wddm_allocation *allocation = import_allocations ? import_allocations[i] : NULL;
+      if (!allocation || !allocation->imported_resource)
+         continue;
+      wire_imports[i].Reserved = imported_index + 1;
+      context->allocation_list[imported_index] = {};
+      context->allocation_list[imported_index].hAllocation = allocation->handle;
+      context->allocation_list[imported_index].WriteOperation =
+         (imports[i].Access & VIOGPU_WDDM_REFERENCE_WRITE) != 0;
+      imported_index++;
+   }
+
    D3DKMT_RENDER render = {};
    render.hContext = context->handle;
    render.CommandOffset = 0;
    render.CommandLength = static_cast<UINT>(command_length);
-   render.AllocationCount = reference_count;
+   render.AllocationCount = allocation_count;
    render.PatchLocationCount = reference_count;
    /* D3DKMT_RENDER exposes the command, allocation, and patch lists through
     * pNew* in/out fields: callers provide the current storage and KMT may
@@ -2133,7 +2265,7 @@ tu_wddm_context_render(struct tu_wddm_context *context,
 {
    return tu_wddm_context_render_imports(context, command_stream,
                                          command_stream_size, references,
-                                         reference_count, NULL, 0);
+                                         reference_count, NULL, 0, NULL);
 }
 
 #ifdef TU_HAS_WDDM
@@ -2212,6 +2344,7 @@ struct tu_wddm_submit {
    struct util_dynarray entries;
    struct util_dynarray references;
    struct util_dynarray imports;
+   const struct tu_wddm_allocation *import_allocations[VIOGPU_WDDM_MAX_IMPORTED_REFERENCES];
    uint16_t reference_index[TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE];
    bool failed;
 };
@@ -2777,7 +2910,8 @@ tu_wddm_device_finish(struct tu_device *dev)
       tu_bo_release_heap_accounting(dev, bo);
       tu_debug_bos_del(dev, bo);
       tu_dump_bo_del(dev, bo);
-      if (!allocation->aliased) {
+      /* Partial NT opens own a KMT handle but never acquired an IOVA. */
+      if (!allocation->aliased && (!allocation->imported || allocation->vma_size != 0)) {
          mtx_lock(&dev->vma_mutex);
          util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
          mtx_unlock(&dev->vma_mutex);
@@ -3166,7 +3300,7 @@ tu_wddm_bo_init_shared_locked(struct tu_device *dev, struct tu_bo **out_bo,
    for (uint32_t i = 0; i < dev->wddm_bo_count; i++) {
       struct tu_bo *existing = dev->wddm_bos[i];
       struct tu_wddm_allocation *owned = existing->wddm_allocation;
-      if (!owned || !owned->imported || owned->share_key != share_key)
+      if (!owned || !owned->imported || owned->import_released || owned->share_key != share_key)
          continue;
       if (existing->size != size || p_atomic_read(&existing->refcnt) <= 0) {
          mtx_unlock(&dev->bo_mutex);
@@ -3296,11 +3430,84 @@ tu_wddm_bo_init_shared_locked(struct tu_device *dev, struct tu_bo **out_bo,
 }
 
 static VkResult
-tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
-                       uint64_t size, uint64_t share_key)
+tu_wddm_bo_init_shared_nt_locked(struct tu_device *dev, struct tu_bo **out_bo,
+                                 uint64_t size, uintptr_t nt_handle)
 {
+   *out_bo = NULL;
+   if (!size || (size & 4095) || !nt_handle || vk_device_is_lost(&dev->vk))
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
+   struct tu_wddm_allocation *opened = (struct tu_wddm_allocation *)vk_zalloc(
+      &dev->vk.alloc, sizeof(*opened), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!opened)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   opened->context = &dev->wddm_context;
+   opened->imported = true;
+   opened->import_released = true; /* No host mapping belongs to this owner. */
+   /* Register before OpenResource: even a malformed/partial KMT answer and
+    * failed close remain device-owned, independently of VkAllocateMemory. */
+   mtx_lock(&dev->bo_mutex);
+   uint32_t token = tu_wddm_alloc_token_locked(dev);
+   struct tu_bo *owner = token ? tu_device_lookup_bo(dev, token) : NULL;
+   if (owner && !tu_wddm_add_bo_locked(dev, owner))
+      owner = NULL;
+   if (owner)
+      *owner = (struct tu_bo) {
+         .gem_handle = token, .size = size, .refcnt = 1,
+         .wddm_allocation = opened,
+      };
+   mtx_unlock(&dev->bo_mutex);
+   if (!owner) {
+      vk_free(&dev->vk.alloc, opened);
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+   owner->name = tu_debug_bos_add(dev, size, "import-open");
+
+   VkResult result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   struct tu_bo *imported = NULL;
+   if (tu_wddm_open_import_resource(opened, nt_handle, size)) {
+      result = tu_wddm_bo_init_shared_locked(dev, &imported, size, opened->share_key);
+      if (result == VK_SUCCESS) {
+         struct tu_wddm_allocation *allocation = imported->wddm_allocation;
+         if (!allocation->imported_resource) {
+            allocation->imported_resource = opened->imported_resource;
+            allocation->handle = opened->handle;
+            allocation->resident = opened->resident;
+            opened->imported_resource = 0;
+            opened->handle = 0;
+            opened->resident = false;
+         }
+      }
+   }
+   if (!tu_wddm_close_import_resource(opened)) {
+      /* Only a duplicate open retains handles here: a new BO took them
+       * above. Undo its extra cached reference before rejecting the import. */
+      if (imported)
+         p_atomic_dec(&imported->refcnt);
+      vk_device_set_lost(&dev->vk, "failed to close WDDM import resource");
+      return VK_ERROR_DEVICE_LOST; /* Registered owner retains the handle. */
+   }
+   tu_debug_bos_del(dev, owner);
+   mtx_lock(&dev->bo_mutex);
+   tu_wddm_remove_bo_locked(dev, owner);
+   memset(owner, 0, sizeof(*owner));
+   mtx_unlock(&dev->bo_mutex);
+   vk_free(&dev->vk.alloc, opened);
+   if (result == VK_SUCCESS)
+      *out_bo = imported;
+   return result;
+}
+
+static VkResult
+tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
+                       uint64_t size, uint64_t share_key, bool nt_handle)
+{
+   if (!out_bo)
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    mtx_lock(&dev->wddm_mutex);
-   VkResult result = tu_wddm_bo_init_shared_locked(dev, out_bo, size, share_key);
+   VkResult result = nt_handle
+      ? tu_wddm_bo_init_shared_nt_locked(dev, out_bo, size, (uintptr_t)share_key)
+      : tu_wddm_bo_init_shared_locked(dev, out_bo, size, share_key);
    mtx_unlock(&dev->wddm_mutex);
    return result;
 }
@@ -3582,6 +3789,9 @@ tu_wddm_submit_add_reference(struct tu_device *device,
       }
       *ref = { allocation->share_key, bo->iova, allocation->imported_size,
                device->wddm_context.info.ResetGeneration, access, 0 };
+      const uint32_t import_index = util_dynarray_num_elements(
+         &submit->imports, VIOGPU_WDDM_IMPORTED_REFERENCE) - 1;
+      submit->import_allocations[import_index] = allocation;
       return true;
    }
 
@@ -3870,7 +4080,8 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
                                           packet_size, render_refs,
                                           reference_count,
                                           (const VIOGPU_WDDM_IMPORTED_REFERENCE *)submit->imports.data,
-                                          util_dynarray_num_elements(&submit->imports, VIOGPU_WDDM_IMPORTED_REFERENCE));
+                                          util_dynarray_num_elements(&submit->imports, VIOGPU_WDDM_IMPORTED_REFERENCE),
+                                          submit->import_allocations);
    return rendered ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
 }
 

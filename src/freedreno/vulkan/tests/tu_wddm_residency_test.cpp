@@ -72,8 +72,21 @@ struct D3DKMT_CREATEALLOCATION {
    struct { UINT NonSecure; } Flags;
 };
 struct D3DKMT_DESTROYALLOCATION2 {
-   D3DKMT_HANDLE hDevice; const D3DKMT_HANDLE *phAllocationList; UINT AllocationCount;
+   D3DKMT_HANDLE hDevice, hResource; const D3DKMT_HANDLE *phAllocationList; UINT AllocationCount;
    struct { UINT AssumeNotInUse; } Flags;
+};
+struct D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE {
+   D3DKMT_HANDLE hDevice; HANDLE hNtHandle; UINT NumAllocations, PrivateRuntimeDataSize;
+   UINT ResourcePrivateDriverDataSize, TotalPrivateDriverDataSize;
+};
+using D3DDDI_OPENALLOCATIONINFO2 = D3DDDI_ALLOCATIONINFO;
+struct D3DKMT_OPENRESOURCEFROMNTHANDLE {
+   D3DKMT_HANDLE hDevice; HANDLE hNtHandle; UINT NumAllocations;
+   D3DDDI_OPENALLOCATIONINFO2 *pOpenAllocationInfo2;
+   void *pPrivateRuntimeData; UINT PrivateRuntimeDataSize;
+   void *pResourcePrivateDriverData; UINT ResourcePrivateDriverDataSize;
+   void *pTotalPrivateDriverDataBuffer; UINT TotalPrivateDriverDataBufferSize;
+   D3DKMT_HANDLE hResource;
 };
 struct D3DKMT_RENDER {
    D3DKMT_HANDLE hContext; UINT CommandOffset; UINT CommandLength; UINT AllocationCount; UINT PatchLocationCount;
@@ -96,6 +109,8 @@ struct tu_wddm_dispatch {
    NTSTATUS (*MakeResident)(D3DDDI_MAKERESIDENT *);
    NTSTATUS (*Evict)(D3DKMT_EVICT *);
    NTSTATUS (*WaitForSynchronizationObjectFromCpu)(const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *);
+   NTSTATUS (*QueryResourceInfoFromNtHandle)(D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE *);
+   NTSTATUS (*OpenResourceFromNtHandle)(D3DKMT_OPENRESOURCEFROMNTHANDLE *);
 };
 
 /* Real atomics so the lock-free paging-fence bookkeeping is exercised. */
@@ -143,6 +158,8 @@ struct fake_kmt {
    NTSTATUS version_status = kSuccess, create_queue_status = kSuccess, destroy_queue_status = kSuccess;
    NTSTATUS evict_status = kSuccess, wait_status = kSuccess, destroy_status = kSuccess;
    unsigned evict_failures = 0, destroy_failures = 0;
+   unsigned import_fault = 0;
+   unsigned render_allocations = 0, render_patches = 0;
    std::vector<std::string> calls;
    std::deque<scripted_residency> script;
    std::vector<bool> make_resident_cant_trim;
@@ -285,7 +302,7 @@ static NTSTATUS fake_create_allocation(D3DKMT_CREATEALLOCATION *create)
 }
 static NTSTATUS fake_destroy_allocation(const D3DKMT_DESTROYALLOCATION2 *destroy)
 {
-   const D3DKMT_HANDLE handle = destroy->phAllocationList[0];
+   const D3DKMT_HANDLE handle = destroy->hResource ? destroy->hResource - 1000 : destroy->phAllocationList[0];
    kmt->calls.push_back(with_handle("DestroyAllocation2", handle));
    if (kmt->destroy_failures != 0) {
       kmt->destroy_failures--;
@@ -348,6 +365,8 @@ static NTSTATUS fake_wait(const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *wait
 static NTSTATUS fake_render(D3DKMT_RENDER *render)
 {
    kmt->calls.push_back("Render");
+   kmt->render_allocations = render->AllocationCount;
+   kmt->render_patches = render->PatchLocationCount;
    /* dxgkrnl on WDDM 2.0: "Failed to reference DMA buffer: Allocation is not
     * requested to be resident" rejects the submission. */
    for (UINT i = 0; i < render->AllocationCount; i++) {
@@ -364,6 +383,36 @@ static NTSTATUS fake_render(D3DKMT_RENDER *render)
       }
    }
    return kSuccess;
+}
+
+static NTSTATUS fake_query_resource(D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE *query)
+{
+   kmt->calls.push_back("QueryResourceInfoFromNtHandle");
+   query->NumAllocations = kmt->import_fault == 1 ? 2 : 1;
+   query->PrivateRuntimeDataSize = kmt->import_fault == 2 ? 2 * 1024 * 1024 : 16;
+   query->ResourcePrivateDriverDataSize = sizeof(VIOGPU_WDDM_RESOURCE_SHARE);
+   query->TotalPrivateDriverDataSize = sizeof(VIOGPU_WDDM_ALLOCATION_INFO);
+   return kmt->import_fault == 3 ? kInvalid : kSuccess;
+}
+static NTSTATUS fake_open_resource(D3DKMT_OPENRESOURCEFROMNTHANDLE *request)
+{
+   kmt->calls.push_back("OpenResourceFromNtHandle");
+   auto *share = static_cast<VIOGPU_WDDM_RESOURCE_SHARE *>(request->pResourcePrivateDriverData);
+   auto *info = static_cast<VIOGPU_WDDM_ALLOCATION_INFO *>(request->pTotalPrivateDriverDataBuffer);
+   tu_wddm_init_header(&share->Header, sizeof(*share));
+   tu_wddm_init_header(&info->Header, sizeof(*info));
+   share->Flags = VIOGPU_WDDM_RESOURCE_SHARE_NATIVE_SURFACE;
+   share->ShareKey = 123; share->Stride = 256;
+   info->Size = 8192; info->Width = 64; info->Height = 32; info->Pitch = 256;
+   info->Flags = kmt->import_fault == 4 ? VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE : 0;
+   if (kmt->import_fault == 5) share->Stride += 4;
+   if (kmt->import_fault == 6) share->Reserved[0] = 1;
+   request->pOpenAllocationInfo2->hAllocation = kmt->next_allocation++;
+   request->pOpenAllocationInfo2->pPrivateDriverData = info;
+   request->pOpenAllocationInfo2->PrivateDriverDataSize = sizeof(*info);
+   request->hResource = request->pOpenAllocationInfo2->hAllocation + 1000;
+   kmt->live.insert(request->pOpenAllocationInfo2->hAllocation);
+   return kmt->import_fault == 7 ? kInvalid : kSuccess;
 }
 
 static tu_wddm_runtime make_runtime()
@@ -383,6 +432,8 @@ static tu_wddm_runtime make_runtime()
    runtime.dispatch.MakeResident = fake_make_resident;
    runtime.dispatch.Evict = fake_evict;
    runtime.dispatch.WaitForSynchronizationObjectFromCpu = fake_wait;
+   runtime.dispatch.QueryResourceInfoFromNtHandle = fake_query_resource;
+   runtime.dispatch.OpenResourceFromNtHandle = fake_open_resource;
    return runtime;
 }
 
@@ -444,7 +495,8 @@ struct session {
 
    /* One native submit whose BO table names every allocation given. */
    bool render(const std::vector<tu_wddm_allocation *> &allocations,
-               const std::vector<VIOGPU_WDDM_IMPORTED_REFERENCE> &imports = {})
+               const std::vector<VIOGPU_WDDM_IMPORTED_REFERENCE> &imports = {},
+               const std::vector<const tu_wddm_allocation *> &import_allocations = {})
    {
       const uint32_t count = static_cast<uint32_t>(allocations.size());
       std::vector<uint8_t> packet(sizeof(tu_wddm_msm_submit_request) + count * sizeof(tu_wddm_msm_submit_bo) +
@@ -473,7 +525,8 @@ struct session {
       if (!imports.empty())
          return tu_wddm_context_render_imports(
             &context, packet.data(), static_cast<uint32_t>(packet.size()),
-            references.data(), count, imports.data(), static_cast<uint32_t>(imports.size()));
+            references.data(), count, imports.data(), static_cast<uint32_t>(imports.size()),
+            import_allocations.empty() ? nullptr : import_allocations.data());
       return tu_wddm_context_render(&context, packet.data(), static_cast<uint32_t>(packet.size()),
                                     references.data(), count);
    }
@@ -495,7 +548,7 @@ static void test_imported_packet_layout()
    check(header->Flags == VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES,
          "import packet: extension flag");
    check(header->Reserved[0] == sizeof(*header) + sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) &&
-         header->Reserved[1] == 1 && header->Reserved[2] == 1 && header->Reserved[3] == 0,
+         header->Reserved[1] == 1 && header->Reserved[2] == 2 && header->Reserved[3] == 0,
          "import packet: canonical extension layout");
    check(header->CommandStreamOffset == header->Reserved[0] + sizeof(imported),
          "import packet: commands follow imported references");
@@ -511,6 +564,68 @@ static void test_imported_packet_layout()
    check(!s.render({&allocation}, {imported}), "import packet: stale epoch rejected");
    check(tu_wddm_allocation_destroy(&allocation), "import packet: owned allocation cleanup");
    check(tu_wddm_device_close(&s.device), "import packet: device cleanup");
+}
+
+static void test_nt_import_residency()
+{
+   session s(2000);
+   check(s.open(), "NT import: device open");
+   tu_wddm_allocation owned = {}, imported = {};
+   check(s.allocate(&owned, 0), "NT import: owned IB");
+   imported.context = &s.context; imported.imported = true;
+   s.fake.script = {{kPending, 7, 0}};
+   check(tu_wddm_open_import_resource(&imported, 42, 8192) && imported.resident &&
+         imported.imported_resource && imported.handle && imported.share_key == 123,
+         "NT import: independent open owns exact resident allocation");
+   imported.private_info.RequestedIova = s.context.info.VaStart + 65536;
+   imported.private_info.ExpectedResetGeneration = s.context.info.ResetGeneration;
+   imported.imported_size = 8192;
+   VIOGPU_WDDM_IMPORTED_REFERENCE ref = {123, imported.private_info.RequestedIova, 8192,
+      s.context.info.ResetGeneration, VIOGPU_WDDM_REFERENCE_READ, 0};
+   check(s.render({&owned}, {ref}, {&imported}) && s.fake.cpu_fence == 7,
+         "NT import: paging wait precedes imported allocation submission");
+   const auto *header = static_cast<const VIOGPU_WDDM_RENDER_COMMAND *>(s.context.command_buffer);
+   const auto *wire = reinterpret_cast<const VIOGPU_WDDM_IMPORTED_REFERENCE *>(
+      static_cast<const uint8_t *>(s.context.command_buffer) + header->Reserved[0]);
+   check(wire->Reserved == 2 && header->AllocationReferenceCount == 1 &&
+         s.fake.render_allocations == 2 && s.fake.render_patches == 1 &&
+         s.context.allocation_list[1].hAllocation == imported.handle &&
+         s.context.allocation_list[1].WriteOperation == 0,
+         "NT import: exact appended allocation index with READ access and no relocation");
+   ref.Access = VIOGPU_WDDM_REFERENCE_WRITE;
+   check(s.render({&owned}, {ref}, {&imported}) && s.context.allocation_list[1].WriteOperation == 1,
+         "NT import: WRITE access reaches allocation list");
+   imported.resident = false;
+   check(!s.render({&owned}, {ref}, {&imported}), "NT import: nonresident owner rejected");
+   imported.resident = true; imported.import_released = true;
+   check(!s.render({&owned}, {ref}, {&imported}), "NT import: released owner rejected");
+   imported.import_released = false;
+   auto handle = imported.handle; imported.handle = owned.handle;
+   check(!s.render({&owned}, {ref}, {&imported}), "NT import: allocation alias rejected");
+   imported.handle = handle;
+   s.context.allocation_list_size = 1;
+   check(!s.render({&owned}, {ref}, {&imported}), "NT import: appended capacity enforced");
+   s.context.allocation_list_size = TU_WDDM_MAX_RENDER_ALLOCATIONS;
+   s.fake.evict_failures = 1; s.fake.evict_status = kInvalid;
+   check(!tu_wddm_close_import_resource(&imported) && imported.resident && imported.handle,
+         "NT import: failed eviction retains resource and reference");
+   s.fake.destroy_failures = 1; s.fake.destroy_status = kInvalid;
+   check(!tu_wddm_close_import_resource(&imported) && !imported.resident && imported.handle,
+         "NT import: failed destroy retains open without duplicate residency");
+   check(tu_wddm_close_import_resource(&imported) && !imported.handle && !imported.imported_resource,
+         "NT import: confirmed retry closes independent resource");
+   for (unsigned fault = 1; fault <= 8; fault++) {
+      s.fake.import_fault = fault;
+      imported = {}; imported.context = &s.context; imported.imported = true;
+      if (fault == 8) s.fake.script = {{kInvalid, 0, 0}};
+      check(!tu_wddm_open_import_resource(&imported, 42, 8192),
+            "NT import: malformed query, metadata, partial open or residency fails closed");
+      check(tu_wddm_close_import_resource(&imported), "NT import: failed open releases partial handle");
+   }
+   check(tu_wddm_allocation_destroy(&owned) && s.fake.live.empty() &&
+         s.fake.destroyed_resident == 0 && s.fake.evict_without_reference == 0,
+         "NT import: all handles and references balanced");
+   check(tu_wddm_device_close(&s.device), "NT import: device close");
 }
 
 static void test_wddm1_issues_no_residency_calls()
@@ -811,6 +926,7 @@ int main()
    (void)TU_WDDM_FENCE_HALF_RANGE; /* extracted with the MSM layout block */
    test_wddm1_issues_no_residency_calls();
    test_imported_packet_layout();
+   test_nt_import_residency();
    test_wddm2_residency_lifecycle();
    test_pending_waits_for_paging_fence();
    test_over_budget_is_bounded();

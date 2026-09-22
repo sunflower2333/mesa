@@ -129,12 +129,12 @@ tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 
 VkResult
 tu_bo_init_shared(struct tu_device *dev, struct tu_bo **bo, uint64_t size,
-                  uint64_t share_key)
+                  uint64_t share_key, bool nt_handle)
 {
    if (dev->instance->knl->bo_init_shared == NULL)
       return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    size = align64(size, os_page_size);
-   VkResult result = dev->instance->knl->bo_init_shared(dev, bo, size, share_key);
+   VkResult result = dev->instance->knl->bo_init_shared(dev, bo, size, share_key, nt_handle);
    if (result != VK_SUCCESS)
       return result;
    if (!(*bo)->unique_id)

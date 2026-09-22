@@ -45,7 +45,9 @@ for text in ("VIOGPU_NATIVE_HOST_SURFACE", "CreateNativeHostSurfaceTexture(",
 
 create = resource[resource.index("void APIENTRY\nCreateResource"):resource.index("SIZE_T APIENTRY\nCalcPrivateOpenedResourceSize")]
 assert create.index("if (nativeHostSurface)") < create.index("CreateSharedTextureCache")
-assert "native host surface allocation/import failed" in create
+assert "native host surface allocation failed" in create
+assert create.index('pfnAllocateCb(') < create.index('CreateNativeHostSurfaceTexture(')
+assert 'if (!pResource->resource && !nativeHostSurface)' in create
 assert "SharedAllocationFlags(hostSurface != NULL, pResource->scanout_primary)" in create
 assert "(privateData.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE) != 0" in create
 
@@ -75,13 +77,39 @@ fixture = r'''
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <cstdarg>
 using UINT64=uint64_t;
 using ULONG_PTR=uintptr_t;
 using HANDLE=void*;
+using D3DKMT_HANDLE=unsigned;
+using NTSTATUS=int32_t;
+using DWORD=unsigned long;
+using LONG=long;
+constexpr unsigned GENERIC_ALL=0x10000000;
+constexpr unsigned FILE_APPEND_DATA=1, FILE_SHARE_READ=2, FILE_SHARE_WRITE=4;
+constexpr unsigned OPEN_ALWAYS=1, FILE_ATTRIBUTE_NORMAL=1, _TRUNCATE=0;
+#define NT_SUCCESS(s) ((s)>=0)
+#define INVALID_HANDLE_VALUE ((HANDLE)(intptr_t)-1)
+unsigned closedHandles, shareCalls;
+bool shareOk=true;
+LONG InterlockedIncrement(volatile LONG *n) { return *n+=1; }
+unsigned long GetCurrentProcessId() { return 1; }
+HANDLE CreateFileA(const char*,unsigned,unsigned,void*,unsigned,unsigned,void*) {
+ return INVALID_HANDLE_VALUE;
+}
+int _snprintf_s(char*,size_t,unsigned,const char*,...) { return 0; }
+bool WriteFile(HANDLE,const void*,DWORD,DWORD*,void*) { return true; }
+bool CloseHandle(HANDLE h) { assert(uintptr_t(h)==42); ++closedHandles; return true; }
+NTSTATUS ShareObjects(unsigned n,const D3DKMT_HANDLE *r,void*,DWORD rights,HANDLE *out) {
+ assert(n==1 && *r==37 && rights==GENERIC_ALL); ++shareCalls;
+ *out=shareOk ? (HANDLE)42 : nullptr; return shareOk ? 0 : -1;
+}
+struct NativeSurfaceDispatch { decltype(&ShareObjects) share=ShareObjects; };
 constexpr uint64_t DROIDVM_DRM_FORMAT_MOD_LINEAR=0;
 constexpr uint32_t DROIDVM_NATIVE_SURFACE_LINEAR_ALIAS=1;
 constexpr unsigned PIPE_BIND_SHARED=1, PIPE_BIND_LINEAR=2;
 constexpr unsigned WINSYS_HANDLE_TYPE_WIN32_HANDLE=7;
+constexpr unsigned WINSYS_HANDLE_TYPE_WIN32_NT_HANDLE=8;
 constexpr unsigned PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE=2;
 #define DebugPrintf(...) ((void)0)
 struct pipe_resource { unsigned width0, height0, bind, format; };
@@ -115,7 +143,7 @@ pipe_resource *importTexture(pipe_screen*,const pipe_resource *t,winsys_handle *
  ++imports;
  assert(h->size==response.Size && h->stride==response.Stride);
  assert(h->offset==0 && h->modifier==0 && h->format==t->format);
- assert(uintptr_t(h->handle)==response.ShareKey);
+ assert(uintptr_t(h->handle)==42 && h->type==WINSYS_HANDLE_TYPE_WIN32_NT_HANDLE);
  assert((t->bind&(PIPE_BIND_SHARED|PIPE_BIND_LINEAR))==(PIPE_BIND_SHARED|PIPE_BIND_LINEAR));
  assert(usage==PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
  return importOk ? &texture : nullptr;
@@ -146,15 +174,27 @@ int main() {
   case 11: response.Size=20479; break;
   case 12: response.ExpectedResetGeneration=1; break;
   case 13: response.LayoutFlags=3; break;
-  case 14: importOk=false; break;
+  case 14: response.ShareKey=0; break;
   case 15: allocationOk=false; break;
   }
-  pipe_resource *r=CreateNativeHostSurfaceTexture(&pipe,&t,good.Fourcc,&result);
-  assert((r!=nullptr)==(scenario==0));
-  assert(imports==unsigned(scenario==0 || scenario==14));
-  assert(frees==unsigned(scenario>0 && scenario<15));
+  bool ok=AllocateNativeHostSurface(&pipe,&t,good.Fourcc,&result);
+  assert(ok==(scenario==0));
+  assert(imports==0);
+  assert(frees==unsigned(scenario>0 && scenario<14));
  }
- puts("PASS native host allocation/import: 16 production-code scenarios");
+ puts("PASS native host allocation: 16 production-code scenarios");
+ for (unsigned scenario=0; scenario<5; scenario++) {
+  response=good; imports=closedHandles=shareCalls=0;
+  shareOk=scenario!=1; importOk=scenario!=2;
+  screen.resource_from_handle=scenario==3 ? nullptr : importTexture;
+  pipe_resource *r=CreateNativeHostSurfaceTexture(&pipe,&t,scenario==4 ? 0 : 37,12,
+                                                 2,"create",good.Size,good.Stride);
+  assert((r!=nullptr)==(scenario==0));
+  assert(shareCalls==unsigned(scenario!=4));
+  assert(closedHandles==unsigned(scenario==0 || scenario==2 || scenario==3));
+  assert(imports==unsigned(scenario==0 || scenario==2));
+ }
+ puts("PASS native NT import: shared handle success, failure, unavailable import and lifetime");
  assert(SharedAllocationFlags(false,false)==VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE);
  assert(SharedAllocationFlags(true,false)==0);
  assert(SharedAllocationFlags(false,true)==VIOGPU_WDDM_ALLOCATION_PRIMARY);
@@ -209,7 +249,7 @@ int main() {
 fixture = fixture.replace('// FUNCTIONS', '\n'.join(
     extract(name) for name in ('IsValidResourceShare', 'SharedAllocationFlags',
                               'IsValidSharedAllocation', 'FreeNativeHostSurface',
-                              'CreateNativeHostSurfaceTexture')))
+                              'AllocateNativeHostSurface', 'CreateNativeHostSurfaceTexture')))
 for function, guarded_call in (('ResourceMap', 'pipe->buffer_map('),
                                ('EnsureSharedCopy', 'pfnAllocateCb')):
     body = extract(function)

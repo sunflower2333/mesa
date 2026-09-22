@@ -60,6 +60,8 @@ tu_wddm_dispatch_init(struct tu_wddm_dispatch *dispatch)
    TU_WDDM_LOAD_OPTIONAL(MakeResident);
    TU_WDDM_LOAD_OPTIONAL(Evict);
    TU_WDDM_LOAD_OPTIONAL(WaitForSynchronizationObjectFromCpu);
+   TU_WDDM_LOAD_OPTIONAL(QueryResourceInfoFromNtHandle);
+   TU_WDDM_LOAD_OPTIONAL(OpenResourceFromNtHandle);
 
 #undef TU_WDDM_LOAD_OPTIONAL
 #undef TU_WDDM_LOAD

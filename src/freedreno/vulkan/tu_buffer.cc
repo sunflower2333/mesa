@@ -224,7 +224,8 @@ tu_BindBufferMemory2(VkDevice device,
       /* Imported images have exact command/descriptor access tracking. A
        * buffer could escape through a device address with no such provenance. */
       if (mem && (mem->vk.import_handle_type &
-                  VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT)) {
+                  (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT |
+                   VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT))) {
          if (status)
             *status->pResult = VK_ERROR_INVALID_EXTERNAL_HANDLE;
          return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);

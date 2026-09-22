@@ -1777,12 +1777,12 @@ test_imported_render()
    };
    fixture.expected_import_count = 1;
    CHECK(tu_wddm_context_render_imports(&fixture.context, &submit, sizeof(submit),
-                                        &reference, 1, &imported, 1));
+                                        &reference, 1, &imported, 1, NULL));
    CHECK(fixture.render_calls == 1);
    CHECK(fixture.context.last_submitted_fence == submit.request.fence);
    imported.ResetGeneration++;
    CHECK(!tu_wddm_context_render_imports(&fixture.context, &submit, sizeof(submit),
-                                         &reference, 1, &imported, 1));
+                                         &reference, 1, &imported, 1, NULL));
    CHECK(fixture.render_calls == 1);
 }
 

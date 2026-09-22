@@ -1007,17 +1007,20 @@ get_export_flags(struct zink_screen *screen, const struct pipe_resource *templ, 
    bool needs_export = (templ->bind & (ZINK_BIND_VIDEO | ZINK_BIND_DMABUF)) != 0;
    if (alloc_info->whandle) {
       if (alloc_info->whandle->type == WINSYS_HANDLE_TYPE_FD ||
-          alloc_info->whandle->type == ZINK_EXTERNAL_MEMORY_HANDLE)
+          alloc_info->whandle->type == ZINK_EXTERNAL_MEMORY_HANDLE ||
+          alloc_info->whandle->type == WINSYS_HANDLE_TYPE_WIN32_NT_HANDLE)
          needs_export |= true;
       else
          UNREACHABLE("unknown handle type");
    }
 #ifdef _WIN32
-   /* No dma-buf on Windows: a shared resource exports, and a winsys handle
-    * imports, the opaque KMT handle type. */
+   /* Windows sharing uses KMT values; HostSurface imports use NT handles to
+    * retain an independent VidMm resource on the rendering device. */
    if (alloc_info->whandle) {
-      alloc_info->external = ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
-      alloc_info->export_types |= ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
+      alloc_info->external = alloc_info->whandle->type == WINSYS_HANDLE_TYPE_WIN32_NT_HANDLE
+                               ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT
+                               : ZINK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_BIT;
+      alloc_info->export_types = alloc_info->external;
       return true;
    }
    if (templ->bind & (PIPE_BIND_SHARED | ZINK_BIND_DMABUF))
@@ -1091,7 +1094,10 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
    }
 
    VkExportMemoryAllocateInfo emai;
-   if ((templ->bind & ZINK_BIND_VIDEO) || ((templ->bind & PIPE_BIND_SHARED) && alloc_info->shared) || (templ->bind & ZINK_BIND_DMABUF)) {
+   const bool nt_import = alloc_info->whandle &&
+      alloc_info->whandle->type == WINSYS_HANDLE_TYPE_WIN32_NT_HANDLE;
+   if (!nt_import && ((templ->bind & ZINK_BIND_VIDEO) ||
+       ((templ->bind & PIPE_BIND_SHARED) && alloc_info->shared) || (templ->bind & ZINK_BIND_DMABUF))) {
       emai.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
       emai.handleTypes = alloc_info->export_types;
 
@@ -1130,7 +1136,7 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
    if (alloc_info->whandle) {
       imfi.pNext = NULL;
       imfi.handleType = alloc_info->external;
-      /* A KMT handle is its value; the import does not take ownership. */
+      /* Vulkan Win32 imports do not take ownership of either handle type. */
       imfi.handle = alloc_info->whandle->handle;
 
       imfi.pNext = mai.pNext;

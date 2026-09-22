@@ -4042,12 +4042,14 @@ tu_AllocateMemory(VkDevice _device,
       }
 #ifdef VK_USE_PLATFORM_WIN32_KHR
    } else if (win32_info && win32_info->handleType) {
-      /* A KMT handle is a value, not a kernel object: nothing to close. */
-      result = win32_info->handleType ==
-                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+      /* Neither Win32 import transfers ownership of the caller's handle.
+       * HostSurface NT imports take an independent KMT resource open. */
+      result = (win32_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT ||
+                win32_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT)
                   ? tu_bo_init_shared(device, &mem->bo,
                                       pAllocateInfo->allocationSize,
-                                      (uint64_t)(uintptr_t)win32_info->handle)
+                                      (uint64_t)(uintptr_t)win32_info->handle,
+                                      win32_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT)
                   : vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 #endif
    } else if (mem->vk.ahardware_buffer) {
@@ -4803,7 +4805,8 @@ tu_GetMemoryWin32HandlePropertiesKHR(VkDevice _device,
                                      VkMemoryWin32HandlePropertiesKHR *pMemoryWin32HandleProperties)
 {
    VK_FROM_HANDLE(tu_device, device, _device);
-   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT)
+   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT &&
+       handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT)
       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    pMemoryWin32HandleProperties->memoryTypeBits =
       (1 << device->physical_device->memory.non_lazy_type_count) - 1;
