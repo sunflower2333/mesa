@@ -532,7 +532,7 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
 {
    static const NativeSurfaceDispatch dispatch;
    HANDLE ntHandle = NULL;
-   const DWORD rights = GENERIC_ALL;
+   const DWORD rights = SHARED_ALLOCATION_ALL_ACCESS;
    const NTSTATUS status = dispatch.share && resource
       ? dispatch.share(1, &resource, NULL, rights, &ntHandle)
       : (NTSTATUS)0xc00000bb; /* STATUS_NOT_SUPPORTED */

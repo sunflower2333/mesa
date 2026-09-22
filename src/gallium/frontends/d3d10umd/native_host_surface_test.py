@@ -85,7 +85,7 @@ using D3DKMT_HANDLE=unsigned;
 using NTSTATUS=int32_t;
 using DWORD=unsigned long;
 using LONG=long;
-constexpr unsigned GENERIC_ALL=0x10000000;
+constexpr unsigned SHARED_ALLOCATION_ALL_ACCESS=0x000f0001;
 constexpr unsigned FILE_APPEND_DATA=1, FILE_SHARE_READ=2, FILE_SHARE_WRITE=4;
 constexpr unsigned OPEN_ALWAYS=1, FILE_ATTRIBUTE_NORMAL=1, _TRUNCATE=0;
 #define NT_SUCCESS(s) ((s)>=0)
@@ -101,7 +101,7 @@ int _snprintf_s(char*,size_t,unsigned,const char*,...) { return 0; }
 bool WriteFile(HANDLE,const void*,DWORD,DWORD*,void*) { return true; }
 bool CloseHandle(HANDLE h) { assert(uintptr_t(h)==42); ++closedHandles; return true; }
 NTSTATUS ShareObjects(unsigned n,const D3DKMT_HANDLE *r,void*,DWORD rights,HANDLE *out) {
- assert(n==1 && *r==37 && rights==GENERIC_ALL); ++shareCalls;
+ assert(n==1 && *r==37 && rights==SHARED_ALLOCATION_ALL_ACCESS); ++shareCalls;
  *out=shareOk ? (HANDLE)42 : nullptr; return shareOk ? 0 : -1;
 }
 struct NativeSurfaceDispatch { decltype(&ShareObjects) share=ShareObjects; };
