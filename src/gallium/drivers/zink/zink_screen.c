@@ -3735,6 +3735,8 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    if (screen->info.have_EXT_image_drm_format_modifier && screen->info.have_EXT_external_memory_dma_buf) {
       screen->base.query_dmabuf_modifiers = zink_query_dmabuf_modifiers;
       screen->base.is_dmabuf_modifier_supported = zink_is_dmabuf_modifier_supported;
+   }
+   if (screen->info.have_EXT_image_drm_format_modifier) {
       screen->base.get_dmabuf_modifier_planes = zink_get_dmabuf_modifier_planes;
    }
 #if defined(_WIN32)

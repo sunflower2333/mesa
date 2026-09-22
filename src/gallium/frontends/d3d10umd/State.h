@@ -235,6 +235,8 @@ struct Resource
     * State.h does not acquire the Turnip private-ABI include dependency. */
    uint8_t native_host_surface[128];
    bool native_host_surface_live;
+   /* Creator and every opener render directly to the host allocation. */
+   bool native_host_backing;
    // Only a CPU-visible allocation created by this device can be locked
    // directly. Opened handles and primaries use scheduled private staging.
    bool allocation_lockable;

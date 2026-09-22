@@ -416,7 +416,8 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_host_image_copy = true,
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
-      .EXT_image_drm_format_modifier = !is_wddm(device->instance),
+      /* WDDM imports use linear modifier layouts with opaque KMT handles. */
+      .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
@@ -3725,6 +3726,11 @@ tu_add_to_heap(struct tu_device *dev, struct tu_bo *bo)
    uint64_t accounting_size = bo->size;
 #ifdef TU_HAS_WDDM
    if (bo->wddm_allocation != NULL) {
+      /* Imported BO references own a mapping lease, not new backing pages.
+       * Reopening one key can share that BO across multiple memory objects;
+       * leave backing accounting with the KMD allocation's actual owner. */
+      if (bo->wddm_allocation->imported)
+         return VK_SUCCESS;
       /* An aliased import maps no new device memory.  The kernel answered the
        * import by pointing at an allocation this device already owns, so the
        * import path gave back the VMA range it had reserved and left vma_size

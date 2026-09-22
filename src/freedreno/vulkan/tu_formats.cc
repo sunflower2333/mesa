@@ -418,7 +418,8 @@ tu_GetPhysicalDeviceFormatProperties2(
       }
 
       /* note: ubwc_possible() argument values to be ignored except for format */
-      if (pFormatProperties->formatProperties.optimalTilingFeatures &&
+      if (!is_wddm(physical_device->instance) &&
+          pFormatProperties->formatProperties.optimalTilingFeatures &&
           tiling_possible(format) &&
           ubwc_possible(NULL, format, VK_IMAGE_TYPE_2D, 0, 0, 0,
                         physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
@@ -449,7 +450,7 @@ tu_GetPhysicalDeviceFormatProperties2(
       }
 
       /* note: ubwc_possible() argument values to be ignored except for format */
-      if (props3->optimalTilingFeatures &&
+      if (!is_wddm(physical_device->instance) && props3->optimalTilingFeatures &&
           tiling_possible(format) &&
           ubwc_possible(NULL, format, VK_IMAGE_TYPE_2D, 0, 0, 0,
                         physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
@@ -503,6 +504,12 @@ tu_get_image_format_properties(
    case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: {
       const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *drm_info =
          vk_find_struct_const(info->pNext, PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+      /* WDDM's host surface contract currently negotiates only a linear
+       * single-plane layout. Do not advertise compressed modifier imports. */
+      if (!drm_info ||
+          (is_wddm(physical_device->instance) &&
+           drm_info->drmFormatModifier != DRM_FORMAT_MOD_LINEAR))
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
       /* Subsampled format isn't stable yet, so don't allow
        * importing/exporting with modifiers yet.

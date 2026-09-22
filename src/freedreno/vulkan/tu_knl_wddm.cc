@@ -1083,6 +1083,18 @@ tu_wddm_context_native_share(struct tu_wddm_context *context, uint32_t opcode,
    return true;
 }
 
+static bool
+tu_wddm_allocation_release_import(struct tu_wddm_allocation *allocation)
+{
+   if (!allocation->imported || allocation->aliased)
+      return true;
+   VIOGPU_WDDM_NATIVE_SHARE release = {};
+   release.ShareKey = allocation->share_key;
+   release.Iova = allocation->private_info.RequestedIova;
+   return tu_wddm_context_native_share(allocation->context,
+                                      VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE, &release);
+}
+
 uint32_t
 tu_wddm_context_get_gpu_timestamp(struct tu_wddm_context *context, uint64_t *ticks)
 {
@@ -2696,6 +2708,11 @@ tu_wddm_device_finish(struct tu_device *dev)
          return;
       }
       bo->map = NULL;
+      if (!tu_wddm_allocation_release_import(allocation)) {
+         dev->wddm_teardown_failed = true;
+         vk_device_set_lost(&dev->vk, "failed to release WDDM import during teardown");
+         return;
+      }
       if (allocation->handle != 0 &&
           !tu_wddm_allocation_destroy(allocation)) {
          tu_wddm_diag("device_finish failed destroying allocation=%u status=0x%08x",
@@ -2710,9 +2727,11 @@ tu_wddm_device_finish(struct tu_device *dev)
       tu_bo_release_heap_accounting(dev, bo);
       tu_debug_bos_del(dev, bo);
       tu_dump_bo_del(dev, bo);
-      mtx_lock(&dev->vma_mutex);
-      util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
-      mtx_unlock(&dev->vma_mutex);
+      if (!allocation->aliased) {
+         mtx_lock(&dev->vma_mutex);
+         util_vma_heap_free(&dev->vma, allocation_iova, allocation_size);
+         mtx_unlock(&dev->vma_mutex);
+      }
       vk_free(&dev->vk.alloc, allocation);
       memset(bo, 0, sizeof(*bo));
       dev->wddm_bo_count--;
@@ -3069,8 +3088,8 @@ tu_wddm_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
 }
 
 static VkResult
-tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
-                       uint64_t size, uint64_t share_key)
+tu_wddm_bo_init_shared_locked(struct tu_device *dev, struct tu_bo **out_bo,
+                              uint64_t size, uint64_t share_key)
 {
    if (out_bo != NULL)
       *out_bo = NULL;
@@ -3090,6 +3109,25 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
                 (unsigned long long)share_key, (unsigned long long)size);
       return VK_ERROR_DEVICE_LOST;
    }
+
+   /* KMD permits one mapping per key/context. Multiple VkDeviceMemory objects
+    * in this device share that mapping and release it only at the last BO ref. */
+   mtx_lock(&dev->bo_mutex);
+   for (uint32_t i = 0; i < dev->wddm_bo_count; i++) {
+      struct tu_bo *existing = dev->wddm_bos[i];
+      struct tu_wddm_allocation *owned = existing->wddm_allocation;
+      if (!owned || !owned->imported || owned->share_key != share_key)
+         continue;
+      if (existing->size != size || p_atomic_read(&existing->refcnt) <= 0) {
+         mtx_unlock(&dev->bo_mutex);
+         return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      }
+      p_atomic_inc(&existing->refcnt);
+      *out_bo = existing;
+      mtx_unlock(&dev->bo_mutex);
+      return VK_SUCCESS;
+   }
+   mtx_unlock(&dev->bo_mutex);
 
    const uint64_t vma_size = (size + UINT64_C(4095)) & ~UINT64_C(4095);
    mtx_lock(&dev->vma_mutex);
@@ -3120,6 +3158,8 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
    mtx_lock(&dev->bo_mutex);
    uint32_t token = tu_wddm_alloc_token_locked(dev);
    struct tu_bo *bo = token ? tu_device_lookup_bo(dev, token) : NULL;
+   if (bo != NULL && !tu_wddm_add_bo_locked(dev, bo))
+      bo = NULL;
    if (bo != NULL) {
       *bo = (struct tu_bo) {
          .gem_handle = token,
@@ -3154,6 +3194,7 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
                 (unsigned long long)share_key, (unsigned long long)size,
                 (unsigned long long)iova);
       mtx_lock(&dev->bo_mutex);
+      tu_wddm_remove_bo_locked(dev, bo);
       memset(bo, 0, sizeof(*bo));
       mtx_unlock(&dev->bo_mutex);
       vk_free(&dev->vk.alloc, allocation);
@@ -3173,6 +3214,7 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
                    (unsigned long long)iova, (unsigned long long)import.Iova,
                    (unsigned long long)import.Size);
          mtx_lock(&dev->bo_mutex);
+         tu_wddm_remove_bo_locked(dev, bo);
          memset(bo, 0, sizeof(*bo));
          mtx_unlock(&dev->bo_mutex);
          vk_free(&dev->vk.alloc, allocation);
@@ -3199,6 +3241,16 @@ tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
    bo->name = tu_debug_bos_add(dev, size, "imported");
    *out_bo = bo;
    return VK_SUCCESS;
+}
+
+static VkResult
+tu_wddm_bo_init_shared(struct tu_device *dev, struct tu_bo **out_bo,
+                       uint64_t size, uint64_t share_key)
+{
+   mtx_lock(&dev->wddm_mutex);
+   VkResult result = tu_wddm_bo_init_shared_locked(dev, out_bo, size, share_key);
+   mtx_unlock(&dev->wddm_mutex);
+   return result;
 }
 
 static VkResult
@@ -3264,8 +3316,7 @@ tu_wddm_bo_allow_dump(struct tu_device *dev, struct tu_bo *bo)
 static void
 tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 {
-   if (!tu_wddm_bo_valid_for_device(dev, bo) || p_atomic_read(&bo->refcnt) <= 0 ||
-       !p_atomic_dec_zero(&bo->refcnt))
+   if (!tu_wddm_bo_valid_for_device(dev, bo) || p_atomic_read(&bo->refcnt) <= 0)
       return;
 
    /* The callback has no error return.  Keep one final reference whenever a
@@ -3277,6 +3328,10 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 
    if (bo->wddm_allocation->imported) {
       mtx_lock(&dev->wddm_mutex);
+      if (!p_atomic_dec_zero(&bo->refcnt)) {
+         mtx_unlock(&dev->wddm_mutex);
+         return;
+      }
       if (!tu_wddm_context_wait_submissions(&dev->wddm_context, UINT64_MAX)) {
          vk_device_set_lost(&dev->vk, "failed to retire WDDM queue work");
          restore_owner();
@@ -3284,17 +3339,13 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
          return;
       }
       struct tu_wddm_allocation *imported = bo->wddm_allocation;
-      if (!imported->aliased) {
-         VIOGPU_WDDM_NATIVE_SHARE release = {};
-         release.ShareKey = imported->share_key;
-         release.Iova = bo->iova;
-         /* A failed release leaves the host mapping in place until the owner
-          * destroys the allocation, which revokes every import. */
-         if (!tu_wddm_context_native_share(&dev->wddm_context,
-                                           VIOGPU_WDDM_ESCAPE_RELEASE_NATIVE, &release))
-            tu_wddm_diag("native import release failed key=0x%llx iova=0x%llx",
-                         (unsigned long long)imported->share_key,
-                         (unsigned long long)bo->iova);
+      if (!tu_wddm_allocation_release_import(imported)) {
+         /* Host detach is unconfirmed. Keep both the lease and VA reservation
+          * so a new BO cannot reuse an address the host still maps. */
+         vk_device_set_lost(&dev->vk, "failed to release WDDM import");
+         restore_owner();
+         mtx_unlock(&dev->wddm_mutex);
+         return;
       }
       const uint64_t imported_iova = bo->iova;
       const uint64_t imported_size = imported->vma_size;
@@ -3302,6 +3353,7 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       tu_debug_bos_del(dev, bo);
       tu_dump_bo_del(dev, bo);
       mtx_lock(&dev->bo_mutex);
+      tu_wddm_remove_bo_locked(dev, bo);
       memset(bo, 0, sizeof(*bo));
       mtx_unlock(&dev->bo_mutex);
       if (imported_size != 0) {
@@ -3314,6 +3366,9 @@ tu_wddm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       mtx_unlock(&dev->wddm_mutex);
       return;
    }
+
+   if (!p_atomic_dec_zero(&bo->refcnt))
+      return;
 
    /* Generic queue preparation already owns submit_mutex and can release a
     * replaced internal BO.  Use the WDDM-specific lock to serialize this

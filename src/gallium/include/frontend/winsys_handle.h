@@ -104,6 +104,7 @@ struct winsys_handle
 
    /**
     * Total size of the object.
+    * Input for resource_from_handle when an external allocation size is known.
     * Output for resource_get_handle.
     */
    uint64_t size;

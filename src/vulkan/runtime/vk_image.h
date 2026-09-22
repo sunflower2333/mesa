@@ -77,7 +77,6 @@ struct vk_image {
    /* wsi_image_create_info::scanout */
    bool wsi_legacy_scanout;
 
-#if DETECT_OS_LINUX || DETECT_OS_BSD
    /* VK_EXT_drm_format_modifier
     *
     * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's
@@ -88,7 +87,6 @@ struct vk_image {
     * VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT.
     */
    uint64_t drm_format_mod;
-#endif
 
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
    enum android_buffer_type android_buffer_type;

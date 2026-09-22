@@ -1063,6 +1063,15 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
    mai.pNext = NULL;
    mai.allocationSize = reqs->size;
+#ifdef _WIN32
+   /* A host allocation can include padding beyond the Vulkan image layout.
+    * KMT imports reserve and map that whole allocation, never a guessed size. */
+   if (alloc_info->whandle && alloc_info->whandle->size) {
+      if (alloc_info->whandle->size < reqs->size)
+         return roc_fail_and_cleanup_object;
+      mai.allocationSize = alloc_info->whandle->size;
+   }
+#endif
    enum zink_heap heap = zink_heap_from_domain_flags(alloc_info->flags, alloc_info->aflags);
    if (templ->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) {
       if (!(vk_domain_from_heap(heap) & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
@@ -1169,7 +1178,7 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
             continue;
 
          mai.memoryTypeIndex = screen->heap_map[heap][i];
-         obj->bo = zink_bo(zink_bo_create(screen, reqs->size, alignment, heap, mai.pNext ? ZINK_ALLOC_NO_SUBALLOC : 0, mai.memoryTypeIndex, mai.pNext));
+         obj->bo = zink_bo(zink_bo_create(screen, mai.allocationSize, alignment, heap, mai.pNext ? ZINK_ALLOC_NO_SUBALLOC : 0, mai.memoryTypeIndex, mai.pNext));
       }
 
       if (obj->bo || heap != ZINK_HEAP_DEVICE_LOCAL_VISIBLE)
@@ -1654,6 +1663,10 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
    bool winsys_modifier = (alloc_info->export_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) &&
                           alloc_info->whandle &&
                           alloc_info->whandle->modifier != DRM_FORMAT_MOD_INVALID;
+#ifdef _WIN32
+   winsys_modifier |= alloc_info->whandle &&
+                      alloc_info->whandle->modifier != DRM_FORMAT_MOD_INVALID;
+#endif
    uint64_t *ici_modifiers = winsys_modifier ? &alloc_info->whandle->modifier : modifiers;
    unsigned ici_modifier_count = winsys_modifier ? 1 : modifiers_count;
    unsigned num_planes = util_format_get_num_planes(templ->format);
@@ -1678,8 +1691,11 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
    }
    if (!success)
       return roc_fail_and_free_object;
-
 #ifdef _WIN32
+   /* An explicit external layout cannot fall back to a driver-chosen pitch. */
+   if (winsys_modifier && ici.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+      return roc_fail_and_free_object;
+
    /* An imported KMT allocation can never be host-mapped: tu_wddm_bo_map()
     * refuses every allocation flagged imported, which is the same fact that
     * makes obj->host_visible false for a winsys handle below.  Turnip's bind
@@ -1745,6 +1761,19 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
       mesa_loge("ZINK: vkCreateImage failed (%s)", vk_Result_to_str(result));
       return roc_fail_and_free_object;
    }
+
+#ifdef _WIN32
+   if (winsys_modifier && num_planes == 1) {
+      VkImageSubresource subresource = {.aspectMask = VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT};
+      VkSubresourceLayout layout = {0};
+      VKSCR(GetImageSubresourceLayout)(screen->dev, obj->image, &subresource, &layout);
+      if (layout.rowPitch != alloc_info->whandle->stride ||
+          layout.offset != alloc_info->whandle->offset) {
+         mesa_loge("ZINK: imported image layout differs from the host allocation");
+         return roc_fail_and_cleanup_object;
+      }
+   }
+#endif
 
    if (ici.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       VkImageDrmFormatModifierPropertiesEXT modprops = {0};
@@ -2398,9 +2427,10 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
    int modifier_count = 1;
    bool use_modifiers = templ->target != PIPE_BUFFER;
 #ifdef _WIN32
-   /* No DRM format modifiers on Windows; the template's bind flags (linear
-    * tiling included) describe the layout both sides agree on. */
-   use_modifiers = false;
+   /* Modifier layouts are independent of the handle transport. Host AHBs use
+    * an explicit linear layout with opaque KMT memory; legacy shares retain
+    * their driver-selected linear layout. */
+   use_modifiers = use_modifiers && whandle->modifier != DRM_FORMAT_MOD_INVALID;
 #endif
    if (!use_modifiers) {
       modifier_count = 0;

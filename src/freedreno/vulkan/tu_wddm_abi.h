@@ -36,6 +36,7 @@
 
 #define VIOGPU_WDDM_REFERENCE_READ           0x00000001U
 #define VIOGPU_WDDM_REFERENCE_WRITE          0x00000002U
+#define VIOGPU_WDDM_RESOURCE_SHARE_NATIVE_SURFACE 0x00000001U
 
 typedef uint32_t VIOGPU_WDDM_UINT32;
 typedef uint64_t VIOGPU_WDDM_UINT64;
@@ -193,7 +194,10 @@ typedef struct VIOGPU_WDDM_RESOURCE_SHARE {
 /* Host-owned linear render surface. ALLOCATE accepts only geometry and format;
  * every backing/layout/identity field is returned by the KMD after the host
  * allocator and checked native-context import agree on one dma-buf. FREE must
- * echo that authoritative identity after the importing BO has been released. */
+ * echo that authoritative identity to drop the creator lease. Imports and
+ * WDDM resource/display leases independently retain the backing until their
+ * GPU work and display readers retire; a frontend resource reference drop is
+ * not proof that its importing BO has been released. */
 typedef struct VIOGPU_WDDM_NATIVE_SURFACE {
    VIOGPU_WDDM_ABI_HEADER Header;
    VIOGPU_WDDM_UINT32 Opcode;

@@ -673,9 +673,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
 
    /* Layout computation begins here */
    enum a6xx_tile_mode tile_mode = TILE6_3;
-#if DETECT_OS_LINUX || DETECT_OS_BSD
    image->vk.drm_format_mod = modifier;
-#endif
 
    if (modifier == DRM_FORMAT_MOD_LINEAR) {
       force_linear_tile = true;
@@ -941,12 +939,24 @@ tu_CreateImage(VkDevice _device,
 
       if (mod_info) {
          modifier = DRM_FORMAT_MOD_LINEAR;
+         bool has_linear = false;
          for (unsigned i = 0; i < mod_info->drmFormatModifierCount; i++) {
-            if (mod_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_QCOM_COMPRESSED)
+            has_linear |= mod_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_LINEAR;
+            if (!is_wddm(device->instance) &&
+                mod_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_QCOM_COMPRESSED)
                modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+         }
+         if (is_wddm(device->instance) && !has_linear) {
+            vk_image_destroy(&device->vk, alloc, &image->vk);
+            return vk_error(device, VK_ERROR_FORMAT_NOT_SUPPORTED);
          }
       } else {
          modifier = drm_explicit_info->drmFormatModifier;
+         if ((is_wddm(device->instance) && modifier != DRM_FORMAT_MOD_LINEAR) ||
+             drm_explicit_info->drmFormatModifierPlaneCount != tu6_plane_count(image->vk.format)) {
+            vk_image_destroy(&device->vk, alloc, &image->vk);
+            return vk_error(device, VK_ERROR_FORMAT_NOT_SUPPORTED);
+         }
          assert(modifier == DRM_FORMAT_MOD_LINEAR ||
                 modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED);
          plane_layouts = drm_explicit_info->pPlaneLayouts;
@@ -1683,4 +1693,3 @@ tu_bind_sparse_image(struct tu_device *device, void *submit,
                          prev_bo_offset, bind_range);
    }
 }
-

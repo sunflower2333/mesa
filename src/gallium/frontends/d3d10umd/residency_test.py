@@ -168,6 +168,7 @@ def main():
     structs = '\n\n'.join(re.search(r'struct ' + name + r'\n\{.*?\n\};', residency, re.S).group()
                           for name in ['ResidencyKmt', 'ResidencyRequest'])
     functions = '\n\n'.join([extract(residency, name) for name in RESIDENCY_FUNCTIONS] +
+                            [extract(resource, 'EnsureSharedPresentContext')] +
                             [extract(resource, name) for name in RESOURCE_FUNCTIONS])
     fixture = (here / 'residency_test.cpp').read_text()
     for marker, text in (('// PRODUCTION_STRUCTS', structs), ('// PRODUCTION_FUNCTIONS', functions)):

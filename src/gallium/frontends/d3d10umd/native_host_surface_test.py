@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import ctypes
 from pathlib import Path
+import subprocess
+import tempfile
 
 root = Path(__file__).resolve().parents[3]
 abi = (root / "freedreno/vulkan/tu_wddm_abi.h").read_text()
@@ -47,6 +49,119 @@ assert "native host surface allocation/import failed" in create
 
 destroy = resource[resource.index("void APIENTRY\nDestroyResource"):resource.index("void APIENTRY\nResourceMap")]
 assert destroy.index("pipe_resource_reference(&pResource->resource, NULL);") < destroy.index(
-    "ReleaseNativeHostSurface(pResource);")
+    "ReleaseNativeHostSurface(pipe->screen, pResource);")
+
+
+def extract(name):
+    start = resource.index('\n' + name + '(')
+    start = resource.rfind('\n', 0, start - 1) + 1
+    brace = resource.index('{', start)
+    depth = 1
+    end = brace + 1
+    while depth:
+        depth += (resource[end] == '{') - (resource[end] == '}')
+        end += 1
+    return resource[start:end]
+
+
+# Execute the real allocation/import/rollback functions with an injected KMD
+# response, including padded host allocations and malformed layouts.
+fixture = r'''
+#include "tu_wddm_abi.h"
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <cstdio>
+using UINT64=uint64_t;
+using ULONG_PTR=uintptr_t;
+using HANDLE=void*;
+constexpr uint64_t DROIDVM_DRM_FORMAT_MOD_LINEAR=0;
+constexpr uint32_t DROIDVM_NATIVE_SURFACE_LINEAR_ALIAS=1;
+constexpr unsigned PIPE_BIND_SHARED=1, PIPE_BIND_LINEAR=2;
+constexpr unsigned WINSYS_HANDLE_TYPE_WIN32_HANDLE=7;
+constexpr unsigned PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE=2;
+#define DebugPrintf(...) ((void)0)
+struct pipe_resource { unsigned width0, height0, bind, format; };
+struct winsys_handle {
+ unsigned type; HANDLE handle; unsigned stride; uint64_t offset, modifier, format, size;
+};
+struct pipe_screen {
+ pipe_resource *(*resource_from_handle)(pipe_screen*,const pipe_resource*,winsys_handle*,unsigned);
+};
+struct pipe_context { pipe_screen *screen; };
+VIOGPU_WDDM_NATIVE_SURFACE response;
+unsigned allocations, imports, frees;
+bool allocationOk=true, importOk=true;
+pipe_resource texture{};
+bool NativeSurfaceRequest(pipe_screen*,VIOGPU_WDDM_NATIVE_SURFACE *s) {
+ if (s->Opcode==VIOGPU_WDDM_ESCAPE_FREE_NATIVE_SURFACE) {
+  ++frees;
+  assert(s->ShareKey==response.ShareKey && s->ResourceId==response.ResourceId);
+  assert(s->ExpectedResetGeneration==response.ResetGeneration);
+  return true;
+ }
+ ++allocations;
+ assert(s->Opcode==VIOGPU_WDDM_ESCAPE_ALLOCATE_NATIVE_SURFACE);
+ assert(s->ContextId==0 && s->ExpectedResetGeneration==0 && s->Flags==0);
+ assert(s->ShareKey==0 && s->Size==0 && s->Stride==0 && s->ResourceId==0);
+ if (!allocationOk) return false;
+ *s=response;
+ return true;
+}
+pipe_resource *importTexture(pipe_screen*,const pipe_resource *t,winsys_handle *h,unsigned usage) {
+ ++imports;
+ assert(h->size==response.Size && h->stride==response.Stride);
+ assert(h->offset==0 && h->modifier==0 && h->format==t->format);
+ assert(uintptr_t(h->handle)==response.ShareKey);
+ assert((t->bind&(PIPE_BIND_SHARED|PIPE_BIND_LINEAR))==(PIPE_BIND_SHARED|PIPE_BIND_LINEAR));
+ assert(usage==PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
+ return importOk ? &texture : nullptr;
+}
+// FUNCTIONS
+int main() {
+ pipe_screen screen{importTexture}; pipe_context pipe{&screen};
+ pipe_resource t{101,37,0,19}; VIOGPU_WDDM_NATIVE_SURFACE result{};
+ VIOGPU_WDDM_NATIVE_SURFACE good{};
+ good.Header={VIOGPU_WDDM_ABI_MAGIC,VIOGPU_WDDM_ABI_VERSION,sizeof(good),0};
+ good.Opcode=VIOGPU_WDDM_ESCAPE_ALLOCATE_NATIVE_SURFACE;
+ good.ShareKey=11; good.Size=20480; good.ResetGeneration=3; good.ResourceId=5;
+ good.Width=101; good.Height=37; good.Fourcc=0x34325241;
+ good.Stride=512; good.PlaneCount=1; good.LayoutFlags=1;
+ for (unsigned scenario=0; scenario<16; ++scenario) {
+  response=good; imports=frees=0; allocationOk=importOk=true;
+  switch(scenario) {
+  case 1: response.Stride=403; break;
+  case 2: response.Stride=510; break;
+  case 3: response.Modifier=1; break;
+  case 4: response.PlaneOffset=4; break;
+  case 5: response.PlaneCount=2; break;
+  case 6: response.ResetGeneration=0; break;
+  case 7: response.ContextId=1; break;
+  case 8: response.Width=102; break;
+  case 9: response.Fourcc=0x34324241; break;
+  case 10: response.Size=4096; break;
+  case 11: response.Size=20479; break;
+  case 12: response.ExpectedResetGeneration=1; break;
+  case 13: response.LayoutFlags=3; break;
+  case 14: importOk=false; break;
+  case 15: allocationOk=false; break;
+  }
+  pipe_resource *r=CreateNativeHostSurfaceTexture(&pipe,&t,good.Fourcc,&result);
+  assert((r!=nullptr)==(scenario==0));
+  assert(imports==unsigned(scenario==0 || scenario==14));
+  assert(frees==unsigned(scenario>0 && scenario<15));
+ }
+ puts("PASS native host allocation/import: 16 production-code scenarios");
+}
+'''
+fixture = fixture.replace('// FUNCTIONS', '\n'.join(
+    extract(name) for name in ('FreeNativeHostSurface', 'CreateNativeHostSurfaceTexture')))
+with tempfile.TemporaryDirectory(prefix='native-host-surface-') as temporary:
+    out = Path(temporary)
+    (out / 'test.cpp').write_text(fixture)
+    subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                    '-I', str(root / 'freedreno/vulkan'), str(out / 'test.cpp'),
+                    '-o', str(out / 'test')], check=True)
+    subprocess.run([str(out / 'test')], check=True)
 
 print("PASS D3D10 native host surface import contract")

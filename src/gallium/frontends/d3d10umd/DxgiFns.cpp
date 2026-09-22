@@ -689,6 +689,11 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
       if (!current || !current->resource ||
           bool(current->hAllocation) != bool(first->hAllocation))
          return E_INVALIDARG;
+      /* The cache rotation below changes allocation handles without rebinding
+       * live image views, and its dirty path copies pixels. Neither operation
+       * is valid for host-owned images bound directly to scanout. */
+      if (current->native_host_backing)
+         return DXGI_DDI_ERR_UNSUPPORTED;
       dirtyBefore += current->shared_dirty;
       if (first->hAllocation &&
           (current->resource->target != PIPE_TEXTURE_2D || current->MipLevels != 1 ||
