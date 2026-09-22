@@ -1210,6 +1210,7 @@ CreateShaderResourceView(
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    ShaderResourceView *pSRView = CastShaderResourceView(hShaderResourceView);
+   memset(pSRView, 0, sizeof *pSRView);
    struct pipe_resource *resource;
    enum pipe_format format;
 
@@ -1265,6 +1266,13 @@ CreateShaderResourceView(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   if (!pSRView->handle) {
+      SetError(hDevice, E_OUTOFMEMORY);
+      return;
+   }
+   pSRView->owner = CastResource(pCreateSRView->hDrvResource);
+   pSRView->next = pSRView->owner->shader_resource_views;
+   pSRView->owner->shader_resource_views = pSRView;
 }
 
 
@@ -1290,6 +1298,7 @@ CreateShaderResourceView1(
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    ShaderResourceView *pSRView = CastShaderResourceView(hShaderResourceView);
+   memset(pSRView, 0, sizeof *pSRView);
    struct pipe_resource *resource;
    enum pipe_format format;
 
@@ -1347,6 +1356,13 @@ CreateShaderResourceView1(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   if (!pSRView->handle) {
+      SetError(hDevice, E_OUTOFMEMORY);
+      return;
+   }
+   pSRView->owner = CastResource(pCreateSRView->hDrvResource);
+   pSRView->next = pSRView->owner->shader_resource_views;
+   pSRView->owner->shader_resource_views = pSRView;
 }
 
 
@@ -1374,7 +1390,17 @@ DestroyShaderResourceView(D3D10DDI_HDEVICE hDevice,                           //
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
-   pipe->sampler_view_release(pipe, pSRView->handle);
+   if (pSRView->owner) {
+      ShaderResourceView **entry = &pSRView->owner->shader_resource_views;
+      while (*entry && *entry != pSRView)
+         entry = &(*entry)->next;
+      if (*entry)
+         *entry = pSRView->next;
+      pSRView->owner = NULL;
+      pSRView->next = NULL;
+   }
+   if (pSRView->handle)
+      pipe->sampler_view_release(pipe, pSRView->handle);
    pSRView->handle = NULL;
 }
 

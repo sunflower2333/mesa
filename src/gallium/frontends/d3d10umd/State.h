@@ -74,6 +74,8 @@ struct Shader
 struct Query;
 struct ElementLayout;
 struct Resource;
+struct RenderTargetView;
+struct ShaderResourceView;
 
 struct Device
 {
@@ -256,6 +258,9 @@ struct Resource
    struct pipe_resource *resource;
    struct pipe_transfer **transfers;
    struct pipe_stream_output_target *so_target;
+   /* Views belong to the runtime resource, even when DXGI rotates backing. */
+   RenderTargetView *render_target_views;
+   ShaderResourceView *shader_resource_views;
 };
 
 
@@ -304,6 +309,8 @@ struct RenderTargetView
 {
    struct pipe_surface surface;
    D3D10DDI_HRTRENDERTARGETVIEW hRTRenderTargetView;
+   Resource *owner;
+   RenderTargetView *next;
 };
 
 
@@ -458,6 +465,8 @@ CastPipeSamplerState(D3D10DDI_HSAMPLER hSampler)
 struct ShaderResourceView
 {
    struct pipe_sampler_view *handle;
+   Resource *owner;
+   ShaderResourceView *next;
 };
 
 

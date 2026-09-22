@@ -659,6 +659,151 @@ RotationScratchMatches(const struct pipe_resource *scratch,
           scratch->flags == source->flags;
 }
 
+/* Only backing identity moves. DXGI explicitly keeps runtime handles and
+ * their views attached to the original Resource objects. */
+static void
+AssignNativeBacking(Resource *destination, const Resource *source)
+{
+   destination->resource = source->resource;
+   destination->hAllocation = source->hAllocation;
+   destination->hKMResource = source->hKMResource;
+   destination->shared_dirty = source->shared_dirty;
+   destination->allocation_lockable = source->allocation_lockable;
+   destination->allocation_resident = source->allocation_resident;
+   destination->zero_copy_key = source->zero_copy_key;
+   destination->native_host_surface_live = source->native_host_surface_live;
+   memcpy(destination->native_host_surface, source->native_host_surface,
+          sizeof destination->native_host_surface);
+}
+
+static HRESULT
+RotateNativeResourceIdentities(Device *device, UINT count,
+                               const DXGI_DDI_HRESOURCE *resources)
+{
+   struct pipe_context *pipe = device->pipe;
+   Resource *first = CastResource(resources[0]);
+   size_t viewCount = 0;
+   for (UINT i = 0; i < count; ++i) {
+      Resource *current = CastResource(resources[i]);
+      if (!current || !current->resource || !current->hAllocation ||
+          !current->native_host_backing || !current->zero_copy ||
+          current->zero_copy_owner || current->zero_copy_local ||
+          !current->zero_copy_key || current->buffer ||
+          current->resource->target != PIPE_TEXTURE_2D || current->MipLevels != 1 ||
+          current->NumSubResources != 1 || current->resource->array_size != 1 ||
+          current->Format != first->Format || current->shared_pitch != first->shared_pitch ||
+          current->scanout_primary != first->scanout_primary ||
+          bool(current->hRTResourceHandle) != bool(first->hRTResourceHandle) ||
+          current->shared_staging_allocation || current->so_target ||
+          !RotationScratchMatches(current->resource, first->resource))
+         return DXGI_DDI_ERR_UNSUPPORTED;
+      if (current->transfers && current->transfers[0])
+         return DXGI_DDI_ERR_UNSUPPORTED;
+      for (UINT j = 0; j < i; ++j) {
+         Resource *previous = CastResource(resources[j]);
+         if (current == previous || current->resource == previous->resource ||
+             current->hAllocation == previous->hAllocation ||
+             current->zero_copy_key == previous->zero_copy_key)
+            return E_INVALIDARG;
+      }
+      for (RenderTargetView *view = current->render_target_views; view; view = view->next)
+         if (view->owner != current || view->surface.texture != current->resource)
+            return E_INVALIDARG;
+      for (ShaderResourceView *view = current->shader_resource_views; view; view = view->next) {
+         if (view->owner != current || !view->handle ||
+             view->handle->texture != current->resource || viewCount == SIZE_MAX)
+            return E_INVALIDARG;
+         ++viewCount;
+      }
+   }
+
+   struct Replacement {
+      ShaderResourceView *view;
+      struct pipe_sampler_view *handle;
+   };
+   if (viewCount > SIZE_MAX / sizeof(Replacement))
+      return E_OUTOFMEMORY;
+   Replacement *replacements = viewCount
+      ? static_cast<Replacement *>(calloc(viewCount, sizeof(Replacement))) : NULL;
+   if (viewCount && !replacements)
+      return E_OUTOFMEMORY;
+
+   /* Allocate every new view before changing any identity or binding. This
+    * also covers views currently unbound by the application. Pending batches
+    * retain the old Gallium views/images through their own references. */
+   size_t prepared = 0;
+   for (UINT i = 0; i < count; ++i) {
+      Resource *current = CastResource(resources[i]);
+      Resource *next = CastResource(resources[(i + 1) % count]);
+      for (ShaderResourceView *view = current->shader_resource_views; view; view = view->next) {
+         struct pipe_sampler_view *replacement =
+            pipe->create_sampler_view(pipe, next->resource, view->handle);
+         if (!replacement) {
+            for (size_t j = 0; j < prepared; ++j)
+               pipe->sampler_view_release(pipe, replacements[j].handle);
+            free(replacements);
+            return E_OUTOFMEMORY;
+         }
+         replacements[prepared++] = {view, replacement};
+      }
+   }
+
+   /* Framebuffer surfaces are copies, so remap them before the resource
+    * permutation, once per slot. Their format/level/layer descriptions stay. */
+   bool framebufferChanged = false;
+   for (unsigned slot = 0; slot < device->fb.nr_cbufs; ++slot) {
+      for (UINT i = 0; i < count; ++i) {
+         if (device->fb.cbufs[slot].texture == CastResource(resources[i])->resource) {
+            pipe_resource_reference(&device->fb.cbufs[slot].texture,
+                                    CastResource(resources[(i + 1) % count])->resource);
+            framebufferChanged = true;
+            break;
+         }
+      }
+   }
+   for (UINT i = 0; i < count; ++i) {
+      Resource *current = CastResource(resources[i]);
+      Resource *next = CastResource(resources[(i + 1) % count]);
+      for (RenderTargetView *view = current->render_target_views; view; view = view->next)
+         pipe_resource_reference(&view->surface.texture, next->resource);
+   }
+
+   bool stageChanged[MESA_SHADER_STAGES] = {};
+   for (size_t i = 0; i < prepared; ++i) {
+      ShaderResourceView *view = replacements[i].view;
+      struct pipe_sampler_view *old = view->handle;
+      for (unsigned stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
+         for (unsigned slot = 0; slot < PIPE_MAX_SHADER_SAMPLER_VIEWS; ++slot) {
+            if (device->sampler_views[stage][slot] == old) {
+               device->sampler_views[stage][slot] = replacements[i].handle;
+               stageChanged[stage] = true;
+            }
+         }
+      }
+      view->handle = replacements[i].handle;
+      replacements[i].handle = old;
+   }
+
+   /* A raw permutation transfers the owning image references and owner
+    * leases exactly once; do not unref/free/reallocate their pixel backing. */
+   const Resource saved = *first;
+   for (UINT i = 0; i + 1 < count; ++i)
+      AssignNativeBacking(CastResource(resources[i]), CastResource(resources[i + 1]));
+   AssignNativeBacking(CastResource(resources[count - 1]), &saved);
+
+   if (framebufferChanged)
+      pipe->set_framebuffer_state(pipe, &device->fb);
+   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; ++stage)
+      if (stageChanged[stage])
+         pipe->set_sampler_views(pipe, static_cast<mesa_shader_stage>(stage), 0,
+                                 PIPE_MAX_SHADER_SAMPLER_VIEWS, 0,
+                                 device->sampler_views[stage]);
+   for (size_t i = 0; i < prepared; ++i)
+      pipe->sampler_view_release(pipe, replacements[i].handle);
+   free(replacements);
+   return S_OK;
+}
+
 HRESULT APIENTRY
 _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResourceIdentities )
 {
@@ -677,6 +822,9 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
    Resource *first = CastResource(RotateResourceIdentities->pResources[0]);
    if (!first || !first->resource)
       return E_INVALIDARG;
+   if (first->native_host_backing)
+      return RotateNativeResourceIdentities(device, RotateResourceIdentities->Resources,
+                                             RotateResourceIdentities->pResources);
    const ULONGLONG started = GetTickCount64();
    LARGE_INTEGER frequency, begin, refreshed, allocated, copied;
    QueryPerformanceFrequency(&frequency);
@@ -689,9 +837,7 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
       if (!current || !current->resource ||
           bool(current->hAllocation) != bool(first->hAllocation))
          return E_INVALIDARG;
-      /* The cache rotation below changes allocation handles without rebinding
-       * live image views, and its dirty path copies pixels. Neither operation
-       * is valid for host-owned images bound directly to scanout. */
+      /* A mixed host-backed/cache set cannot preserve backing identity. */
       if (current->native_host_backing)
          return DXGI_DDI_ERR_UNSUPPORTED;
       dirtyBefore += current->shared_dirty;

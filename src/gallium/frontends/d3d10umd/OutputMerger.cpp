@@ -86,6 +86,7 @@ CreateRenderTargetView(
 
    struct pipe_resource *resource = CastPipeResource(pCreateRenderTargetView->hDrvResource);
    RenderTargetView *pRTView = CastRenderTargetView(hRenderTargetView);
+   memset(pRTView, 0, sizeof *pRTView);
 
    struct pipe_surface desc;
 
@@ -96,6 +97,7 @@ CreateRenderTargetView(
    switch (pCreateRenderTargetView->ResourceDimension) {
    case D3D10DDIRESOURCE_BUFFER:
       LOG_UNSUPPORTED("Render target view into buffer!");
+      pipe_resource_reference(&desc.texture, NULL);
       SetError(hDevice, E_NOTIMPL);
       return;
    case D3D10DDIRESOURCE_TEXTURE1D:
@@ -127,10 +129,15 @@ CreateRenderTargetView(
       break;
    default:
       ASSERT(0);
+      pipe_resource_reference(&desc.texture, NULL);
       return;
    }
 
    pRTView->surface = desc;
+   pRTView->hRTRenderTargetView = hRTRenderTargetView;
+   pRTView->owner = CastResource(pCreateRenderTargetView->hDrvResource);
+   pRTView->next = pRTView->owner->render_target_views;
+   pRTView->owner->render_target_views = pRTView;
 }
 
 
@@ -154,6 +161,15 @@ DestroyRenderTargetView(D3D10DDI_HDEVICE hDevice,                       // IN
 
    RenderTargetView *pRTView = CastRenderTargetView(hRenderTargetView);
 
+   if (pRTView->owner) {
+      RenderTargetView **entry = &pRTView->owner->render_target_views;
+      while (*entry && *entry != pRTView)
+         entry = &(*entry)->next;
+      if (*entry)
+         *entry = pRTView->next;
+      pRTView->owner = NULL;
+      pRTView->next = NULL;
+   }
    pipe_resource_reference(&pRTView->surface.texture, NULL);
 }
 
