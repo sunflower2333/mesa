@@ -382,6 +382,35 @@ IsValidResourceShare(const VIOGPU_WDDM_RESOURCE_SHARE *share, unsigned width)
           share->Reserved[0] == 0 && share->Reserved[1] == 0;
 }
 
+static VIOGPU_WDDM_UINT32
+SharedAllocationFlags(bool nativeHostSurface, bool primary)
+{
+   /* Host-owned AHB wrappers live in the non-CPU-visible KMD segment. Their
+    * imported Turnip image supplies GPU access; no guest CPU alias exists. */
+   return primary ? VIOGPU_WDDM_ALLOCATION_PRIMARY :
+          nativeHostSurface ? 0 : VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+}
+
+static bool
+IsValidSharedAllocation(const VIOGPU_WDDM_ALLOCATION_INFO *info,
+                        const VIOGPU_WDDM_RESOURCE_SHARE *share)
+{
+   const bool native = share &&
+      (share->Flags & VIOGPU_WDDM_RESOURCE_SHARE_NATIVE_SURFACE) != 0;
+   return info->Header.Magic == VIOGPU_WDDM_ABI_MAGIC &&
+          info->Header.Version == VIOGPU_WDDM_ABI_VERSION &&
+          info->Header.Size == sizeof(*info) && info->Header.Reserved == 0 &&
+          (info->Flags == SharedAllocationFlags(native, false) ||
+           info->Flags == VIOGPU_WDDM_ALLOCATION_PRIMARY) &&
+          (info->Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY ||
+           (info->RefreshRateNumerator != 0 && info->RefreshRateDenominator != 0)) &&
+          info->Width != 0 && info->Width <= UINT_MAX / 4 && info->Height != 0 &&
+          info->Pitch >= info->Width * 4 &&
+          (VIOGPU_WDDM_UINT64)info->Pitch * info->Height <= info->Size &&
+          (!native || (IsValidResourceShare(share, info->Width) &&
+                       share->Stride == info->Pitch));
+}
+
 /* Creates the linear texture a zero-copy shared resource renders into and
  * exports its native allocation. Returns NULL when the backend cannot share,
  * and the caller then uses the copied GPU cache instead. */
@@ -560,6 +589,8 @@ EnsureSharedPresentContext(Device *device)
 static HRESULT
 EnsureSharedCopy(Device *device, Resource *resource)
 {
+   if (resource->native_host_backing)
+      return DXGI_DDI_ERR_UNSUPPORTED;
    if (!device->KTCallbacks.pfnAllocateCb || !device->KTCallbacks.pfnDeallocateCb ||
        !device->KTCallbacks.pfnRenderCb || !device->KTCallbacks.pfnLockCb ||
        !device->KTCallbacks.pfnUnlockCb)
@@ -1501,11 +1532,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       privateData.Size = hostSurface ? hostSurface->Size
                                      : (VIOGPU_WDDM_UINT64)shared_pitch * shared_height;
       privateData.Alignment = 4096;
-      privateData.Flags = VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
+      privateData.Flags = SharedAllocationFlags(hostSurface != NULL, pResource->scanout_primary);
       if (pResource->scanout_primary) {
-         // Primary backing is scheduler-managed, not directly locked by the
-         // UMD. The scheduled staging copy fills it before PresentCb.
-         privateData.Flags = VIOGPU_WDDM_ALLOCATION_PRIMARY;
+         // Primary backing is scheduler-managed. Native AHB pixels stay in
+         // the imported GPU image; ordinary primaries use the scheduled copy.
          privateData.RefreshRateNumerator = pCreateResource->pPrimaryDesc->ModeDesc.RefreshRate.Numerator;
          privateData.RefreshRateDenominator = pCreateResource->pPrimaryDesc->ModeDesc.RefreshRate.Denominator;
       }
@@ -1599,7 +1629,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          SetError(hDevice, rhr);
          return;
       }
-      pResource->allocation_lockable = !pResource->scanout_primary;
+      pResource->allocation_lockable =
+         (privateData.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE) != 0;
       pResource->shared_pitch = privateData.Pitch;
       pResource->shared_next = pDevice->shared_resources;
       pDevice->shared_resources = pResource;
@@ -1767,18 +1798,16 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
 
    VIOGPU_WDDM_ALLOCATION_INFO info;
    memcpy(&info, openInfo->pPrivateDriverData, sizeof info);
+   VIOGPU_WDDM_RESOURCE_SHARE share = {};
+   const bool hasShare = pOpenResource->pPrivateDriverData &&
+      pOpenResource->PrivateDriverDataSize == sizeof(share);
+   if (hasShare)
+      memcpy(&share, pOpenResource->pPrivateDriverData, sizeof share);
+   const bool nativeHostSurface = hasShare &&
+      (share.Flags & VIOGPU_WDDM_RESOURCE_SHARE_NATIVE_SURFACE) != 0;
    const DXGI_FORMAT sharedFormat = SharedDxgiFormat(info.Format);
-   if (info.Header.Magic != VIOGPU_WDDM_ABI_MAGIC ||
-       info.Header.Version != VIOGPU_WDDM_ABI_VERSION ||
-       info.Header.Size != sizeof info || info.Header.Reserved != 0 ||
-       (info.Flags != VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE &&
-        info.Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY) ||
-       (info.Flags == VIOGPU_WDDM_ALLOCATION_PRIMARY &&
-        (info.RefreshRateNumerator == 0 || info.RefreshRateDenominator == 0)) ||
+   if (!IsValidSharedAllocation(&info, hasShare ? &share : NULL) ||
        sharedFormat == DXGI_FORMAT_UNKNOWN ||
-       info.Width == 0 || info.Width > UINT_MAX / 4 || info.Height == 0 ||
-       info.Pitch < info.Width * 4 ||
-       (VIOGPU_WDDM_UINT64)info.Pitch * info.Height > info.Size ||
        openInfo->hAllocation == 0) {
       DebugPrintf("%s: allocation private data is not this driver's\n", __func__);
       SetError(hDevice, E_INVALIDARG);
@@ -1800,12 +1829,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
 
    /* A zero-copy creator put its share key in the resource private data;
     * import that allocation with the same linear layout the creator used. */
-   bool nativeHostSurface = false;
-   if (pOpenResource->pPrivateDriverData &&
-       pOpenResource->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_RESOURCE_SHARE)) {
-      VIOGPU_WDDM_RESOURCE_SHARE share;
-      memcpy(&share, pOpenResource->pPrivateDriverData, sizeof share);
-      nativeHostSurface = (share.Flags & VIOGPU_WDDM_RESOURCE_SHARE_NATIVE_SURFACE) != 0;
+   if (hasShare) {
       const bool validShare = IsValidResourceShare(&share, info.Width) &&
                              (!nativeHostSurface || share.Stride == info.Pitch);
       const bool importShare = nativeHostSurface || ZeroCopySharedSurfaces();
@@ -1991,6 +2015,11 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Resource *pResource = CastResource(hResource);
+   if (pResource->native_host_backing) {
+      memset(pMappedSubResource, 0, sizeof(*pMappedSubResource));
+      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+      return;
+   }
    struct pipe_resource *resource = pResource->resource;
 
    unsigned usage;

@@ -46,6 +46,8 @@ for text in ("VIOGPU_NATIVE_HOST_SURFACE", "CreateNativeHostSurfaceTexture(",
 create = resource[resource.index("void APIENTRY\nCreateResource"):resource.index("SIZE_T APIENTRY\nCalcPrivateOpenedResourceSize")]
 assert create.index("if (nativeHostSurface)") < create.index("CreateSharedTextureCache")
 assert "native host surface allocation/import failed" in create
+assert "SharedAllocationFlags(hostSurface != NULL, pResource->scanout_primary)" in create
+assert "(privateData.Flags & VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE) != 0" in create
 
 destroy = resource[resource.index("void APIENTRY\nDestroyResource"):resource.index("void APIENTRY\nResourceMap")]
 assert destroy.index("pipe_resource_reference(&pResource->resource, NULL);") < destroy.index(
@@ -69,6 +71,7 @@ def extract(name):
 fixture = r'''
 #include "tu_wddm_abi.h"
 #include <cassert>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -152,10 +155,68 @@ int main() {
   assert(frees==unsigned(scenario>0 && scenario<15));
  }
  puts("PASS native host allocation/import: 16 production-code scenarios");
+ assert(SharedAllocationFlags(false,false)==VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE);
+ assert(SharedAllocationFlags(true,false)==0);
+ assert(SharedAllocationFlags(false,true)==VIOGPU_WDDM_ALLOCATION_PRIMARY);
+ assert(SharedAllocationFlags(true,true)==VIOGPU_WDDM_ALLOCATION_PRIMARY);
+ for (unsigned scenario=0; scenario<26; ++scenario) {
+  VIOGPU_WDDM_ALLOCATION_INFO info{};
+  info.Header={VIOGPU_WDDM_ABI_MAGIC,VIOGPU_WDDM_ABI_VERSION,sizeof(info),0};
+  info.Size=good.Size; info.Width=good.Width; info.Height=good.Height;
+  info.Pitch=good.Stride; info.RefreshRateNumerator=60; info.RefreshRateDenominator=1;
+  VIOGPU_WDDM_RESOURCE_SHARE share{};
+  share.Header={VIOGPU_WDDM_ABI_MAGIC,VIOGPU_WDDM_ABI_VERSION,sizeof(share),0};
+  share.ShareKey=good.ShareKey; share.Stride=good.Stride;
+  share.Flags=VIOGPU_WDDM_RESOURCE_SHARE_NATIVE_SURFACE;
+  const VIOGPU_WDDM_RESOURCE_SHARE *metadata=&share;
+  bool valid=false;
+  switch(scenario) {
+  case 0: valid=true; break;
+  case 1: info.Flags=VIOGPU_WDDM_ALLOCATION_PRIMARY; valid=true; break;
+  case 2: info.Flags=VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE; break;
+  case 3: info.Flags=VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE|VIOGPU_WDDM_ALLOCATION_PRIMARY; break;
+  case 4: metadata=nullptr; break;
+  case 5: share.Header.Magic=0; break;
+  case 6: share.Stride+=64; break;
+  case 7: share.Flags|=0x80000000; break;
+  case 8: share.ShareKey=0; break;
+  case 9: share.Flags=0; break;
+  case 10: share.Flags=0; info.Flags=VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE; valid=true; break;
+  case 11: share.Flags=0; info.Flags=VIOGPU_WDDM_ALLOCATION_PRIMARY; valid=true; break;
+  case 12: metadata=nullptr; info.Flags=VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE; valid=true; break;
+  case 13: metadata=nullptr; info.Flags=VIOGPU_WDDM_ALLOCATION_PRIMARY; valid=true; break;
+  case 14: info.Flags=VIOGPU_WDDM_ALLOCATION_PRIMARY; info.RefreshRateNumerator=0; break;
+  case 15: info.Flags=VIOGPU_WDDM_ALLOCATION_PRIMARY; info.RefreshRateDenominator=0; break;
+  case 16: info.Header.Version=VIOGPU_WDDM_ABI_VERSION+1; break;
+  case 17: info.Height=0; break;
+  case 18: info.Width=0; break;
+  case 19: info.Pitch=info.Width*4-1; break;
+  case 20: info.Size=uint64_t(info.Pitch)*info.Height-1; break;
+  case 21: info.Header.Size--; break;
+  case 22: info.Header.Reserved=1; break;
+  case 23: share.Reserved[0]=1; break;
+  case 24: info.Pitch=share.Stride=510; break;
+  case 25: info.Flags=VIOGPU_WDDM_ALLOCATION_NATIVE; break;
+  }
+  if (IsValidSharedAllocation(&info,metadata)!=valid) {
+   std::fprintf(stderr,"allocation validation scenario %u failed\n",scenario);
+   return 1;
+  }
+ }
+ puts("PASS native non-CPU-visible wrapper/open: 26 production-code scenarios");
 }
 '''
 fixture = fixture.replace('// FUNCTIONS', '\n'.join(
-    extract(name) for name in ('FreeNativeHostSurface', 'CreateNativeHostSurfaceTexture')))
+    extract(name) for name in ('IsValidResourceShare', 'SharedAllocationFlags',
+                              'IsValidSharedAllocation', 'FreeNativeHostSurface',
+                              'CreateNativeHostSurfaceTexture')))
+for function, guarded_call in (('ResourceMap', 'pipe->buffer_map('),
+                               ('EnsureSharedCopy', 'pfnAllocateCb')):
+    body = extract(function)
+    assert body.index('native_host_backing') < body.index(guarded_call)
+    assert body.index('DXGI_DDI_ERR_UNSUPPORTED') < body.index(guarded_call)
+opened = extract('OpenResource')
+assert opened.index('IsValidSharedAllocation(') < opened.index('resource_from_handle(')
 with tempfile.TemporaryDirectory(prefix='native-host-surface-') as temporary:
     out = Path(temporary)
     (out / 'test.cpp').write_text(fixture)

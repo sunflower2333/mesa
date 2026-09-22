@@ -30,6 +30,7 @@ using HANDLE = void *;
 #define E_INVALIDARG ((HRESULT)0x80070057u)
 #define E_NOTIMPL ((HRESULT)0x80004001u)
 #define E_UNEXPECTED ((HRESULT)0x8000FFFFu)
+#define DXGI_DDI_ERR_UNSUPPORTED ((HRESULT)0x887B0002u)
 #define FAILED(hr) ((hr) < 0)
 #define SUCCEEDED(hr) ((hr) >= 0)
 #define DebugPrintf(...) ((void)0)
@@ -101,6 +102,7 @@ struct Resource {
    UINT shared_pitch;
    D3DKMT_HANDLE shared_staging_allocation;
    bool allocation_lockable;
+   bool native_host_backing;
    bool allocation_resident;
    bool staging_resident;
    bool staging_idle;
@@ -499,6 +501,24 @@ static void test_wddm2_allocations_resident_before_use()
          "DestroyDevice releases the paging queue");
 }
 
+static void test_native_host_copy_refused()
+{
+   for (bool lockable : {false, true}) {
+      session s(2000);
+      Resource *resource = s.create(lockable);
+      resource->native_host_backing = true;
+      const auto calls = s.fake.calls;
+      for (bool publish : {false, true}) {
+         check(s.transfer(resource, publish) == DXGI_DDI_ERR_UNSUPPORTED &&
+               s.fake.calls == calls && !resource->shared_staging_allocation,
+               "native HostSurface refuses CPU copy before runtime callbacks");
+      }
+      s.unlink(resource);
+      ReleaseResourceAllocations(&s.device, resource);
+      ResidencyDestroyDevice(&s.device);
+   }
+}
+
 static void test_pending_waits_before_render()
 {
    session s(2000);
@@ -665,6 +685,7 @@ int main()
    test_driver_model_gate();
    test_wddm1_issues_no_residency_callback();
    test_wddm2_allocations_resident_before_use();
+   test_native_host_copy_refused();
    test_pending_waits_before_render();
    test_over_budget_trims_idle_staging();
    test_trim_loop_is_bounded();

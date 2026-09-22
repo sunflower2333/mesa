@@ -32,6 +32,10 @@ RESIDENCY_FUNCTIONS = [
 RESOURCE_FUNCTIONS = ['SharedPrivateFormat', 'EnsureSharedCopy', 'SubmitSharedCopy']
 
 NEGATIVE_CONTROLS = {
+    'no-native-copy-guard': (
+        'Resource.cpp',
+        '   if (resource->native_host_backing)\n      return DXGI_DDI_ERR_UNSUPPORTED;\n',
+        '', 'FAIL native HostSurface refuses CPU copy before runtime callbacks'),
     'no-make-resident': (
         'Residency.cpp', 'if (*resident || !ResidencyRequired(device))\n      return S_OK;',
         'if (resident != NULL)\n      return S_OK;',
