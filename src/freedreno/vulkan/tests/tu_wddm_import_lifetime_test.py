@@ -40,7 +40,7 @@ struct tu_wddm_context {
 };
 struct tu_wddm_allocation {
  tu_wddm_context *context; uint32_t handle; bool imported, aliased, locked;
- uint64_t share_key, vma_size; VIOGPU_WDDM_ALLOCATION_INFO private_info;
+ uint64_t share_key, vma_size, imported_size; VIOGPU_WDDM_ALLOCATION_INFO private_info;
  struct { uint64_t reset_generation; unsigned fence; bool pending, fence_ready; } retirement;
 };
 struct tu_bo {

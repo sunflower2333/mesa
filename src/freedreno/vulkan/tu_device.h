@@ -89,6 +89,9 @@ struct tu_queue_family {
 
 extern uint64_t os_page_size;
 
+/* Shared by feature, format and modifier-image validation. */
+bool is_wddm(struct tu_instance *instance);
+
 struct tu_physical_device
 {
    struct vk_physical_device vk;

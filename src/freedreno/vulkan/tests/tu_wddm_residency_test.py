@@ -30,7 +30,8 @@ TRANSPORT_FUNCTIONS = [
     'tu_wddm_allocation_make_resident', 'tu_wddm_allocation_evict', 'tu_wddm_allocation_create',
     'tu_wddm_allocation_destroy', 'tu_wddm_fence_after', 'tu_wddm_render_reference_valid',
     'tu_wddm_render_references_unique', 'tu_wddm_native_submit_valid',
-    'tu_wddm_render_replacements_valid', 'tu_wddm_context_render',
+    'tu_wddm_render_replacements_valid', 'tu_wddm_import_references_valid',
+    'tu_wddm_context_render_imports', 'tu_wddm_context_render',
 ]
 
 # (production file, exact original text, replacement, required failure text)

@@ -164,3 +164,14 @@ ABI_OFFSET(offset.native_surface.stride, VIOGPU_WDDM_NATIVE_SURFACE, Stride, 92)
 ABI_OFFSET(offset.native_surface.plane_count, VIOGPU_WDDM_NATIVE_SURFACE, PlaneCount, 96);
 ABI_OFFSET(offset.native_surface.layout_flags, VIOGPU_WDDM_NATIVE_SURFACE, LayoutFlags, 100);
 ABI_OFFSET(offset.native_surface.reserved, VIOGPU_WDDM_NATIVE_SURFACE, Reserved, 104);
+
+ABI_VALUE(render.flags.imported_references, VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES, 1);
+ABI_VALUE(imported_references.version, VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION, 1);
+ABI_VALUE(imported_references.maximum, VIOGPU_WDDM_MAX_IMPORTED_REFERENCES, 256);
+ABI_SIZE(size.imported_reference, VIOGPU_WDDM_IMPORTED_REFERENCE, 40);
+ABI_OFFSET(offset.imported_reference.share_key, VIOGPU_WDDM_IMPORTED_REFERENCE, ShareKey, 0);
+ABI_OFFSET(offset.imported_reference.iova, VIOGPU_WDDM_IMPORTED_REFERENCE, Iova, 8);
+ABI_OFFSET(offset.imported_reference.size, VIOGPU_WDDM_IMPORTED_REFERENCE, Size, 16);
+ABI_OFFSET(offset.imported_reference.reset_generation, VIOGPU_WDDM_IMPORTED_REFERENCE, ResetGeneration, 24);
+ABI_OFFSET(offset.imported_reference.access, VIOGPU_WDDM_IMPORTED_REFERENCE, Access, 32);
+ABI_OFFSET(offset.imported_reference.reserved, VIOGPU_WDDM_IMPORTED_REFERENCE, Reserved, 36);

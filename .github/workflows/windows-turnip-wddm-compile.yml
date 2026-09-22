@@ -74,6 +74,9 @@ jobs:
       - name: Execute allocation alias and patch overlap regression
         shell: pwsh
         run: python src/freedreno/vulkan/tests/tu_wddm_reference_test.py
+      - name: Execute imported image access and descriptor provenance regression
+        shell: pwsh
+        run: python src/freedreno/vulkan/tests/tu_wddm_image_access_test.py
       - name: Execute allocation status classification and rollback regression
         shell: pwsh
         run: |

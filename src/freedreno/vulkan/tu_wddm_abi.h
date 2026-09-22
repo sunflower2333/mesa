@@ -33,6 +33,9 @@
  * itself. */
 #define VIOGPU_WDDM_ESCAPE_FLAGS_ALIAS_OWNER 0x00000001U
 #define VIOGPU_WDDM_RENDER_FLAGS_NONE        0U
+#define VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES 0x00000001U
+#define VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION 1U
+#define VIOGPU_WDDM_MAX_IMPORTED_REFERENCES 256U
 
 #define VIOGPU_WDDM_REFERENCE_READ           0x00000001U
 #define VIOGPU_WDDM_REFERENCE_WRITE          0x00000002U
@@ -270,6 +273,17 @@ typedef struct VIOGPU_WDDM_ALLOCATION_REFERENCE {
    VIOGPU_WDDM_UINT32 Reserved;
 } VIOGPU_WDDM_ALLOCATION_REFERENCE;
 
+/* RENDER_IMPORTED_REFERENCES uses Reserved[0:2] as offset, count, version;
+ * Reserved[3] remains zero. This table follows owned allocation references. */
+typedef struct VIOGPU_WDDM_IMPORTED_REFERENCE {
+   VIOGPU_WDDM_UINT64 ShareKey;
+   VIOGPU_WDDM_UINT64 Iova;
+   VIOGPU_WDDM_UINT64 Size;
+   VIOGPU_WDDM_UINT64 ResetGeneration;
+   VIOGPU_WDDM_UINT32 Access;
+   VIOGPU_WDDM_UINT32 Reserved;
+} VIOGPU_WDDM_IMPORTED_REFERENCE;
+
 #pragma pack(pop)
 
 #ifdef __cplusplus
@@ -283,6 +297,7 @@ static_assert(sizeof(VIOGPU_WDDM_CONTEXT_INFO) == 64, "WDDM context-info ABI lay
 static_assert(sizeof(VIOGPU_WDDM_FENCE_INFO) == 56, "WDDM fence-info ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) == 64, "WDDM render ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) == 32, "WDDM reference ABI layout changed");
+static_assert(sizeof(VIOGPU_WDDM_IMPORTED_REFERENCE) == 40, "WDDM imported reference ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_NATIVE_SHARE) == 88, "WDDM native share ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_RESOURCE_SHARE) == 48, "WDDM resource share ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_NATIVE_SURFACE) == 128, "WDDM native surface ABI layout changed");

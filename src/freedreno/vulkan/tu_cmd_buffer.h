@@ -691,6 +691,10 @@ struct tu_cmd_buffer
    struct tu_descriptor_set meta_push_descriptors;
 
    struct tu_descriptor_state descriptors[MAX_BIND_POINTS];
+#ifdef TU_HAS_WDDM
+   struct util_dynarray wddm_image_uses;
+   struct util_dynarray wddm_descriptor_uses;
+#endif
 
    struct tu_render_pass_attachment dynamic_rp_attachments[3 * (MAX_RTS + 1) + 2];
    struct tu_subpass_attachment dynamic_color_attachments[MAX_RTS];
@@ -753,6 +757,10 @@ struct tu_cmd_buffer
 };
 VK_DEFINE_HANDLE_CASTS(tu_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
+
+void tu_cmd_use_image(struct tu_cmd_buffer *cmd, const struct tu_image *image,
+                      uint32_t access);
+VkResult tu_cmd_submit_image_uses(struct tu_cmd_buffer *cmd, void *submit);
 
 extern const struct vk_command_buffer_ops tu_cmd_buffer_ops;
 

@@ -251,7 +251,9 @@ def main() -> int:
         "WDDM submit must close residency before handing the packet to KMT",
     )
 
-    render = canonical(function_body("tu_wddm_context_render", wddm_source))
+    if "bo->wddm_allocation->imported" not in add_live:
+        fail("the all-live residency sweep must exclude imports")
+    render = canonical(function_body("tu_wddm_context_render_imports", wddm_source))
     require_order(
         render,
         (

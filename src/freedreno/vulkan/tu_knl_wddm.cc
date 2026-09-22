@@ -1929,12 +1929,38 @@ tu_wddm_render_replacements_valid(const D3DKMT_RENDER *render)
    return true;
 }
 
+static bool
+tu_wddm_import_references_valid(const struct tu_wddm_context *context,
+                                 const VIOGPU_WDDM_IMPORTED_REFERENCE *imports,
+                                 uint32_t count)
+{
+   if (count > VIOGPU_WDDM_MAX_IMPORTED_REFERENCES || (count && !imports))
+      return false;
+   for (uint32_t i = 0; i < count; i++) {
+      const VIOGPU_WDDM_IMPORTED_REFERENCE *ref = &imports[i];
+      if (!ref->ShareKey || !ref->Iova || !ref->Size ||
+          ref->Iova > UINT64_MAX - ref->Size ||
+          ref->ResetGeneration != context->info.ResetGeneration ||
+          !ref->Access ||
+          (ref->Access & ~(VIOGPU_WDDM_REFERENCE_READ | VIOGPU_WDDM_REFERENCE_WRITE)) ||
+          ref->Reserved)
+         return false;
+      for (uint32_t j = 0; j < i; j++) {
+         if (imports[j].ShareKey == ref->ShareKey || imports[j].Iova == ref->Iova)
+            return false;
+      }
+   }
+   return true;
+}
+
 bool
-tu_wddm_context_render(struct tu_wddm_context *context,
+tu_wddm_context_render_imports(struct tu_wddm_context *context,
                        const void *command_stream,
                        uint32_t command_stream_size,
                        const struct tu_wddm_render_reference *references,
-                       uint32_t reference_count)
+                       uint32_t reference_count,
+                       const VIOGPU_WDDM_IMPORTED_REFERENCE *imports,
+                       uint32_t import_count)
 {
    auto rejected = [&](const char *reason) {
       tu_wddm_diag("render rejected reason=%s packet_bytes=%u references=%u",
@@ -1950,6 +1976,9 @@ tu_wddm_context_render(struct tu_wddm_context *context,
        !tu_wddm_validate_context_info(&context->info, context->device->adapter.private_info.ResetGeneration))
       return rejected("arguments-or-context");
 
+   if (!tu_wddm_import_references_valid(context, imports, import_count))
+      return rejected("imported-reference");
+
    /* Render is the only path that can publish a new Host submission.  Keep
     * the execution-state check adjacent to the context/epoch validation so a
     * reset or stopped device cannot consume a DMA buffer or mutate the KMT
@@ -1959,7 +1988,9 @@ tu_wddm_context_render(struct tu_wddm_context *context,
 
    const uint64_t references_size = static_cast<uint64_t>(reference_count) *
                                     sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE);
-   const uint64_t command_offset = sizeof(VIOGPU_WDDM_RENDER_COMMAND) + references_size;
+   const uint64_t import_offset = sizeof(VIOGPU_WDDM_RENDER_COMMAND) + references_size;
+   const uint64_t import_size = (uint64_t)import_count * sizeof(*imports);
+   const uint64_t command_offset = import_offset + import_size;
    const uint64_t command_length = command_offset + command_stream_size;
    if (command_length > TU_WDDM_MAX_RENDER_COMMAND_SIZE ||
        command_length > context->command_buffer_size ||
@@ -2000,6 +2031,13 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    header->AllocationReferenceCount = reference_count;
    header->CommandStreamOffset = static_cast<uint32_t>(command_offset);
    header->CommandStreamSize = command_stream_size;
+   if (import_count) {
+      header->Flags |= VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES;
+      header->Reserved[0] = static_cast<uint32_t>(import_offset);
+      header->Reserved[1] = import_count;
+      header->Reserved[2] = VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION;
+      memcpy(packet + import_offset, imports, static_cast<size_t>(import_size));
+   }
 
    VIOGPU_WDDM_ALLOCATION_REFERENCE *wire_references =
       reinterpret_cast<VIOGPU_WDDM_ALLOCATION_REFERENCE *>(packet + sizeof(*header));
@@ -2087,6 +2125,17 @@ tu_wddm_context_render(struct tu_wddm_context *context,
    return NT_SUCCESS(status) && replacements_valid;
 }
 
+bool
+tu_wddm_context_render(struct tu_wddm_context *context,
+                       const void *command_stream, uint32_t command_stream_size,
+                       const struct tu_wddm_render_reference *references,
+                       uint32_t reference_count)
+{
+   return tu_wddm_context_render_imports(context, command_stream,
+                                         command_stream_size, references,
+                                         reference_count, NULL, 0);
+}
+
 #ifdef TU_HAS_WDDM
 
 /* The WDDM path deliberately starts with one context and one engine.  These
@@ -2162,6 +2211,7 @@ struct tu_wddm_submit_scratch {
 struct tu_wddm_submit {
    struct util_dynarray entries;
    struct util_dynarray references;
+   struct util_dynarray imports;
    uint16_t reference_index[TU_WDDM_SUBMIT_REFERENCE_INDEX_SIZE];
    bool failed;
 };
@@ -3238,6 +3288,8 @@ tu_wddm_bo_init_shared_locked(struct tu_device *dev, struct tu_bo **out_bo,
                 (unsigned long long)import.Size);
    }
 
+   allocation->imported_size = import.Size;
+   allocation->private_info.ExpectedResetGeneration = dev->wddm_context.info.ResetGeneration;
    bo->name = tu_debug_bos_add(dev, size, "imported");
    *out_bo = bo;
    return VK_SUCCESS;
@@ -3494,10 +3546,44 @@ tu_wddm_submit_add_reference(struct tu_device *device,
       return false;
    }
 
-   /* An imported BO has no KMT handle to list; the host reaches it through
-    * this context's binding and its owner keeps the pages resident. */
-   if (bo->wddm_allocation->imported)
+   /* Imports have no VidMm allocation handle. Their authenticated private
+    * references acquire per-buffer access and retire with this GPU submit. */
+   if (bo->wddm_allocation->imported) {
+      const struct tu_wddm_allocation *allocation = bo->wddm_allocation;
+      if (!allocation->share_key || !allocation->imported_size ||
+          allocation->private_info.ExpectedResetGeneration != device->wddm_context.info.ResetGeneration) {
+         submit->failed = true;
+         return false;
+      }
+      util_dynarray_foreach(&submit->imports, VIOGPU_WDDM_IMPORTED_REFERENCE, ref) {
+         if (ref->ShareKey == allocation->share_key) {
+            if (ref->Iova != bo->iova || ref->Size != allocation->imported_size) {
+               submit->failed = true;
+               return false;
+            }
+            ref->Access |= access;
+            return true;
+         }
+         if (ref->Iova == bo->iova) {
+            submit->failed = true;
+            return false;
+         }
+      }
+      if (util_dynarray_num_elements(&submit->imports, VIOGPU_WDDM_IMPORTED_REFERENCE) >=
+          VIOGPU_WDDM_MAX_IMPORTED_REFERENCES) {
+         submit->failed = true;
+         return false;
+      }
+      VIOGPU_WDDM_IMPORTED_REFERENCE *ref = (VIOGPU_WDDM_IMPORTED_REFERENCE *)
+         util_dynarray_grow(&submit->imports, VIOGPU_WDDM_IMPORTED_REFERENCE, 1);
+      if (!ref) {
+         submit->failed = true;
+         return false;
+      }
+      *ref = { allocation->share_key, bo->iova, allocation->imported_size,
+               device->wddm_context.info.ResetGeneration, access, 0 };
       return true;
+   }
 
    uint32_t index_slot = UINT32_MAX;
    const int existing_index =
@@ -3543,6 +3629,7 @@ tu_wddm_submit_create(struct tu_device *device)
       return NULL;
    util_dynarray_init(&submit->entries, NULL);
    util_dynarray_init(&submit->references, NULL);
+   util_dynarray_init(&submit->imports, NULL);
    return submit;
 }
 
@@ -3554,6 +3641,7 @@ tu_wddm_submit_finish(struct tu_device *device, void *_submit)
       return;
    util_dynarray_fini(&submit->entries);
    util_dynarray_fini(&submit->references);
+   util_dynarray_fini(&submit->imports);
    vk_free(&device->vk.alloc, submit);
 }
 
@@ -3639,7 +3727,7 @@ tu_wddm_submit_add_live_bos(struct tu_device *device,
    mtx_lock(&device->bo_mutex);
    for (uint32_t i = 0; i < device->wddm_bo_count && !submit->failed; i++) {
       struct tu_bo *bo = device->wddm_bos[i];
-      if (!tu_wddm_bo_valid_for_device(device, bo))
+      if (!tu_wddm_bo_valid_for_device(device, bo) || bo->wddm_allocation->imported)
          continue;
       const uint32_t access = bo->gpu_read_only
                                  ? TU_SUBMIT_BO_ACCESS_READ
@@ -3778,9 +3866,11 @@ tu_wddm_submit_render(struct tu_queue *queue, struct tu_wddm_submit *submit,
              sizeof(command));
    }
 
-   bool rendered = tu_wddm_context_render(&device->wddm_context, packet,
+   bool rendered = tu_wddm_context_render_imports(&device->wddm_context, packet,
                                           packet_size, render_refs,
-                                          reference_count);
+                                          reference_count,
+                                          (const VIOGPU_WDDM_IMPORTED_REFERENCE *)submit->imports.data,
+                                          util_dynarray_num_elements(&submit->imports, VIOGPU_WDDM_IMPORTED_REFERENCE));
    return rendered ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
 }
 

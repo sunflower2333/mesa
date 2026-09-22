@@ -149,6 +149,7 @@ struct tu_wddm_allocation {
    bool aliased;
    /* Nonzero once exported, or the key an imported allocation came from. */
    uint64_t share_key;
+   uint64_t imported_size;
 };
 
 struct tu_wddm_render_reference {
@@ -267,6 +268,14 @@ bool tu_wddm_context_render(struct tu_wddm_context *context,
                             uint32_t command_stream_size,
                             const struct tu_wddm_render_reference *references,
                             uint32_t reference_count);
+
+bool tu_wddm_context_render_imports(struct tu_wddm_context *context,
+                                    const void *command_stream,
+                                    uint32_t command_stream_size,
+                                    const struct tu_wddm_render_reference *references,
+                                    uint32_t reference_count,
+                                    const VIOGPU_WDDM_IMPORTED_REFERENCE *imports,
+                                    uint32_t import_count);
 
 #ifdef __cplusplus
 }

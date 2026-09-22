@@ -209,7 +209,7 @@ is_kgsl(struct tu_instance *instance)
    return strcmp(instance->knl->name, "kgsl") == 0;
 }
 
-static bool
+bool
 is_wddm(struct tu_instance *instance)
 {
 #ifdef TU_HAS_WDDM
@@ -394,7 +394,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
-      .EXT_descriptor_buffer = true,
+      .EXT_descriptor_buffer = !is_wddm(device->instance),
       .EXT_descriptor_indexing = true,
       .EXT_device_address_binding_report = true,
       .EXT_device_memory_report = true,
@@ -780,10 +780,12 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->depthClipEnable = true;
 
    /* VK_EXT_descriptor_buffer */
-   features->descriptorBuffer = true;
-   features->descriptorBufferCaptureReplay = pdevice->has_set_iova;
-   features->descriptorBufferImageLayoutIgnored = true;
-   features->descriptorBufferPushDescriptors = true;
+   /* Raw descriptor addresses do not carry imported image provenance. */
+   features->descriptorBuffer = !is_wddm(pdevice->instance);
+   features->descriptorBufferCaptureReplay =
+      !is_wddm(pdevice->instance) && pdevice->has_set_iova;
+   features->descriptorBufferImageLayoutIgnored = !is_wddm(pdevice->instance);
+   features->descriptorBufferPushDescriptors = !is_wddm(pdevice->instance);
 
    /* VK_EXT_device_address_binding_report */
    features->reportAddressBinding = true;

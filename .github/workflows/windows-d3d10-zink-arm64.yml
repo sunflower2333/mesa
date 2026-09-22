@@ -31,6 +31,8 @@ jobs:
           python3 src/gallium/frontends/d3d10umd/shared_finish_test.py
           python3 src/gallium/frontends/d3d10umd/native_host_surface_test.py
           python3 src/gallium/frontends/d3d10umd/native_rotation_test.py
+          python3 src/freedreno/vulkan/tests/tu_wddm_image_access_test.py --sanitize
+          python3 src/freedreno/vulkan/tests/tu_wddm_import_lifetime_test.py
           python3 src/gallium/frontends/d3d10umd/runtime_context_test.py
           python3 src/gallium/frontends/d3d10umd/device_loss_test.py
 

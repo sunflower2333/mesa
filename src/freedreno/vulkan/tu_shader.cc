@@ -520,13 +520,57 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
    return true;
 }
 
+static void
+tu_shader_record_image_use(struct tu_shader *shader, nir_deref_instr *deref,
+                            unsigned set,
+                            const struct tu_descriptor_set_binding_layout *binding,
+                            uint32_t access)
+{
+#ifdef TU_HAS_WDDM
+   if (!access || binding->type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+       binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+       binding->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
+      return;
+
+   struct tu_wddm_shader_image_use use = {
+      set, binding->offset, binding->array_size, binding->size, access,
+   };
+   if (deref->deref_type == nir_deref_type_var) {
+      use.count = 1;
+   } else if (deref->deref_type == nir_deref_type_array &&
+              nir_src_is_const(deref->arr.index)) {
+      const uint32_t index = nir_src_as_uint(deref->arr.index);
+      if (index >= binding->array_size)
+         return;
+      use.offset += index * binding->size;
+      use.count = 1;
+   }
+   util_dynarray_foreach(&shader->wddm_image_uses,
+                         struct tu_wddm_shader_image_use, old) {
+      if (old->set == use.set && old->offset == use.offset &&
+          old->count == use.count && old->stride == use.stride) {
+         old->access |= access;
+         return;
+      }
+   }
+   struct tu_wddm_shader_image_use *out =
+      (struct tu_wddm_shader_image_use *) util_dynarray_grow(
+         &shader->wddm_image_uses, struct tu_wddm_shader_image_use, 1);
+   if (out)
+      *out = use;
+   else
+      shader->wddm_image_uses_failed = true;
+#endif
+}
+
 static nir_def *
 build_bindless(struct tu_device *dev, nir_builder *b,
                nir_deref_instr *deref, unsigned combined_descriptor_offset,
                struct tu_shader *shader,
                const struct tu_pipeline_layout *layout,
                uint32_t read_only_input_attachments,
-               bool dynamic_renderpass)
+               bool dynamic_renderpass,
+               uint32_t image_access = TU_SUBMIT_BO_ACCESS_READ)
 {
    nir_variable *var = nir_deref_instr_get_variable(deref);
 
@@ -534,6 +578,9 @@ build_bindless(struct tu_device *dev, nir_builder *b,
    unsigned binding = var->data.binding;
    const struct tu_descriptor_set_binding_layout *bind_layout =
       &layout->set[set].layout->binding[binding];
+
+   if (combined_descriptor_offset != 1)
+      tu_shader_record_image_use(shader, deref, set, bind_layout, image_access);
 
    /* input attachments use non bindless workaround */
    if (bind_layout->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT &&
@@ -683,7 +730,23 @@ lower_image_deref(struct tu_device *dev, nir_builder *b,
                   const struct tu_pipeline_layout *layout)
 {
    nir_deref_instr *deref = nir_src_as_deref(instr->src[0]);
-   nir_def *bindless = build_bindless(dev, b, deref, 0, shader, layout, 0, false);
+   uint32_t access = TU_SUBMIT_BO_ACCESS_READ;
+   switch (instr->intrinsic) {
+   case nir_intrinsic_image_deref_store:
+      access = TU_SUBMIT_BO_ACCESS_WRITE;
+      break;
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+      access |= TU_SUBMIT_BO_ACCESS_WRITE;
+      break;
+   case nir_intrinsic_image_deref_size:
+   case nir_intrinsic_image_deref_samples:
+      access = 0;
+      break;
+   default:
+      break;
+   }
+   nir_def *bindless = build_bindless(dev, b, deref, 0, shader, layout, 0, false, access);
    nir_rewrite_image_intrinsic(instr, bindless,
                                nir_image_intrinsic_type_bindless);
 
@@ -3123,6 +3186,14 @@ tu_shader_serialize(struct vk_pipeline_cache_object *object,
    blob_write_uint32(blob, shader->view_mask);
    blob_write_uint8(blob, shader->active_desc_sets);
    blob_write_uint8(blob, shader->per_layer_viewport);
+#ifdef TU_HAS_WDDM
+   if (shader->wddm_image_uses_failed)
+      return false;
+   blob_write_uint32(blob, 0x57494131); /* WIA1 provenance format */
+   blob_write_uint32(blob, shader->wddm_image_uses.size);
+   blob_write_bytes(blob, shader->wddm_image_uses.data,
+                    shader->wddm_image_uses.size);
+#endif
 
    ir3_store_variant(blob, shader->variant);
 
@@ -3169,6 +3240,20 @@ tu_shader_deserialize(struct vk_pipeline_cache *cache,
    shader->view_mask = blob_read_uint32(blob);
    shader->active_desc_sets = blob_read_uint8(blob);
    shader->per_layer_viewport = blob_read_uint8(blob);
+#ifdef TU_HAS_WDDM
+   const uint32_t provenance_version = blob_read_uint32(blob);
+   const uint32_t provenance_size = blob_read_uint32(blob);
+   const void *provenance = blob_read_bytes(blob, provenance_size);
+   if (provenance_version != 0x57494131 || blob->overrun ||
+       provenance_size % sizeof(struct tu_wddm_shader_image_use) != 0 ||
+       (provenance_size && !util_dynarray_resize_bytes(
+          &shader->wddm_image_uses, 1, provenance_size))) {
+      vk_free(&dev->vk.alloc, shader);
+      return NULL;
+   }
+   if (provenance_size)
+      memcpy(shader->wddm_image_uses.data, provenance, provenance_size);
+#endif
 
    shader->variant = ir3_retrieve_variant(blob, dev->compiler, NULL);
 
@@ -3189,6 +3274,9 @@ tu_shader_deserialize(struct vk_pipeline_cache *cache,
 
    VkResult result = tu_upload_shader(dev, shader);
    if (result != VK_SUCCESS) {
+#ifdef TU_HAS_WDDM
+      util_dynarray_fini(&shader->wddm_image_uses);
+#endif
       vk_free(&dev->vk.alloc, shader);
       return NULL;
    }
@@ -3515,6 +3603,9 @@ tu_shader_create(struct tu_device *dev,
 
    VkResult result = tu_upload_shader(dev, shader);
    if (result != VK_SUCCESS) {
+#ifdef TU_HAS_WDDM
+      util_dynarray_fini(&shader->wddm_image_uses);
+#endif
       vk_free(&dev->vk.alloc, shader);
       return result;
    }
@@ -3922,6 +4013,9 @@ void
 tu_shader_destroy(struct tu_device *dev,
                   struct tu_shader *shader)
 {
+#ifdef TU_HAS_WDDM
+   util_dynarray_fini(&shader->wddm_image_uses);
+#endif
    tu_cs_finish(&shader->cs);
    TU_RMV(resource_destroy, dev, &shader->bo);
 

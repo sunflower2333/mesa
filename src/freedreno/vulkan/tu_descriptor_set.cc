@@ -41,6 +41,69 @@ pool_base(struct tu_descriptor_pool *pool)
    return pool->host_bo ?: (uint8_t *) pool->bo->map;
 }
 
+static void
+tu_descriptor_image_write(const struct tu_device *device,
+                           struct tu_descriptor_set *set, uint32_t *ptr,
+                           VkDescriptorType type,
+                           const VkDescriptorImageInfo *info, uint32_t index = 0)
+{
+#ifdef TU_HAS_WDDM
+   if (vk_descriptor_type_is_dynamic(type))
+      return;
+   /* Different UPDATE_AFTER_BIND elements may be updated concurrently.
+    * Serialize the CPU provenance container, including submit snapshots. */
+   mtx_lock((mtx_t *) &device->bo_mutex);
+   struct tu_bo *bo = NULL;
+   switch (type) {
+   case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+   case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+   case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+   case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+   case VK_DESCRIPTOR_TYPE_SAMPLE_WEIGHT_IMAGE_QCOM:
+   case VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM:
+      if (info && info[index].imageView) {
+         VK_FROM_HANDLE(tu_image_view, view, info[index].imageView);
+         if (!(view->image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
+             view->image->mem)
+            bo = view->image->mem->bo;
+      }
+      break;
+   default:
+      break;
+   }
+   if (!tu_wddm_set_descriptor_image(&set->wddm_images,
+                                      (ptr - set->mapped_ptr) * 4, bo))
+      set->wddm_images_failed = true;
+   mtx_unlock((mtx_t *) &device->bo_mutex);
+#endif
+}
+
+static void
+tu_descriptor_image_copy(const struct tu_device *device,
+                          struct tu_descriptor_set *dst, uint32_t *dst_ptr,
+                          const struct tu_descriptor_set *src,
+                          const uint32_t *src_ptr, VkDescriptorType type)
+{
+#ifdef TU_HAS_WDDM
+   if (vk_descriptor_type_is_dynamic(type))
+      return;
+   mtx_lock((mtx_t *) &device->bo_mutex);
+   struct tu_bo *bo = NULL;
+   const uint32_t offset = (src_ptr - src->mapped_ptr) * 4;
+   util_dynarray_foreach(&src->wddm_images, struct tu_wddm_descriptor_image, image) {
+      if (image->offset == offset) {
+         bo = image->bo;
+         break;
+      }
+   }
+   dst->wddm_images_failed |= src->wddm_images_failed;
+   if (!tu_wddm_set_descriptor_image(&dst->wddm_images,
+                                      (dst_ptr - dst->mapped_ptr) * 4, bo))
+      dst->wddm_images_failed = true;
+   mtx_unlock((mtx_t *) &device->bo_mutex);
+#endif
+}
+
 static uint32_t
 descriptor_size(struct tu_device *dev,
                 const VkDescriptorSetLayoutBinding *binding,
@@ -850,6 +913,9 @@ tu_destroy_descriptor_pool_entries(struct tu_device *device,
 {
    list_for_each_entry_safe (struct tu_descriptor_set, set, &pool->desc_sets,
                              pool_link) {
+#ifdef TU_HAS_WDDM
+      util_dynarray_fini(&set->wddm_images);
+#endif
       vk_descriptor_set_layout_unref(&device->vk, &set->layout->vk);
       if (!pool->host_memory_base)
          tu_descriptor_set_destroy(device, pool, set);
@@ -965,6 +1031,9 @@ tu_FreeDescriptorSets(VkDevice _device,
       VK_FROM_HANDLE(tu_descriptor_set, set, pDescriptorSets[i]);
 
       if (set) {
+#ifdef TU_HAS_WDDM
+         util_dynarray_fini(&set->wddm_images);
+#endif
          vk_descriptor_set_layout_unref(&device->vk, &set->layout->vk);
          list_del(&set->pool_link);
       }
@@ -1425,6 +1494,8 @@ tu_update_descriptor_sets(const struct tu_device *device,
 
       ptr += binding_layout->size / 4 * writeset->dstArrayElement;
       for (j = 0; j < writeset->descriptorCount; ++j) {
+         tu_descriptor_image_write(device, set, ptr, writeset->descriptorType,
+                                    writeset->pImageInfo, j);
          switch(writeset->descriptorType) {
          case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
          case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
@@ -1559,6 +1630,8 @@ tu_update_descriptor_sets(const struct tu_device *device,
       uint32_t copy_size = MIN2(src_binding_layout->size, dst_binding_layout->size);
 
       for (j = 0; j < copyset->descriptorCount; ++j) {
+         tu_descriptor_image_copy(device, dst_set, dst_ptr, src_set, src_ptr,
+                                   src_binding_layout->type);
          memcpy(dst_ptr, src_ptr, copy_size);
 
          src_ptr += src_binding_layout->size / 4;
@@ -1770,6 +1843,8 @@ tu_update_descriptor_set_with_template(
       ptr += templ->entry[i].dst_offset;
       unsigned dst_offset = templ->entry[i].dst_offset;
       for (unsigned j = 0; j < templ->entry[i].descriptor_count; ++j) {
+         tu_descriptor_image_write(device, set, ptr, templ->entry[i].descriptor_type,
+                                    (const VkDescriptorImageInfo *) src);
          switch(templ->entry[i].descriptor_type) {
          case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: {
             assert(!(set->layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR));

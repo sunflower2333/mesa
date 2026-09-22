@@ -7,6 +7,7 @@
 #define TU_DESCRIPTOR_SET_H
 
 #include "tu_common.h"
+#include "tu_wddm_access.h"
 
 #include "util/vma.h"
 #include "vk_descriptor_set_layout.h"
@@ -137,6 +138,10 @@ struct tu_descriptor_set
    uint32_t host_size;
 
    uint32_t *dynamic_descriptors;
+#ifdef TU_HAS_WDDM
+   struct util_dynarray wddm_images;
+   bool wddm_images_failed;
+#endif
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_descriptor_set, base, VkDescriptorSet,
                                VK_OBJECT_TYPE_DESCRIPTOR_SET)

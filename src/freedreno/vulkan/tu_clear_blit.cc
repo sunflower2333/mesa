@@ -2501,6 +2501,9 @@ tu_CmdBlitImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_image, src_image, pBlitImageInfo->srcImage);
    VK_FROM_HANDLE(tu_image, dst_image, pBlitImageInfo->dstImage);
 
+   tu_cmd_use_image(cmd, src_image, TU_SUBMIT_BO_ACCESS_READ);
+   tu_cmd_use_image(cmd, dst_image, TU_SUBMIT_BO_ACCESS_WRITE);
+
    for (uint32_t i = 0; i < pBlitImageInfo->regionCount; ++i) {
       /* can't blit both depth and stencil at once with D32_S8
        * TODO: more advanced 3D blit path to support it instead?
@@ -2672,6 +2675,8 @@ tu_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(tu_image, dst_image, pCopyBufferToImageInfo->dstImage);
    VK_FROM_HANDLE(tu_buffer, src_buffer, pCopyBufferToImageInfo->srcBuffer);
+
+   tu_cmd_use_image(cmd, dst_image, TU_SUBMIT_BO_ACCESS_WRITE);
 
    trace_start_copy_buffer_to_image(&cmd->trace, &cmd->cs, cmd, dst_image->vk.format);
 
@@ -2879,6 +2884,8 @@ tu_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(tu_image, src_image, pCopyImageToBufferInfo->srcImage);
    VK_FROM_HANDLE(tu_buffer, dst_buffer, pCopyImageToBufferInfo->dstBuffer);
+
+   tu_cmd_use_image(cmd, src_image, TU_SUBMIT_BO_ACCESS_READ);
 
    trace_start_copy_image_to_buffer(&cmd->trace, &cmd->cs, cmd, src_image->vk.format);
 
@@ -3242,6 +3249,9 @@ tu_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(tu_image, src_image, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(tu_image, dst_image, pCopyImageInfo->dstImage);
+
+   tu_cmd_use_image(cmd, src_image, TU_SUBMIT_BO_ACCESS_READ);
+   tu_cmd_use_image(cmd, dst_image, TU_SUBMIT_BO_ACCESS_WRITE);
 
    trace_start_copy_image(&cmd->trace, &cmd->cs, cmd, src_image->vk.format,
                           dst_image->vk.format);
@@ -3677,6 +3687,8 @@ tu_CmdResolveImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(tu_image, src_image, pResolveImageInfo->srcImage);
    VK_FROM_HANDLE(tu_image, dst_image, pResolveImageInfo->dstImage);
+   tu_cmd_use_image(cmd, src_image, TU_SUBMIT_BO_ACCESS_READ);
+   tu_cmd_use_image(cmd, dst_image, TU_SUBMIT_BO_ACCESS_WRITE);
    const struct blit_ops *ops = &r2d_ops<CHIP>;
    struct tu_cs *cs = &cmd->cs;
 
@@ -4040,6 +4052,8 @@ tu_CmdClearColorImage(VkCommandBuffer commandBuffer,
 
    trace_start_clear_color_image(&cmd->trace, &cmd->cs, cmd, image->vk.format);
 
+   tu_cmd_use_image(cmd, image, TU_SUBMIT_BO_ACCESS_WRITE);
+
    bool use_generic_clear = use_generic_clear_for_image_clear(cmd, image);
    if (use_generic_clear) {
       /* Generic clear doesn't go through CCU (or other caches). */
@@ -4082,6 +4096,8 @@ tu_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer,
 
    trace_start_clear_depth_stencil_image(&cmd->trace, &cmd->cs, cmd,
                                          image->vk.format);
+
+   tu_cmd_use_image(cmd, image, TU_SUBMIT_BO_ACCESS_WRITE);
 
    bool use_generic_clear = use_generic_clear_for_image_clear(cmd, image);
    if (use_generic_clear) {

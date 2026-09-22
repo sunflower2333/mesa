@@ -443,7 +443,8 @@ struct session {
    }
 
    /* One native submit whose BO table names every allocation given. */
-   bool render(const std::vector<tu_wddm_allocation *> &allocations)
+   bool render(const std::vector<tu_wddm_allocation *> &allocations,
+               const std::vector<VIOGPU_WDDM_IMPORTED_REFERENCE> &imports = {})
    {
       const uint32_t count = static_cast<uint32_t>(allocations.size());
       std::vector<uint8_t> packet(sizeof(tu_wddm_msm_submit_request) + count * sizeof(tu_wddm_msm_submit_bo) +
@@ -469,12 +470,49 @@ struct session {
       }
       tu_wddm_msm_submit_command command = {TU_WDDM_MSM_SUBMIT_CMD_BUF, 0, 0, 4, 0, 0, 0};
       memcpy(packet.data() + sizeof(request) + count * sizeof(tu_wddm_msm_submit_bo), &command, sizeof(command));
+      if (!imports.empty())
+         return tu_wddm_context_render_imports(
+            &context, packet.data(), static_cast<uint32_t>(packet.size()),
+            references.data(), count, imports.data(), static_cast<uint32_t>(imports.size()));
       return tu_wddm_context_render(&context, packet.data(), static_cast<uint32_t>(packet.size()),
                                     references.data(), count);
    }
 };
 
 /* ---------------------------------- scenarios -------------------------------- */
+static void test_imported_packet_layout()
+{
+   session s(2000);
+   check(s.open(), "import packet: device open");
+   tu_wddm_allocation allocation = {};
+   check(s.allocate(&allocation, 0), "import packet: owned IB allocation");
+   VIOGPU_WDDM_IMPORTED_REFERENCE imported = {
+      123, s.context.info.VaStart + 65536, 8192,
+      s.context.info.ResetGeneration, VIOGPU_WDDM_REFERENCE_WRITE, 0,
+   };
+   check(s.render({&allocation}, {imported}), "import packet: production Render succeeds");
+   const auto *header = static_cast<const VIOGPU_WDDM_RENDER_COMMAND *>(s.context.command_buffer);
+   check(header->Flags == VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES,
+         "import packet: extension flag");
+   check(header->Reserved[0] == sizeof(*header) + sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) &&
+         header->Reserved[1] == 1 && header->Reserved[2] == 1 && header->Reserved[3] == 0,
+         "import packet: canonical extension layout");
+   check(header->CommandStreamOffset == header->Reserved[0] + sizeof(imported),
+         "import packet: commands follow imported references");
+   const auto *wire = reinterpret_cast<const VIOGPU_WDDM_IMPORTED_REFERENCE *>(
+      static_cast<const uint8_t *>(s.context.command_buffer) + header->Reserved[0]);
+   check(memcmp(wire, &imported, sizeof(imported)) == 0,
+         "import packet: exact share identity, size, epoch and access copied");
+   check(s.context.patch_location_list[0].PatchOffset == header->CommandStreamOffset +
+         sizeof(tu_wddm_msm_submit_request) + offsetof(tu_wddm_msm_submit_bo, presumed),
+         "import packet: owned patch location follows shifted commands");
+   check(!s.render({&allocation}, {imported, imported}), "import packet: aliases rejected");
+   imported.ResetGeneration++;
+   check(!s.render({&allocation}, {imported}), "import packet: stale epoch rejected");
+   check(tu_wddm_allocation_destroy(&allocation), "import packet: owned allocation cleanup");
+   check(tu_wddm_device_close(&s.device), "import packet: device cleanup");
+}
+
 static void test_wddm1_issues_no_residency_calls()
 {
    session s(1200);
@@ -772,6 +810,7 @@ int main()
 {
    (void)TU_WDDM_FENCE_HALF_RANGE; /* extracted with the MSM layout block */
    test_wddm1_issues_no_residency_calls();
+   test_imported_packet_layout();
    test_wddm2_residency_lifecycle();
    test_pending_waits_for_paging_fence();
    test_over_budget_is_bounded();

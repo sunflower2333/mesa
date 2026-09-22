@@ -411,6 +411,7 @@ struct test_fixture {
    NTSTATUS unlock_status;
    D3DKMT_HANDLE next_allocation_handle;
    uint32_t expected_allocation_count;
+   uint32_t expected_import_count;
    uint32_t next_command_buffer_size;
    uint32_t next_allocation_list_size;
    uint32_t next_patch_list_size;
@@ -683,13 +684,33 @@ check_render_packet(const D3DKMT_RENDER *render)
 
    const BYTE *packet = static_cast<const BYTE *>(fixture->context.command_buffer);
    const VIOGPU_WDDM_RENDER_COMMAND *header = reinterpret_cast<const VIOGPU_WDDM_RENDER_COMMAND *>(packet);
-   const uint32_t command_offset = sizeof(*header) + sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE);
+   const uint32_t import_offset = sizeof(*header) + sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE);
+   const uint32_t command_offset = import_offset + fixture->expected_import_count *
+      sizeof(VIOGPU_WDDM_IMPORTED_REFERENCE);
    CHECK(render->CommandLength == command_offset + sizeof(test_msm_submit_one_bo));
    CHECK(header->Header.Magic == VIOGPU_WDDM_ABI_MAGIC);
    CHECK(header->Header.Version == VIOGPU_WDDM_ABI_VERSION);
    CHECK(header->Header.Size == render->CommandLength);
    CHECK(header->Opcode == VIOGPU_WDDM_RENDER_NATIVE_SUBMIT);
-   CHECK(header->Flags == VIOGPU_WDDM_RENDER_FLAGS_NONE);
+   CHECK(header->Flags == (fixture->expected_import_count ?
+         VIOGPU_WDDM_RENDER_IMPORTED_REFERENCES : VIOGPU_WDDM_RENDER_FLAGS_NONE));
+   if (fixture->expected_import_count) {
+      CHECK(header->Reserved[0] == import_offset);
+      CHECK(header->Reserved[1] == fixture->expected_import_count);
+      CHECK(header->Reserved[2] == VIOGPU_WDDM_IMPORTED_REFERENCES_VERSION);
+      CHECK(header->Reserved[3] == 0);
+      const auto *imports = reinterpret_cast<const VIOGPU_WDDM_IMPORTED_REFERENCE *>(
+         packet + import_offset);
+      CHECK(imports[0].ShareKey == 123);
+      CHECK(imports[0].Iova == kVaStart + 65536);
+      CHECK(imports[0].Size == 8192);
+      CHECK(imports[0].ResetGeneration == kResetGeneration);
+      CHECK(imports[0].Access == VIOGPU_WDDM_REFERENCE_WRITE);
+      CHECK(imports[0].Reserved == 0);
+   } else {
+      for (unsigned i = 0; i < 4; i++)
+         CHECK(header->Reserved[i] == 0);
+   }
    CHECK(header->ExpectedResetGeneration == kResetGeneration);
    CHECK(header->AllocationReferencesOffset == sizeof(*header));
    CHECK(header->AllocationReferenceCount == 1);
@@ -1742,6 +1763,30 @@ test_render_rejects_inactive_device()
 }
 
 void
+test_imported_render()
+{
+   test_fixture fixture;
+   init_fixture(&fixture);
+   tu_wddm_allocation allocation = {};
+   if (!create_native_allocation(&fixture, &allocation))
+      return;
+   test_msm_submit_one_bo submit = valid_submit();
+   tu_wddm_render_reference reference = valid_reference(&allocation);
+   VIOGPU_WDDM_IMPORTED_REFERENCE imported = {
+      123, kVaStart + 65536, 8192, kResetGeneration, VIOGPU_WDDM_REFERENCE_WRITE, 0,
+   };
+   fixture.expected_import_count = 1;
+   CHECK(tu_wddm_context_render_imports(&fixture.context, &submit, sizeof(submit),
+                                        &reference, 1, &imported, 1));
+   CHECK(fixture.render_calls == 1);
+   CHECK(fixture.context.last_submitted_fence == submit.request.fence);
+   imported.ResetGeneration++;
+   CHECK(!tu_wddm_context_render_imports(&fixture.context, &submit, sizeof(submit),
+                                         &reference, 1, &imported, 1));
+   CHECK(fixture.render_calls == 1);
+}
+
+void
 test_submission_retirement_snapshot()
 {
    test_fixture fixture;
@@ -2253,6 +2298,7 @@ main()
    test_null_lock_data_is_rolled_back();
    test_null_lock_data_rollback_retains_owner();
    test_valid_render();
+   test_imported_render();
    test_render_rejects_inactive_device();
    test_submission_retirement_snapshot();
    test_duplicate_fence_rejected_before_render();

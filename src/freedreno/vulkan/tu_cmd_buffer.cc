@@ -4163,6 +4163,160 @@ static void tu_reset_render_pass(struct tu_cmd_buffer *cmd_buffer)
       u_trace_end_iterator(&cmd_buffer->rp_trace);
 }
 
+static void
+tu_cmd_use_bo(struct tu_cmd_buffer *cmd, struct tu_bo *bo, uint32_t access)
+{
+#ifdef TU_HAS_WDDM
+   if (bo && bo->wddm_allocation && bo->wddm_allocation->imported &&
+       !tu_wddm_record_image_use(&cmd->wddm_image_uses, bo, access))
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+#endif
+}
+
+void
+tu_cmd_use_image(struct tu_cmd_buffer *cmd, const struct tu_image *image,
+                  uint32_t access)
+{
+#ifdef TU_HAS_WDDM
+   if (image && !(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
+       image->mem)
+      tu_cmd_use_bo(cmd, image->mem->bo, access);
+#endif
+}
+
+static void
+tu_cmd_use_attachment(struct tu_cmd_buffer *cmd, uint32_t attachment,
+                        uint32_t access)
+{
+#ifdef TU_HAS_WDDM
+   if (attachment == VK_ATTACHMENT_UNUSED)
+      return;
+   const struct tu_image_view *view = cmd->state.attachments[attachment];
+   if (view)
+      tu_cmd_use_image(cmd, view->image, access);
+#endif
+}
+
+static void
+tu_cmd_use_renderpass(struct tu_cmd_buffer *cmd)
+{
+#ifdef TU_HAS_WDDM
+   const uint32_t read = TU_SUBMIT_BO_ACCESS_READ;
+   const uint32_t write = TU_SUBMIT_BO_ACCESS_WRITE;
+   const struct tu_render_pass *pass = cmd->state.pass;
+   for (unsigned s = 0; s < pass->subpass_count; s++) {
+      const struct tu_subpass *subpass = &pass->subpasses[s];
+      for (unsigned i = 0; i < subpass->color_count; i++)
+         tu_cmd_use_attachment(cmd, subpass->color_attachments[i].attachment, read | write);
+      for (unsigned i = 0; i < subpass->input_count; i++)
+         tu_cmd_use_attachment(cmd, subpass->input_attachments[i].attachment, read);
+      for (unsigned i = 0; i < subpass->resolve_count; i++)
+         tu_cmd_use_attachment(cmd, subpass->resolve_attachments[i].attachment, write);
+      for (unsigned i = 0; i < subpass->unresolve_count; i++)
+         tu_cmd_use_attachment(cmd, subpass->unresolve_attachments[i].attachment, read);
+      tu_cmd_use_attachment(cmd, subpass->depth_stencil_attachment.attachment, read | write);
+      tu_cmd_use_attachment(cmd, subpass->fsr_attachment, read);
+   }
+   tu_cmd_use_attachment(cmd, pass->fragment_density_map.attachment, read);
+#endif
+}
+
+static void
+tu_cmd_record_descriptor_use(struct tu_cmd_buffer *cmd,
+                              const struct tu_wddm_descriptor_use *use)
+{
+#ifdef TU_HAS_WDDM
+   util_dynarray_foreach(&cmd->wddm_descriptor_uses,
+                         struct tu_wddm_descriptor_use, old) {
+      if (old->set == use->set && old->range.offset == use->range.offset &&
+          old->range.count == use->range.count &&
+          old->range.stride == use->range.stride) {
+         old->range.access |= use->range.access;
+         return;
+      }
+   }
+   struct tu_wddm_descriptor_use *out =
+      (struct tu_wddm_descriptor_use *) util_dynarray_grow(
+         &cmd->wddm_descriptor_uses, struct tu_wddm_descriptor_use, 1);
+   if (out)
+      *out = *use;
+   else
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+#endif
+}
+
+static void
+tu_cmd_use_descriptors(struct tu_cmd_buffer *cmd, bool compute)
+{
+#ifdef TU_HAS_WDDM
+   struct tu_descriptor_state *state = tu_get_descriptors_state(
+      cmd, compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS);
+   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
+      if ((stage == MESA_SHADER_COMPUTE) != compute)
+         continue;
+      const struct tu_shader *shader = cmd->state.shaders[stage];
+      if (!shader)
+         continue;
+      if (shader->wddm_image_uses_failed)
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+      util_dynarray_foreach(&shader->wddm_image_uses,
+                            struct tu_wddm_shader_image_use, range) {
+         if (range->set >= MAX_SETS || !range->stride || !range->count ||
+             !range->access ||
+             (range->access & ~(TU_SUBMIT_BO_ACCESS_READ | TU_SUBMIT_BO_ACCESS_WRITE))) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+            continue;
+         }
+         struct tu_descriptor_set *set = state->sets[range->set];
+         if (!set)
+            continue;
+         if (set->layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) {
+            /* Push storage is rewritten by the next push. Capture each
+             * draw/dispatch's immutable image identities immediately. */
+            mtx_lock(&cmd->device->bo_mutex);
+            if (set->wddm_images_failed)
+               vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+            util_dynarray_foreach(&set->wddm_images,
+                                  struct tu_wddm_descriptor_image, image) {
+               if (tu_wddm_image_in_range(image->offset, range))
+                  tu_cmd_use_bo(cmd, image->bo, range->access);
+            }
+            mtx_unlock(&cmd->device->bo_mutex);
+         } else {
+            /* Resolve ordinary sets at submit, after legal updates made
+             * after recording/binding. Preserve every set used by a draw. */
+            struct tu_wddm_descriptor_use use = { set, *range };
+            tu_cmd_record_descriptor_use(cmd, &use);
+         }
+      }
+   }
+#endif
+}
+
+VkResult
+tu_cmd_submit_image_uses(struct tu_cmd_buffer *cmd, void *submit)
+{
+#ifdef TU_HAS_WDDM
+   util_dynarray_foreach(&cmd->wddm_image_uses, struct tu_wddm_image_use, use)
+      tu_submit_add_bos(cmd->device, submit, &use->bo, 1, use->access);
+   util_dynarray_foreach(&cmd->wddm_descriptor_uses,
+                         struct tu_wddm_descriptor_use, use) {
+      mtx_lock(&cmd->device->bo_mutex);
+      if (use->set->wddm_images_failed) {
+         mtx_unlock(&cmd->device->bo_mutex);
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      util_dynarray_foreach(&use->set->wddm_images,
+                            struct tu_wddm_descriptor_image, image) {
+         if (image->bo && tu_wddm_image_in_range(image->offset, &use->range))
+            tu_submit_add_bos(cmd->device, submit, &image->bo, 1, use->range.access);
+      }
+      mtx_unlock(&cmd->device->bo_mutex);
+   }
+#endif
+   return VK_SUCCESS;
+}
+
 static VkResult
 tu_create_cmd_buffer(struct vk_command_pool *pool,
                      VkCommandBufferLevel level,
@@ -4225,6 +4379,11 @@ tu_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
    struct tu_cmd_buffer *cmd_buffer =
       container_of(vk_cmd_buffer, struct tu_cmd_buffer, vk);
 
+#ifdef TU_HAS_WDDM
+   util_dynarray_fini(&cmd_buffer->wddm_image_uses);
+   util_dynarray_fini(&cmd_buffer->wddm_descriptor_uses);
+#endif
+
    tu_cs_finish(&cmd_buffer->cs);
    tu_cs_finish(&cmd_buffer->draw_cs);
    tu_cs_finish(&cmd_buffer->tile_store_cs);
@@ -4246,6 +4405,9 @@ tu_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
    cmd_buffer->autotune_ctx.~cmd_buf_ctx();
 
    for (unsigned i = 0; i < MAX_BIND_POINTS; i++) {
+#ifdef TU_HAS_WDDM
+      util_dynarray_fini(&cmd_buffer->descriptors[i].push_set.wddm_images);
+#endif
       if (cmd_buffer->descriptors[i].push_set.layout)
          vk_descriptor_set_layout_unref(&cmd_buffer->device->vk,
                                         &cmd_buffer->descriptors[i].push_set.layout->vk);
@@ -4301,6 +4463,11 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    struct tu_cmd_buffer *cmd_buffer =
       container_of(vk_cmd_buffer, struct tu_cmd_buffer, vk);
 
+#ifdef TU_HAS_WDDM
+   util_dynarray_clear(&cmd_buffer->wddm_image_uses);
+   util_dynarray_clear(&cmd_buffer->wddm_descriptor_uses);
+#endif
+
    VkResult status_check_result = VK_SUCCESS;
    if (TU_DEBUG_START(CHECK_CMD_BUFFER_STATUS))
       status_check_result = tu_cmd_buffer_status_check_idle(cmd_buffer);
@@ -4324,6 +4491,9 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 
    for (unsigned i = 0; i < MAX_BIND_POINTS; i++) {
       memset(&cmd_buffer->descriptors[i].sets, 0, sizeof(cmd_buffer->descriptors[i].sets));
+#ifdef TU_HAS_WDDM
+      util_dynarray_fini(&cmd_buffer->descriptors[i].push_set.wddm_images);
+#endif
       if (cmd_buffer->descriptors[i].push_set.layout) {
          vk_descriptor_set_layout_unref(&cmd_buffer->device->vk,
                                         &cmd_buffer->descriptors[i].push_set.layout->vk);
@@ -5081,6 +5251,10 @@ tu_push_descriptor_set_update_layout(struct tu_device *device,
       vk_descriptor_set_layout_unref(&device->vk, &set->layout->vk);
    vk_descriptor_set_layout_ref(&layout->vk);
    set->layout = layout;
+#ifdef TU_HAS_WDDM
+   util_dynarray_clear(&set->wddm_images);
+   set->wddm_images_failed = false;
+#endif
 
    if (set->host_size < layout->size) {
       void *new_buf =
@@ -6385,6 +6559,14 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
 
    for (uint32_t i = 0; i < commandBufferCount; i++) {
       VK_FROM_HANDLE(tu_cmd_buffer, secondary, pCmdBuffers[i]);
+#ifdef TU_HAS_WDDM
+      util_dynarray_foreach(&secondary->wddm_image_uses,
+                            struct tu_wddm_image_use, use)
+         tu_cmd_use_bo(cmd, use->bo, use->access);
+      util_dynarray_foreach(&secondary->wddm_descriptor_uses,
+                            struct tu_wddm_descriptor_use, use)
+         tu_cmd_record_descriptor_use(cmd, use);
+#endif
 
 #ifdef HAVE_PERFETTO
       /* Propagate viewport/scissor state so that we can emit the correct
@@ -7114,6 +7296,8 @@ tu_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
 
    tu_choose_gmem_layout(cmd);
 
+   tu_cmd_use_renderpass(cmd);
+
    /* Note: because this is external, any flushes will happen before draw_cs
     * gets called. However deferred flushes could have to happen later as part
     * of the subpass.
@@ -7274,6 +7458,8 @@ tu_CmdBeginRendering(VkCommandBuffer commandBuffer,
       vk_command_buffer_set_error(&cmd->vk, result);
       return;
    }
+
+   tu_cmd_use_renderpass(cmd);
 
    tu_choose_gmem_layout(cmd);
 
@@ -8435,6 +8621,8 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
    const struct tu_program_state *program = &cmd->state.program;
    struct tu_render_pass_state *rp = &cmd->state.rp;
 
+   tu_cmd_use_descriptors(cmd, false);
+
    trace_start_draw(
       &cmd->rp_trace, &cmd->draw_cs, cmd, draw_count,
       cmd->state.program.stage_blake3[MESA_SHADER_VERTEX],
@@ -9484,6 +9672,8 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
 
    struct tu_cs *cs = &cmd->cs;
    struct tu_shader *shader = cmd->state.shaders[MESA_SHADER_COMPUTE];
+
+   tu_cmd_use_descriptors(cmd, true);
 
    bool emit_instrlen_workaround =
       shader->variant->instrlen >

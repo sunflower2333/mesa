@@ -489,6 +489,12 @@ queue_submit_single(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       struct tu_cmd_buffer *cmd_buffer = cmd_buffers[i];
       struct tu_cs *cs = &cmd_buffer->cs;
 
+      result = tu_cmd_submit_image_uses(cmd_buffer, submit);
+      if (result != VK_SUCCESS) {
+         mtx_unlock(&device->submit_mutex);
+         goto out;
+      }
+
       if (perf_pass_index != ~0) {
          struct tu_cs_entry *perf_cs_entry =
             &cmd_buffer->device->perfcntrs_pass_cs_entries[perf_pass_index];
