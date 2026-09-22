@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   source-regressions:
@@ -73,8 +74,19 @@ jobs:
         with:
           arch: ${{ matrix.msvc }}
       - uses: actions/setup-python@v5
+        id: build_python
         with:
           python-version: '3.x'
+      - name: Cache Python build downloads
+        uses: actions/cache@v4
+        with:
+          path: '~\AppData\Local\pip\Cache'
+          key: pip-gl-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-${{ steps.build_python.outputs.python-version }}-meson-1.9.1-mako-packaging-pyyaml-ninja
+      - name: Cache checksum-pinned host shader compiler
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\glslang-downloads
+          key: glslang-windows-x64-16.6.0-82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b
       - name: Install build generators
         shell: pwsh
         run: |
@@ -85,19 +97,33 @@ jobs:
           $flex = Get-ChildItem C:\ProgramData\chocolatey\lib -Recurse -Filter win_flex.exe | Select-Object -First 1
           if (!$flex) { throw 'Missing win_flex.exe' }
           Add-Content $env:GITHUB_PATH $flex.DirectoryName
-          $shader = Get-Command glslangValidator.exe -ErrorAction SilentlyContinue
-          if (!$shader) {
-            $shader = Get-ChildItem C:\VulkanSDK -Filter glslangValidator.exe -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          # Headers and the loader are separate pinned checkouts. Only a host
+          # shader compiler is needed here; installing the full Vulkan SDK
+          # added minutes and could stall its unattended installer.
+          $version = '16.6.0'
+          $digest = '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b'
+          $cache = Join-Path $env:RUNNER_TEMP 'glslang-downloads'
+          New-Item -ItemType Directory -Force $cache | Out-Null
+          $archive = Join-Path $cache 'glslang-16.6.0-windows-x86_64-release.zip'
+          if (!(Test-Path -LiteralPath $archive)) {
+            $url = "https://github.com/KhronosGroup/glslang/releases/download/$version/glslang-$version-windows-x86_64-release.zip"
+            curl.exe --fail --location --retry 2 --connect-timeout 20 --max-time 120 --output $archive $url
+            if ($LASTEXITCODE) { throw 'Host shader compiler download failed' }
           }
-          if (!$shader) {
-            $version = '1.4.304.0'
-            $installer = Join-Path $env:RUNNER_TEMP vulkan-sdk.exe
-            Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
-            $proc = Start-Process $installer -ArgumentList '--am --al -c in' -Wait -PassThru
-            $shader = Get-Item "C:\VulkanSDK\$version\Bin\glslangValidator.exe" -ErrorAction SilentlyContinue
-            if (!$shader) { throw "Vulkan SDK installation failed: $($proc.ExitCode)" }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) {
+            throw 'Host shader compiler checksum mismatch'
           }
-          $shaderPath = if ($shader -is [System.IO.FileInfo]) { $shader.FullName } else { $shader.Source }
+          $directory = Join-Path $env:RUNNER_TEMP 'glslang-host'
+          Expand-Archive -LiteralPath $archive -DestinationPath $directory
+          $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslangValidator.exe)
+          if ($programs.Count -eq 0) {
+            $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslang.exe)
+            if ($programs.Count -ne 1) { throw 'Expected one host shader compiler' }
+            Copy-Item -LiteralPath $programs[0].FullName -Destination (Join-Path $programs[0].DirectoryName 'glslangValidator.exe')
+            $programs = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Filter glslangValidator.exe)
+          }
+          if ($programs.Count -ne 1) { throw 'Expected one glslangValidator.exe' }
+          $shaderPath = $programs[0].FullName
           & $shaderPath --version
           if ($LASTEXITCODE) { throw 'Host shader compiler execution failed' }
           Add-Content $env:GITHUB_PATH (Split-Path -Parent $shaderPath)
