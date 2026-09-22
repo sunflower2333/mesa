@@ -231,6 +231,10 @@ struct Resource
     * devices render through the same screen: nothing was imported. */
    bool zero_copy_local;
    UINT64 zero_copy_key;
+   /* Exact 128-byte VIOGPU_WDDM_NATIVE_SURFACE response. Kept opaque here so
+    * State.h does not acquire the Turnip private-ABI include dependency. */
+   uint8_t native_host_surface[128];
+   bool native_host_surface_live;
    // Only a CPU-visible allocation created by this device can be locked
    // directly. Opened handles and primaries use scheduled private staging.
    bool allocation_lockable;

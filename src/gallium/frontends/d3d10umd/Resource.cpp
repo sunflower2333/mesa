@@ -48,6 +48,75 @@
 #include "util/u_rect.h"
 #include "util/u_surface.h"
 
+#define DROIDVM_DRM_FOURCC(a, b, c, d) \
+   ((VIOGPU_WDDM_UINT32)(a) | ((VIOGPU_WDDM_UINT32)(b) << 8) | \
+    ((VIOGPU_WDDM_UINT32)(c) << 16) | ((VIOGPU_WDDM_UINT32)(d) << 24))
+#define DROIDVM_DRM_FORMAT_ARGB8888 DROIDVM_DRM_FOURCC('A', 'R', '2', '4')
+#define DROIDVM_DRM_FORMAT_ABGR8888 DROIDVM_DRM_FOURCC('A', 'B', '2', '4')
+#define DROIDVM_DRM_FORMAT_MOD_LINEAR UINT64_C(0)
+#define DROIDVM_NATIVE_SURFACE_LINEAR_ALIAS 1U
+
+static VIOGPU_WDDM_UINT32
+NativeSurfaceFourcc(DXGI_FORMAT format)
+{
+   switch (format) {
+   case DXGI_FORMAT_B8G8R8A8_UNORM:
+      return DROIDVM_DRM_FORMAT_ARGB8888;
+   case DXGI_FORMAT_R8G8B8A8_UNORM:
+      return DROIDVM_DRM_FORMAT_ABGR8888;
+   default:
+      return 0;
+   }
+}
+
+static PFND3DKMT_ESCAPE
+NativeSurfaceEscape(void)
+{
+   static PFND3DKMT_ESCAPE escape;
+   static bool resolved;
+   if (!resolved) {
+      resolved = true;
+      HMODULE gdi = LoadLibraryExW(L"gdi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+      if (gdi)
+         escape = (PFND3DKMT_ESCAPE)GetProcAddress(gdi, "D3DKMTEscape");
+   }
+   return escape;
+}
+
+static D3DKMT_HANDLE
+NativeSurfaceAdapter(void)
+{
+   static D3DKMT_HANDLE adapter;
+   static bool resolved;
+   if (resolved)
+      return adapter;
+   resolved = true;
+   HMODULE gdi = LoadLibraryExW(L"gdi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+   PFND3DKMT_OPENADAPTERFROMHDC open_adapter = gdi
+      ? (PFND3DKMT_OPENADAPTERFROMHDC)GetProcAddress(gdi, "D3DKMTOpenAdapterFromHdc") : NULL;
+   HDC hdc = open_adapter ? CreateDCW(L"DISPLAY", NULL, NULL, NULL) : NULL;
+   if (hdc) {
+      D3DKMT_OPENADAPTERFROMHDC open = {};
+      open.hDc = hdc;
+      if (NT_SUCCESS(open_adapter(&open)))
+         adapter = open.hAdapter;
+      DeleteDC(hdc);
+   }
+   return adapter;
+}
+
+static bool
+NativeSurfaceRequest(VIOGPU_WDDM_NATIVE_SURFACE *surface)
+{
+   D3DKMT_ESCAPE request = {};
+   request.hAdapter = NativeSurfaceAdapter();
+   request.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+   request.pPrivateDriverData = surface;
+   request.PrivateDriverDataSize = sizeof(*surface);
+   PFND3DKMT_ESCAPE escape = NativeSurfaceEscape();
+   return request.hAdapter && escape && NT_SUCCESS(escape(&request));
+}
+
 static VIOGPU_WDDM_UINT32
 SharedPrivateFormat(DXGI_FORMAT format)
 {
@@ -101,6 +170,19 @@ ZeroCopySharedSurfaces(void)
    LONG value = cached;
    if (value < 0) {
       value = ZeroCopyOptIn("VIOGPU_ZERO_COPY", "C:\\ProgramData\\DroidVM\\viogpu-zero-copy");
+      cached = value;
+   }
+   return value != 0;
+}
+
+static bool
+NativeHostSurfaceOptIn(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = ZeroCopyOptIn("VIOGPU_NATIVE_HOST_SURFACE",
+                            "C:\\ProgramData\\DroidVM\\viogpu-native-host-surface");
       cached = value;
    }
    return value != 0;
@@ -334,6 +416,88 @@ CreateZeroCopyTexture(struct pipe_context *pipe, const struct pipe_resource *tem
       memset(share, 0, sizeof *share);
    }
    return texture;
+}
+
+static void
+FreeNativeHostSurface(VIOGPU_WDDM_NATIVE_SURFACE *surface)
+{
+   if (!surface || surface->ShareKey == 0)
+      return;
+   surface->Opcode = VIOGPU_WDDM_ESCAPE_FREE_NATIVE_SURFACE;
+   surface->ExpectedResetGeneration = surface->ResetGeneration;
+   if (!NativeSurfaceRequest(surface))
+      DebugPrintf("native host surface free failed key=0x%llx resource=%u\n",
+                  (unsigned long long)surface->ShareKey, surface->ResourceId);
+}
+
+/* Allocate one host AHB, then import that exact allocation as the Turnip
+ * render target through the existing OPAQUE_WIN32_KMT/share-key path. */
+static struct pipe_resource *
+CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
+                               const struct pipe_resource *templat,
+                               VIOGPU_WDDM_UINT32 fourcc,
+                               VIOGPU_WDDM_NATIVE_SURFACE *surface)
+{
+   memset(surface, 0, sizeof(*surface));
+   surface->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   surface->Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   surface->Header.Size = sizeof(*surface);
+   surface->Opcode = VIOGPU_WDDM_ESCAPE_ALLOCATE_NATIVE_SURFACE;
+   surface->Width = templat->width0;
+   surface->Height = templat->height0;
+   surface->Fourcc = fourcc;
+   if (!fourcc || !NativeSurfaceRequest(surface))
+      return NULL;
+
+   const bool valid = surface->Header.Magic == VIOGPU_WDDM_ABI_MAGIC &&
+      surface->Header.Version == VIOGPU_WDDM_ABI_VERSION &&
+      surface->Header.Size == sizeof(*surface) && surface->Header.Reserved == 0 &&
+      surface->Opcode == VIOGPU_WDDM_ESCAPE_ALLOCATE_NATIVE_SURFACE &&
+      surface->Flags == 0 && surface->ShareKey != 0 && surface->ShareKey <= UINT32_MAX &&
+      surface->Size != 0 && surface->ResetGeneration != 0 &&
+      surface->Modifier == DROIDVM_DRM_FORMAT_MOD_LINEAR && surface->PlaneOffset == 0 &&
+      surface->ResourceId != 0 && surface->ContextId == 0 &&
+      surface->Width == templat->width0 && surface->Height == templat->height0 &&
+      surface->Fourcc == fourcc && surface->Stride >= templat->width0 * 4 &&
+      surface->PlaneCount == 1 &&
+      surface->LayoutFlags == DROIDVM_NATIVE_SURFACE_LINEAR_ALIAS &&
+      surface->Size >= (UINT64)surface->Stride * surface->Height &&
+      surface->Reserved[0] == 0 && surface->Reserved[1] == 0 && surface->Reserved[2] == 0;
+   if (!valid) {
+      FreeNativeHostSurface(surface);
+      memset(surface, 0, sizeof(*surface));
+      return NULL;
+   }
+
+   struct pipe_resource shared = *templat;
+   shared.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
+   struct winsys_handle handle = {};
+   handle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
+   handle.handle = (HANDLE)(ULONG_PTR)surface->ShareKey;
+   handle.stride = surface->Stride;
+   handle.offset = surface->PlaneOffset;
+   handle.modifier = surface->Modifier;
+   struct pipe_resource *texture = pipe->screen->resource_from_handle
+      ? pipe->screen->resource_from_handle(pipe->screen, &shared, &handle,
+                                           PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE)
+      : NULL;
+   if (!texture) {
+      FreeNativeHostSurface(surface);
+      memset(surface, 0, sizeof(*surface));
+   }
+   return texture;
+}
+
+static void
+ReleaseNativeHostSurface(Resource *resource)
+{
+   if (!resource->native_host_surface_live)
+      return;
+   VIOGPU_WDDM_NATIVE_SURFACE surface;
+   memcpy(&surface, resource->native_host_surface, sizeof(surface));
+   FreeNativeHostSurface(&surface);
+   memset(resource->native_host_surface, 0, sizeof(resource->native_host_surface));
+   resource->native_host_surface_live = false;
 }
 
 static struct pipe_resource *
@@ -1239,14 +1403,33 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
     * keeps receiving the pixels, which is what the kernel scans out. */
    VIOGPU_WDDM_RESOURCE_SHARE resourceShare;
    memset(&resourceShare, 0, sizeof resourceShare);
-   if (kernelBacked && ZeroCopySharedSurfaces())
+   VIOGPU_WDDM_NATIVE_SURFACE nativeSurface = {};
+   const bool nativeHostSurface = kernelBacked && NativeHostSurfaceOptIn();
+   if (nativeHostSurface) {
+      pResource->resource = CreateNativeHostSurfaceTexture(
+         pipe, &templat, NativeSurfaceFourcc(pCreateResource->Format), &nativeSurface);
+      if (!pResource->resource) {
+         DebugPrintf("%s: native host surface allocation/import failed\n", __func__);
+         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+         return;
+      }
+      memcpy(pResource->native_host_surface, &nativeSurface, sizeof(nativeSurface));
+      pResource->native_host_surface_live = true;
+      resourceShare.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+      resourceShare.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+      resourceShare.Header.Size = sizeof(resourceShare);
+      resourceShare.ShareKey = nativeSurface.ShareKey;
+      resourceShare.Stride = nativeSurface.Stride;
+   } else if (kernelBacked && ZeroCopySharedSurfaces()) {
       pResource->resource = CreateZeroCopyTexture(pipe, &templat, &resourceShare);
-   pResource->zero_copy_owner = pResource->resource != NULL;
+   }
+   pResource->zero_copy_owner = pResource->resource != NULL && !nativeHostSurface;
    /* The creator keeps publishing its pixels unless the second opt-in says
     * otherwise: an opener whose import fails still reads the allocation, and
     * the kernel scans a primary's allocation out. */
-   pResource->zero_copy = pResource->zero_copy_owner && ZeroCopyCreatorSkipsPublish() &&
-                          (!pResource->scanout_primary || ZeroCopyNativeScanout());
+   pResource->zero_copy = nativeHostSurface ||
+      (pResource->zero_copy_owner && ZeroCopyCreatorSkipsPublish() &&
+       (!pResource->scanout_primary || ZeroCopyNativeScanout()));
    pResource->zero_copy_key = resourceShare.ShareKey;
    if (pResource->zero_copy_owner)
       RegisterZeroCopyShare(screen, resourceShare.ShareKey, pResource->resource);
@@ -1264,6 +1447,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                                           sizeof *pResource->transfers);
    if (!pResource->transfers) {
       pipe_resource_reference(&pResource->resource, NULL);
+      ReleaseNativeHostSurface(pResource);
       SetError(hDevice, E_OUTOFMEMORY);
       return;
    }
@@ -1285,7 +1469,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       privateData.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
       privateData.Header.Version = VIOGPU_WDDM_ABI_VERSION;
       privateData.Header.Size = sizeof privateData;
-      privateData.Size = (VIOGPU_WDDM_UINT64)shared_pitch * shared_height;
+      const VIOGPU_WDDM_NATIVE_SURFACE *hostSurface = pResource->native_host_surface_live
+         ? &nativeSurface : NULL;
+      privateData.Size = hostSurface ? hostSurface->Size
+                                     : (VIOGPU_WDDM_UINT64)shared_pitch * shared_height;
       privateData.Alignment = 4096;
       privateData.Flags = VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE;
       if (pResource->scanout_primary) {
@@ -1300,7 +1487,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       privateData.Format = sharedFormat;
       privateData.Width = shared_width;
       privateData.Height = shared_height;
-      privateData.Pitch = shared_pitch;
+      privateData.Pitch = hostSurface ? hostSurface->Stride : shared_pitch;
 
       D3DDDI_ALLOCATIONINFO allocationInfo;
       memset(&allocationInfo, 0, sizeof allocationInfo);
@@ -1315,7 +1502,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       allocate.hResource = (HANDLE)(UINT_PTR)hRTResource.handle;
       allocate.NumAllocations = 1;
       allocate.pAllocationInfo = &allocationInfo;
-      if (pResource->zero_copy_owner) {
+      if (pResource->zero_copy_owner || pResource->native_host_surface_live) {
          /* The runtime returns resource private data to every OpenResource, so
           * the key travels with the resource whether or not this creator also
           * keeps publishing its pixels. */
@@ -1361,6 +1548,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          DebugPrintf("%s: shared allocation failed hr=0x%08lx\n",
                      __func__, (unsigned long)ahr);
          pipe_resource_reference(&pResource->resource, NULL);
+         ReleaseNativeHostSurface(pResource);
          free(pResource->transfers);
          pResource->transfers = NULL;
          SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
@@ -1375,14 +1563,16 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       HRESULT rhr = ResidencyAdmitCreatedAllocation(pDevice, pResource);
       if (FAILED(rhr)) {
          DebugPrintf("%s: residency failed hr=0x%08lx\n", __func__, (unsigned long)rhr);
+         ReleaseResourceAllocations(pDevice, pResource);
          pipe_resource_reference(&pResource->resource, NULL);
+         ReleaseNativeHostSurface(pResource);
          free(pResource->transfers);
          pResource->transfers = NULL;
          SetError(hDevice, rhr);
          return;
       }
       pResource->allocation_lockable = !pResource->scanout_primary;
-      pResource->shared_pitch = shared_pitch;
+      pResource->shared_pitch = privateData.Pitch;
       pResource->shared_next = pDevice->shared_resources;
       pDevice->shared_resources = pResource;
       /* Logged here rather than beside the allocate: the resource is fully
@@ -1582,7 +1772,8 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
 
    /* A zero-copy creator put its share key in the resource private data;
     * import that allocation with the same linear layout the creator used. */
-   if (ZeroCopySharedSurfaces() && pOpenResource->pPrivateDriverData &&
+   if ((ZeroCopySharedSurfaces() || NativeHostSurfaceOptIn()) &&
+       pOpenResource->pPrivateDriverData &&
        pOpenResource->PrivateDriverDataSize == sizeof(VIOGPU_WDDM_RESOURCE_SHARE)) {
       VIOGPU_WDDM_RESOURCE_SHARE share;
       memcpy(&share, pOpenResource->pPrivateDriverData, sizeof share);
@@ -1734,6 +1925,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    free(pResource->transfers);
 
    pipe_resource_reference(&pResource->resource, NULL);
+   ReleaseNativeHostSurface(pResource);
 }
 
 
