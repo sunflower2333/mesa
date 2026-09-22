@@ -188,7 +188,7 @@ int main() {
   shareOk=scenario!=1; importOk=scenario!=2;
   screen.resource_from_handle=scenario==3 ? nullptr : importTexture;
   pipe_resource *r=CreateNativeHostSurfaceTexture(&pipe,&t,scenario==4 ? 0 : 37,12,
-                                                 2,"create",good.Size,good.Stride);
+                                                 2,"create",good.Size,good.Stride,good.ShareKey);
   assert((r!=nullptr)==(scenario==0));
   assert(shareCalls==unsigned(scenario!=4));
   assert(closedHandles==unsigned(scenario==0 || scenario==2 || scenario==3));

@@ -496,6 +496,25 @@ AllocateNativeHostSurface(struct pipe_context *pipe,
       memset(surface, 0, sizeof(*surface));
       return false;
    }
+   static volatile LONG samples;
+   if (InterlockedIncrement(&samples) <= 64) {
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_native_share.log", FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[256];
+         int n = _snprintf_s(line, sizeof(line), _TRUNCATE,
+                            "pid=%lu role=allocate key=0x%llx host_resource=%u reset=%llu size=%llu stride=%u fourcc=0x%x %ux%u\r\n",
+                            GetCurrentProcessId(), (unsigned long long)surface->ShareKey,
+                            surface->ResourceId, (unsigned long long)surface->ResetGeneration,
+                            (unsigned long long)surface->Size, surface->Stride, surface->Fourcc,
+                            surface->Width, surface->Height);
+         DWORD written;
+         if (n > 0)
+            WriteFile(log, line, (DWORD)n, &written, NULL);
+         CloseHandle(log);
+      }
+   }
    return true;
 }
 
@@ -509,7 +528,7 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
                                const struct pipe_resource *templat,
                                D3DKMT_HANDLE resource, D3DKMT_HANDLE allocation,
                                unsigned miscFlags, const char *role,
-                               UINT64 size, unsigned stride)
+                               UINT64 size, unsigned stride, UINT64 shareKey)
 {
    static const NativeSurfaceDispatch dispatch;
    HANDLE ntHandle = NULL;
@@ -525,10 +544,11 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
       if (log != INVALID_HANDLE_VALUE) {
          char line[320];
          int n = _snprintf_s(line, sizeof(line), _TRUNCATE,
-                            "pid=%lu role=%s misc=0x%x resource=0x%x allocation=0x%x rights=0x%08lx status=0x%08lx handle=%p size=%llu stride=%u %ux%u\r\n",
+                            "pid=%lu role=%s misc=0x%x resource=0x%x allocation=0x%x rights=0x%08lx status=0x%08lx handle=%p size=%llu stride=%u %ux%u key=0x%llx\r\n",
                             GetCurrentProcessId(), role, miscFlags, resource, allocation,
                             (unsigned long)rights, (unsigned long)status, ntHandle,
-                            (unsigned long long)size, stride, templat->width0, templat->height0);
+                            (unsigned long long)size, stride, templat->width0, templat->height0,
+                            (unsigned long long)shareKey);
          DWORD written;
          if (n > 0)
             WriteFile(log, line, (DWORD)n, &written, NULL);
@@ -1663,7 +1683,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          pResource->resource = CreateNativeHostSurfaceTexture(
             pipe, &templat, pResource->hKMResource, pResource->hAllocation,
             pCreateResource->MiscFlags, pResource->scanout_primary ? "create-primary" : "create",
-            nativeSurface.Size, nativeSurface.Stride);
+            nativeSurface.Size, nativeSurface.Stride, nativeSurface.ShareKey);
          if (!pResource->resource)
             rhr = DXGI_DDI_ERR_UNSUPPORTED;
       }
@@ -1893,7 +1913,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
       if (validShare && nativeHostSurface) {
          pResource->resource = CreateNativeHostSurfaceTexture(
             pipe, &templat, pOpenResource->hKMResource.handle, openInfo->hAllocation,
-            0, "open", info.Size, share.Stride);
+            0, "open", info.Size, share.Stride, share.ShareKey);
          pResource->zero_copy = pResource->resource != NULL;
          pResource->zero_copy_key = share.ShareKey;
       }
