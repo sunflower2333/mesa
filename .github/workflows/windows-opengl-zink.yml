@@ -163,13 +163,13 @@ jobs:
           $clang = (Get-Command clang-cl.exe -ErrorAction Stop).Source
           $shimDir = Join-Path $env:RUNNER_TEMP 'sccache-clang-shim'
           New-Item -ItemType Directory -Force $shimDir | Out-Null
-          @('@echo off', ('sccache.exe "' + $clang + '" %*')) | Set-Content (Join-Path $shimDir 'clang-cl.cmd') -Encoding ascii
+          @('@echo off', ('sccache.exe "' + $clang + '" %*')) | Set-Content (Join-Path $shimDir 'sccache-clang-cl.cmd') -Encoding ascii
           $env:Path = "$shimDir;$env:Path"
           $cross = Join-Path $env:RUNNER_TEMP opengl-cross.ini
           @(
             '[binaries]'
-            "c = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
-            "cpp = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "c = ['sccache-clang-cl.cmd', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "cpp = ['sccache-clang-cl.cmd', '--target=${{ matrix.triple }}-pc-windows-msvc']"
             "ar = 'llvm-lib'"
             '[host_machine]'
             "system = 'windows'"
