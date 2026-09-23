@@ -73,11 +73,32 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc }}
+      - name: Identify generated Mesa build cache
+        id: mesa_build_identity
+        shell: pwsh
+        run: |
+          $clang = (Get-Command clang-cl.exe -ErrorAction Stop).Source
+          $clangHash = (Get-FileHash -LiteralPath $clang -Algorithm SHA256).Hash
+          $identity = "$clangHash|$env:VCToolsVersion|$env:WindowsSDKVersion|$env:ImageOS|meson-1.9.1|ninja"
+          $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+            [Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant()
+          "digest=$digest" >> $env:GITHUB_OUTPUT
+          Write-Host "Generated build cache toolchain identity: $digest"
       - name: Cache compiled Mesa objects
         uses: ./.github/actions/compiler-cache
         with:
           architecture: ${{ matrix.arch }}
           flavor: opengl
+      - name: Cache generated Mesa build trees
+        id: mesa_build_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            gl-build
+            loader-build
+          key: mesa-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-${{ steps.mesa_build_identity.outputs.digest }}-${{ github.sha }}
+          restore-keys: |
+            mesa-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-${{ steps.mesa_build_identity.outputs.digest }}-
       - uses: actions/setup-python@v5
         id: build_python
         with:
@@ -183,14 +204,41 @@ jobs:
             "c_link_args = ['/DEBUG']"
             "cpp_link_args = ['/DEBUG']"
           ) | Set-Content $cross -Encoding ascii
-          meson setup gl-build . --cross-file $cross --backend=ninja `
-            --buildtype=debugoptimized -Doptimization=3 -Db_ndebug=true `
-            -Dplatforms=windows -Dvulkan-drivers=freedreno -Dfreedreno-kmds=wddm `
-            -Dgallium-drivers=zink -Dopengl=true -Dgles1=enabled -Dgles2=enabled `
-            -Degl=enabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled `
-            -Dshader-cache=disabled -Dzlib=enabled -Dzlib:default_library=static -Dzstd=disabled `
-            -Dwindows-private-gl-arch='${{ matrix.arch }}' `
-            -Db_vscrt=static_from_buildtype '-Dtools=[]' -Dbuild-tests=false -Dwerror=false
+          $setupArgs = @('setup')
+          if (Test-Path -LiteralPath (Join-Path 'gl-build' 'meson-private/coredata.dat')) {
+            $setupArgs += '--reconfigure'
+          }
+          $setupArgs += @(
+            'gl-build'
+            '.'
+            '--cross-file'
+            $cross
+            '--backend=ninja'
+            '--buildtype=debugoptimized'
+            '-Doptimization=3'
+            '-Db_ndebug=true'
+            '-Dplatforms=windows'
+            '-Dvulkan-drivers=freedreno'
+            '-Dfreedreno-kmds=wddm'
+            '-Dgallium-drivers=zink'
+            '-Dopengl=true'
+            '-Dgles1=enabled'
+            '-Dgles2=enabled'
+            '-Degl=enabled'
+            '-Dglx=disabled'
+            '-Dgbm=disabled'
+            '-Dllvm=disabled'
+            '-Dshader-cache=disabled'
+            '-Dzlib=enabled'
+            '-Dzlib:default_library=static'
+            '-Dzstd=disabled'
+            "-Dwindows-private-gl-arch=${{ matrix.arch }}"
+            '-Db_vscrt=static_from_buildtype'
+            '-Dtools=[]'
+            '-Dbuild-tests=false'
+            '-Dwerror=false'
+          )
+          & meson @setupArgs
           if ($LASTEXITCODE) { throw 'OpenGL Meson configuration failed' }
           if (!(Select-String -LiteralPath gl-build/build.ninja -SimpleMatch -Pattern 'sccache.exe' -Quiet)) {
             throw 'Mesa source compile rules are not routed through sccache'
@@ -199,6 +247,11 @@ jobs:
           # requested platform list. A surfaceless default rejects every HWND.
           if (!(Select-String -LiteralPath gl-build/build.ninja -SimpleMatch -Pattern '_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_WINDOWS' -Quiet)) {
             throw 'EGL_DEFAULT_DISPLAY does not select the native Windows platform'
+          }
+          if ('${{ steps.mesa_build_cache.outputs.cache-hit }}' -eq 'true') {
+            $objects = @(Get-ChildItem -LiteralPath 'gl-build' -Recurse -File -Include '*.obj', '*.o' -ErrorAction SilentlyContinue)
+            if ($objects.Count -eq 0) { throw 'Generated Mesa cache hit contained no compiled objects' }
+            Write-Host "Generated Mesa cache restored $($objects.Count) compiled objects"
           }
           # Count only source compilations, excluding Meson configuration probes.
           sccache --zero-stats
@@ -216,9 +269,12 @@ jobs:
           $misses = [long](($stats.cache_misses.counts.Values | Measure-Object -Sum).Sum)
           Write-Host "Source compiler cache: $hits hits, $misses misses, $($stats.cache_writes) writes"
           if ($stats.requests_executed -le 0 -or ($hits + $misses) -le 0) {
-            throw 'sccache saw no cacheable source compilations'
+            if ('${{ steps.mesa_build_cache.outputs.cache-hit }}' -ne 'true') {
+              throw 'sccache saw no cacheable source compilations and no generated-tree cache restore'
+            }
+            Write-Host 'Generated build-tree cache supplied all source outputs for this build.'
           }
-          if ($hits -le 0 -and $stats.cache_writes -le 0) {
+          if ($hits -le 0 -and $stats.cache_writes -le 0 -and '${{ steps.mesa_build_cache.outputs.cache-hit }}' -ne 'true') {
             throw 'sccache neither restored nor stored any source compiler objects'
           }
       - name: Stage and validate complete candidate
@@ -226,6 +282,15 @@ jobs:
         run: |
           ./bin/stage-windows-opengl.ps1 -Architecture '${{ matrix.arch }}' -Build gl-build -LoaderBuild loader-build -Stage opengl-candidate
           if ($LASTEXITCODE) { throw 'Candidate validation failed' }
+      - name: Remove final binaries before generated-tree cache save
+        shell: pwsh
+        run: |
+          foreach ($tree in @('gl-build', 'loader-build')) {
+            if (Test-Path -LiteralPath $tree) {
+              Get-ChildItem -LiteralPath $tree -Recurse -File -Include '*.dll', '*.pdb', '*.lib', '*.exe' |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: opengl-zink-${{ matrix.arch }}-candidate
