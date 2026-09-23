@@ -532,9 +532,12 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
 {
    static const NativeSurfaceDispatch dispatch;
    HANDLE ntHandle = NULL;
+   OBJECT_ATTRIBUTES attributes = {};
+   attributes.Length = sizeof(attributes);
    const DWORD rights = SHARED_ALLOCATION_ALL_ACCESS;
-   const NTSTATUS status = dispatch.share && resource
-      ? dispatch.share(1, &resource, NULL, rights, &ntHandle)
+   const bool shareCalled = dispatch.share && resource;
+   const NTSTATUS status = shareCalled
+      ? dispatch.share(1, &resource, &attributes, rights, &ntHandle)
       : (NTSTATUS)0xc00000bb; /* STATUS_NOT_SUPPORTED */
    static volatile LONG samples;
    if (InterlockedIncrement(&samples) <= 64) {
@@ -542,10 +545,11 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
                                FILE_ATTRIBUTE_NORMAL, NULL);
       if (log != INVALID_HANDLE_VALUE) {
-         char line[320];
+         char line[384];
          int n = _snprintf_s(line, sizeof(line), _TRUNCATE,
-                            "pid=%lu role=%s misc=0x%x resource=0x%x allocation=0x%x rights=0x%08lx status=0x%08lx handle=%p size=%llu stride=%u %ux%u key=0x%llx\r\n",
+                            "pid=%lu role=%s misc=0x%x resource=0x%x allocation=0x%x share_available=%u share_called=%u rights=0x%08lx status=0x%08lx handle=%p size=%llu stride=%u %ux%u key=0x%llx\r\n",
                             GetCurrentProcessId(), role, miscFlags, resource, allocation,
+                            dispatch.share != NULL ? 1u : 0u, shareCalled ? 1u : 0u,
                             (unsigned long)rights, (unsigned long)status, ntHandle,
                             (unsigned long long)size, stride, templat->width0, templat->height0,
                             (unsigned long long)shareKey);
@@ -1627,30 +1631,43 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          allocate.PrivateDriverDataSize = sizeof resourceShare;
       }
 
+      const D3DDDICB_ALLOCATE allocateInput = allocate;
+      const D3DKMT_HANDLE allocationInput = allocationInfo.hAllocation;
       HRESULT ahr = pDevice->KTCallbacks.pfnAllocateCb(pDevice->hDevice, &allocate);
 
-      /* The miniport reports refusing none of these, so a failure happens
-       * inside the runtime and leaves no trace this driver can read back.
-       * Record it where it can be collected. */
+      /* Preserve both sides of the runtime callback: a successful shared
+       * allocation can still return no kernel resource handle. Give native
+       * attempts their own bounded allowance after earlier device setup. */
       {
-         static unsigned attempts = 0, failures = 0;
-         ++attempts;
+         static volatile LONG attempts = 0, failures = 0, nativeAttempts = 0;
+         const LONG attempt = InterlockedIncrement(&attempts);
+         const LONG nativeAttempt = nativeHostSurface ? InterlockedIncrement(&nativeAttempts) : 0;
          if (FAILED(ahr) || allocationInfo.hAllocation == 0)
-            ++failures;
-         HANDLE log = attempts <= 32 || FAILED(ahr) || allocationInfo.hAllocation == 0
+            InterlockedIncrement(&failures);
+         HANDLE log = attempt <= 32 || (nativeAttempt && nativeAttempt <= 64) ||
+                         FAILED(ahr) || allocationInfo.hAllocation == 0
                          ? CreateFileA("C:\\Users\\Public\\umd_alloc.log",
                                        FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
                          : INVALID_HANDLE_VALUE;
          if (log != INVALID_HANDLE_VALUE) {
-            char line[256];
+            char line[640];
             int n = _snprintf_s(line, sizeof line, _TRUNCATE,
-                                "alloc hr=0x%08lx hAlloc=0x%x dim=%u %ux%u fmt=%u attempts=%u failures=%u\r\n",
-                                (unsigned long)ahr, allocationInfo.hAllocation,
+                                "pid=%lu alloc hr=0x%08lx native=%u misc=0x%x bind=0x%x rt=%p in_rt=%p out_rt=%p in_resource=0x%x out_resource=0x%x in_alloc=0x%x out_alloc=0x%x count=%u private_size=%u primary=%u alloc_flags=0x%x dim=%u %ux%u fmt=%u key=0x%llx attempts=%ld failures=%ld\r\n",
+                                GetCurrentProcessId(), (unsigned long)ahr,
+                                nativeHostSurface ? 1u : 0u,
+                                pCreateResource->MiscFlags, pCreateResource->BindFlags,
+                                (HANDLE)(UINT_PTR)hRTResource.handle,
+                                allocateInput.hResource, allocate.hResource,
+                                allocateInput.hKMResource, allocate.hKMResource,
+                                allocationInput, allocationInfo.hAllocation,
+                                allocateInput.NumAllocations, allocateInput.PrivateDriverDataSize,
+                                allocationInfo.Flags.Primary ? 1u : 0u, privateData.Flags,
                                 pCreateResource->ResourceDimension,
                                 shared_width, shared_height,
                                 (unsigned)pCreateResource->Format,
-                                attempts, failures);
+                                (unsigned long long)resourceShare.ShareKey,
+                                (long)attempt, (long)failures);
             DWORD written = 0;
             if (n > 0)
                WriteFile(log, line, (DWORD)n, &written, NULL);

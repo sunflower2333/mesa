@@ -85,6 +85,10 @@ using D3DKMT_HANDLE=unsigned;
 using NTSTATUS=int32_t;
 using DWORD=unsigned long;
 using LONG=long;
+struct OBJECT_ATTRIBUTES {
+ unsigned Length; HANDLE RootDirectory; void *ObjectName; unsigned Attributes;
+ void *SecurityDescriptor, *SecurityQualityOfService;
+};
 constexpr unsigned SHARED_ALLOCATION_ALL_ACCESS=0x000f0001;
 constexpr unsigned FILE_APPEND_DATA=1, FILE_SHARE_READ=2, FILE_SHARE_WRITE=4;
 constexpr unsigned OPEN_ALWAYS=1, FILE_ATTRIBUTE_NORMAL=1, _TRUNCATE=0;
@@ -100,8 +104,11 @@ HANDLE CreateFileA(const char*,unsigned,unsigned,void*,unsigned,unsigned,void*) 
 int _snprintf_s(char*,size_t,unsigned,const char*,...) { return 0; }
 bool WriteFile(HANDLE,const void*,DWORD,DWORD*,void*) { return true; }
 bool CloseHandle(HANDLE h) { assert(uintptr_t(h)==42); ++closedHandles; return true; }
-NTSTATUS ShareObjects(unsigned n,const D3DKMT_HANDLE *r,void*,DWORD rights,HANDLE *out) {
+NTSTATUS ShareObjects(unsigned n,const D3DKMT_HANDLE *r,OBJECT_ATTRIBUTES *attr,DWORD rights,HANDLE *out) {
  assert(n==1 && *r==37 && rights==SHARED_ALLOCATION_ALL_ACCESS); ++shareCalls;
+ assert(attr && attr->Length==sizeof(*attr));
+ assert(!attr->RootDirectory && !attr->ObjectName && !attr->Attributes);
+ assert(!attr->SecurityDescriptor && !attr->SecurityQualityOfService);
  *out=shareOk ? (HANDLE)42 : nullptr; return shareOk ? 0 : -1;
 }
 struct NativeSurfaceDispatch { decltype(&ShareObjects) share=ShareObjects; };
