@@ -179,13 +179,20 @@ ZeroCopySharedSurfaces(void)
 }
 
 static bool
-NativeHostSurfaceOptIn(void)
+DefaultEnabledUnlessDisabled(const char *variable)
+{
+   char value[8] = {};
+   const DWORD length = GetEnvironmentVariableA(variable, value, sizeof value);
+   return length != 1 || value[0] != '0';
+}
+
+static bool
+NativeHostSurfaceEnabled(void)
 {
    static volatile LONG cached = -1;
    LONG value = cached;
    if (value < 0) {
-      value = ZeroCopyOptIn("VIOGPU_NATIVE_HOST_SURFACE",
-                            "C:\\ProgramData\\DroidVM\\viogpu-native-host-surface");
+      value = DefaultEnabledUnlessDisabled("VIOGPU_NATIVE_HOST_SURFACE");
       cached = value;
    }
    return value != 0;
@@ -1367,8 +1374,8 @@ subResourceBox(struct pipe_resource *resource, // IN
  *
  * Accepting a buffer that matches the primary's mode as a real scanout primary
  * lets DXGI flip it instead, through the miniport's FlipOnVSyncMmIo path, where
- * the next vsync confirms the flip. The opt-in is a file so the compositor can
- * be switched either way with a dwm.exe restart and no reinstall.
+ * the next vsync confirms the flip. Set VIOGPU_DWM_FLIP=0 in DWM's environment
+ * to disable the path for recovery testing.
  */
 static bool
 FlipOptionalPrimaries(void)
@@ -1376,8 +1383,7 @@ FlipOptionalPrimaries(void)
    static volatile LONG cached = -1;
    LONG value = cached;
    if (value < 0) {
-      value = GetFileAttributesA("C:\\ProgramData\\DroidVM\\viogpu-dwm-flip") !=
-              INVALID_FILE_ATTRIBUTES;
+      value = DefaultEnabledUnlessDisabled("VIOGPU_DWM_FLIP");
       cached = value;
    }
    return value != 0;
@@ -1478,7 +1484,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       DXGI_DDI_PRIMARY_DESC *primary = pCreateResource->pPrimaryDesc;
       const bool optional = (primary->Flags & DXGI_DDI_PRIMARY_OPTIONAL) != 0;
       // DWM's explicit primary is always a real primary. Optional swap-chain
-      // buffers stay copy-only unless flipping them is enabled and they match
+      // buffers stay copy-only unless they match
       // the primary's mode exactly (see FlipOptionalPrimaries).
       const bool scanout =
          !optional || OptionalPrimaryCanScanOut(CastDevice(hDevice), pCreateResource);
@@ -1580,7 +1586,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    VIOGPU_WDDM_RESOURCE_SHARE resourceShare;
    memset(&resourceShare, 0, sizeof resourceShare);
    VIOGPU_WDDM_NATIVE_SURFACE nativeSurface = {};
-   const bool nativeHostSurface = kernelBacked && NativeHostSurfaceOptIn();
+   const bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled();
    if (nativeHostSurface) {
       if (!AllocateNativeHostSurface(
              pipe, &templat, NativeSurfaceFourcc(pCreateResource->Format), &nativeSurface)) {

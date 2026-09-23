@@ -43,6 +43,12 @@ for text in ("VIOGPU_NATIVE_HOST_SURFACE", "CreateNativeHostSurfaceTexture(",
              "surface->Size >= (UINT64)surface->Stride * surface->Height"):
     assert text in resource
 
+assert 'const bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled();' in resource
+assert 'DefaultEnabledUnlessDisabled("VIOGPU_NATIVE_HOST_SURFACE")' in resource
+assert 'DefaultEnabledUnlessDisabled("VIOGPU_DWM_FLIP")' in resource
+assert 'viogpu-native-host-surface' not in resource
+assert 'viogpu-dwm-flip' not in resource
+
 create = resource[resource.index("void APIENTRY\nCreateResource"):resource.index("SIZE_T APIENTRY\nCalcPrivateOpenedResourceSize")]
 assert create.index("if (nativeHostSurface)") < create.index("CreateSharedTextureCache")
 assert "native host surface allocation failed" in create
