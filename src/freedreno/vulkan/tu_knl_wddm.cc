@@ -1548,21 +1548,34 @@ tu_wddm_open_import_resource(struct tu_wddm_allocation *allocation,
    struct tu_wddm_context *context = allocation->context;
    const struct tu_wddm_dispatch *dispatch = &context->device->adapter.runtime->dispatch;
    if (!nt_handle || !tu_wddm_device_requires_residency(context->device) ||
-       !dispatch->QueryResourceInfoFromNtHandle || !dispatch->OpenResourceFromNtHandle)
+       !dispatch->QueryResourceInfoFromNtHandle || !dispatch->OpenResourceFromNtHandle) {
+      tu_wddm_diag("nt_import unavailable device=%u handle=%p query=%u open=%u",
+                   context->device->handle, reinterpret_cast<void *>(nt_handle),
+                   dispatch->QueryResourceInfoFromNtHandle ? 1u : 0u,
+                   dispatch->OpenResourceFromNtHandle ? 1u : 0u);
       return false;
+   }
 
    D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE query = {};
    query.hDevice = context->device->handle;
    query.hNtHandle = reinterpret_cast<HANDLE>(nt_handle);
-   if (dispatch->QueryResourceInfoFromNtHandle(&query) != TU_WDDM_STATUS_SUCCESS ||
+   const NTSTATUS query_status = dispatch->QueryResourceInfoFromNtHandle(&query);
+   tu_wddm_diag("nt_import query device=%u handle=%p status=0x%08x allocations=%u runtime_size=%u resource_size=%u allocation_size=%u expected_size=%llu",
+                context->device->handle, query.hNtHandle, static_cast<unsigned>(query_status),
+                query.NumAllocations, query.PrivateRuntimeDataSize,
+                query.ResourcePrivateDriverDataSize, query.TotalPrivateDriverDataSize,
+                static_cast<unsigned long long>(size));
+   if (query_status != TU_WDDM_STATUS_SUCCESS ||
        query.NumAllocations != 1 || query.PrivateRuntimeDataSize > 1024 * 1024 ||
        query.ResourcePrivateDriverDataSize != sizeof(VIOGPU_WDDM_RESOURCE_SHARE) ||
        query.TotalPrivateDriverDataSize != sizeof(VIOGPU_WDDM_ALLOCATION_INFO))
       return false;
 
    void *runtime_data = query.PrivateRuntimeDataSize ? calloc(1, query.PrivateRuntimeDataSize) : NULL;
-   if (query.PrivateRuntimeDataSize && !runtime_data)
+   if (query.PrivateRuntimeDataSize && !runtime_data) {
+      tu_wddm_diag("nt_import runtime allocation failed size=%u", query.PrivateRuntimeDataSize);
       return false;
+   }
    VIOGPU_WDDM_RESOURCE_SHARE share = {};
    VIOGPU_WDDM_ALLOCATION_INFO info = {};
    D3DDDI_OPENALLOCATIONINFO2 opened = {};
@@ -1583,7 +1596,7 @@ tu_wddm_open_import_resource(struct tu_wddm_allocation *allocation,
     * owns retries if the compensating close is not confirmed. */
    allocation->imported_resource = request.hResource;
    allocation->handle = opened.hAllocation;
-   if (status != TU_WDDM_STATUS_SUCCESS || !request.hResource || !opened.hAllocation ||
+   const bool valid = !(status != TU_WDDM_STATUS_SUCCESS || !request.hResource || !opened.hAllocation ||
        opened.pPrivateDriverData != &info || opened.PrivateDriverDataSize != sizeof(info) ||
        request.TotalPrivateDriverDataBufferSize != sizeof(info) ||
        !tu_wddm_header_is_current(&share.Header, sizeof(share)) ||
@@ -1594,10 +1607,23 @@ tu_wddm_open_import_resource(struct tu_wddm_allocation *allocation,
        (info.Flags != 0 && info.Flags != VIOGPU_WDDM_ALLOCATION_PRIMARY) ||
        info.Size != size || !info.Width || info.Width > UINT32_MAX / 4 || !info.Height ||
        info.Pitch < info.Width * 4 || (info.Pitch & 3) ||
-       info.Pitch != share.Stride || (uint64_t)info.Pitch * info.Height > info.Size)
+       info.Pitch != share.Stride || (uint64_t)info.Pitch * info.Height > info.Size);
+   tu_wddm_diag("nt_import open device=%u status=0x%08x resource=0x%x allocation=0x%x metadata_valid=%u allocation_size=%u total_size=%u key=0x%llx share_flags=0x%x alloc_flags=0x%x size=%llu width=%u height=%u pitch=%u stride=%u format=%u",
+                context->device->handle, static_cast<unsigned>(status), request.hResource,
+                opened.hAllocation, valid ? 1u : 0u, opened.PrivateDriverDataSize,
+                request.TotalPrivateDriverDataBufferSize,
+                static_cast<unsigned long long>(share.ShareKey), share.Flags, info.Flags,
+                static_cast<unsigned long long>(info.Size), info.Width, info.Height,
+                info.Pitch, share.Stride, info.Format);
+   if (!valid)
       return false;
    allocation->share_key = share.ShareKey;
-   return tu_wddm_allocation_make_resident(allocation);
+   const bool resident = tu_wddm_allocation_make_resident(allocation);
+   tu_wddm_diag("nt_import residency device=%u allocation=0x%x resident=%u status=0x%08x key=0x%llx",
+                context->device->handle, allocation->handle, resident ? 1u : 0u,
+                allocation->last_residency_status,
+                static_cast<unsigned long long>(allocation->share_key));
+   return resident;
 }
 
 bool

@@ -89,28 +89,35 @@ struct NativeSurfaceDispatch
    }
 };
 
-static bool
-NativeSurfaceRequest(struct pipe_screen *screen, VIOGPU_WDDM_NATIVE_SURFACE *surface)
+static NTSTATUS
+NativeSurfaceEscape(struct pipe_screen *screen, void *data, unsigned size)
 {
    static const NativeSurfaceDispatch dispatch;
    if (!screen->get_device_luid || !dispatch.open || !dispatch.escape || !dispatch.close)
-      return false;
+      return (NTSTATUS)0xc00000bb; /* STATUS_NOT_SUPPORTED */
    /* Use the rendering adapter, including on multi-adapter systems. Each
     * transaction closes its handle; no process-global HDC adapter can stale. */
    D3DKMT_OPENADAPTERFROMLUID open = {};
    screen->get_device_luid(screen, (char *)&open.AdapterLuid);
-   if (!NT_SUCCESS(dispatch.open(&open)))
-      return false;
+   const NTSTATUS opened = dispatch.open(&open);
+   if (!NT_SUCCESS(opened))
+      return opened;
    D3DKMT_ESCAPE request = {};
    request.hAdapter = open.hAdapter;
    request.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
-   request.pPrivateDriverData = surface;
-   request.PrivateDriverDataSize = sizeof(*surface);
-   const bool ok = NT_SUCCESS(dispatch.escape(&request));
+   request.pPrivateDriverData = data;
+   request.PrivateDriverDataSize = size;
+   const NTSTATUS status = dispatch.escape(&request);
    D3DKMT_CLOSEADAPTER close = {};
    close.hAdapter = open.hAdapter;
    dispatch.close(&close);
-   return ok;
+   return status;
+}
+
+static bool
+NativeSurfaceRequest(struct pipe_screen *screen, VIOGPU_WDDM_NATIVE_SURFACE *surface)
+{
+   return NT_SUCCESS(NativeSurfaceEscape(screen, surface, sizeof(*surface)));
 }
 
 static VIOGPU_WDDM_UINT32
@@ -518,6 +525,48 @@ AllocateNativeHostSurface(struct pipe_context *pipe,
    return true;
 }
 
+static D3DKMT_HANDLE
+ResolveNativeHostSurfaceResource(struct pipe_screen *screen, D3DKMT_HANDLE allocation,
+                                 UINT64 shareKey, UINT64 size, UINT64 resetGeneration)
+{
+   if (!allocation || !shareKey || !size || !resetGeneration)
+      return 0;
+   VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE request = {};
+   request.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   request.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   request.Header.Size = sizeof(request);
+   request.Opcode = VIOGPU_WDDM_ESCAPE_QUERY_NATIVE_SURFACE_RESOURCE;
+   request.AllocationHandle = allocation;
+   request.ShareKey = shareKey;
+   request.Size = size;
+   request.ResetGeneration = resetGeneration;
+   const VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE expected = request;
+   const NTSTATUS status = NativeSurfaceEscape(screen, &request, sizeof(request));
+   const D3DKMT_HANDLE resource = request.ResourceHandle;
+   request.ResourceHandle = 0;
+   const bool valid = NT_SUCCESS(status) && resource &&
+                      memcmp(&request, &expected, sizeof(request)) == 0;
+   static volatile LONG samples;
+   if (InterlockedIncrement(&samples) <= 64) {
+      HANDLE log = CreateFileA("C:\\Users\\Public\\umd_native_share.log", FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+      if (log != INVALID_HANDLE_VALUE) {
+         char line[256];
+         int n = _snprintf_s(line, sizeof(line), _TRUNCATE,
+                            "pid=%lu role=resolve allocation=0x%x resource=0x%x status=0x%08lx valid=%u key=0x%llx size=%llu reset=%llu\r\n",
+                            GetCurrentProcessId(), allocation, resource, (unsigned long)status,
+                            valid ? 1u : 0u, (unsigned long long)shareKey,
+                            (unsigned long long)size, (unsigned long long)resetGeneration);
+         DWORD written;
+         if (n > 0)
+            WriteFile(log, line, (DWORD)n, &written, NULL);
+         CloseHandle(log);
+      }
+   }
+   return valid ? resource : 0;
+}
+
 /* Open the same VidMm resource on Turnip's independent KMT device. The NT
  * handle is transient; the Vulkan import owns its own open allocation and
  * residency reference through GPU retirement. ShareObjects requires the
@@ -528,9 +577,14 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
                                const struct pipe_resource *templat,
                                D3DKMT_HANDLE resource, D3DKMT_HANDLE allocation,
                                unsigned miscFlags, const char *role,
-                               UINT64 size, unsigned stride, UINT64 shareKey)
+                               UINT64 size, unsigned stride, UINT64 shareKey,
+                               UINT64 resetGeneration)
 {
    static const NativeSurfaceDispatch dispatch;
+   const bool resolveNeeded = !resource;
+   if (resolveNeeded)
+      resource = ResolveNativeHostSurfaceResource(pipe->screen, allocation, shareKey,
+                                                   size, resetGeneration);
    HANDLE ntHandle = NULL;
    OBJECT_ATTRIBUTES attributes = {};
    attributes.Length = sizeof(attributes);
@@ -547,8 +601,9 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
       if (log != INVALID_HANDLE_VALUE) {
          char line[384];
          int n = _snprintf_s(line, sizeof(line), _TRUNCATE,
-                            "pid=%lu role=%s misc=0x%x resource=0x%x allocation=0x%x share_available=%u share_called=%u rights=0x%08lx status=0x%08lx handle=%p size=%llu stride=%u %ux%u key=0x%llx\r\n",
+                            "pid=%lu role=%s misc=0x%x resource=0x%x allocation=0x%x resolve_needed=%u share_available=%u share_called=%u rights=0x%08lx status=0x%08lx handle=%p size=%llu stride=%u %ux%u key=0x%llx\r\n",
                             GetCurrentProcessId(), role, miscFlags, resource, allocation,
+                            resolveNeeded ? 1u : 0u,
                             dispatch.share != NULL ? 1u : 0u, shareCalled ? 1u : 0u,
                             (unsigned long)rights, (unsigned long)status, ntHandle,
                             (unsigned long long)size, stride, templat->width0, templat->height0,
@@ -1700,7 +1755,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          pResource->resource = CreateNativeHostSurfaceTexture(
             pipe, &templat, pResource->hKMResource, pResource->hAllocation,
             pCreateResource->MiscFlags, pResource->scanout_primary ? "create-primary" : "create",
-            nativeSurface.Size, nativeSurface.Stride, nativeSurface.ShareKey);
+            nativeSurface.Size, nativeSurface.Stride, nativeSurface.ShareKey,
+            nativeSurface.ResetGeneration);
          if (!pResource->resource)
             rhr = DXGI_DDI_ERR_UNSUPPORTED;
       }
@@ -1930,7 +1986,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
       if (validShare && nativeHostSurface) {
          pResource->resource = CreateNativeHostSurfaceTexture(
             pipe, &templat, pOpenResource->hKMResource.handle, openInfo->hAllocation,
-            0, "open", info.Size, share.Stride, share.ShareKey);
+            0, "open", info.Size, share.Stride, share.ShareKey, 0);
          pResource->zero_copy = pResource->resource != NULL;
          pResource->zero_copy_key = share.ShareKey;
       }

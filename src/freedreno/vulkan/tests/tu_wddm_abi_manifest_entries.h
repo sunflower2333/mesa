@@ -175,3 +175,15 @@ ABI_OFFSET(offset.imported_reference.size, VIOGPU_WDDM_IMPORTED_REFERENCE, Size,
 ABI_OFFSET(offset.imported_reference.reset_generation, VIOGPU_WDDM_IMPORTED_REFERENCE, ResetGeneration, 24);
 ABI_OFFSET(offset.imported_reference.access, VIOGPU_WDDM_IMPORTED_REFERENCE, Access, 32);
 ABI_OFFSET(offset.imported_reference.reserved, VIOGPU_WDDM_IMPORTED_REFERENCE, Reserved, 36);
+
+ABI_VALUE(escape.opcode.query_native_surface_resource, VIOGPU_WDDM_ESCAPE_QUERY_NATIVE_SURFACE_RESOURCE, 10);
+ABI_SIZE(size.native_surface_resource, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, 64);
+ABI_OFFSET(offset.native_surface_resource.header, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, Header, 0);
+ABI_OFFSET(offset.native_surface_resource.opcode, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, Opcode, 16);
+ABI_OFFSET(offset.native_surface_resource.flags, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, Flags, 20);
+ABI_OFFSET(offset.native_surface_resource.allocation_handle, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, AllocationHandle, 24);
+ABI_OFFSET(offset.native_surface_resource.resource_handle, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, ResourceHandle, 28);
+ABI_OFFSET(offset.native_surface_resource.share_key, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, ShareKey, 32);
+ABI_OFFSET(offset.native_surface_resource.size, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, Size, 40);
+ABI_OFFSET(offset.native_surface_resource.reset_generation, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, ResetGeneration, 48);
+ABI_OFFSET(offset.native_surface_resource.reserved, VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE, Reserved, 56);

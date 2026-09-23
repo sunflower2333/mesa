@@ -127,6 +127,34 @@ struct pipe_screen {
  pipe_resource *(*resource_from_handle)(pipe_screen*,const pipe_resource*,winsys_handle*,unsigned);
 };
 struct pipe_context { pipe_screen *screen; };
+unsigned resolveCalls, resolveFault;
+NTSTATUS NativeSurfaceEscape(pipe_screen*,void *data,unsigned size) {
+ assert(size==sizeof(VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE));
+ auto *r=static_cast<VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE*>(data);
+ assert(r->Header.Magic==VIOGPU_WDDM_ABI_MAGIC && r->Header.Size==sizeof(*r));
+ assert(r->Header.Version==VIOGPU_WDDM_ABI_VERSION && !r->Header.Reserved);
+ assert(r->Opcode==VIOGPU_WDDM_ESCAPE_QUERY_NATIVE_SURFACE_RESOURCE && !r->Flags);
+ assert(r->AllocationHandle==12 && !r->ResourceHandle && !r->Reserved);
+ assert(r->ShareKey==11 && r->Size==20480 && r->ResetGeneration==3);
+ ++resolveCalls;
+ r->ResourceHandle=37;
+ switch(resolveFault) {
+ case 1: return -1;
+ case 2: r->ResourceHandle=0; break;
+ case 3: ++r->Header.Magic; break;
+ case 4: ++r->Header.Version; break;
+ case 5: ++r->Header.Size; break;
+ case 6: ++r->Header.Reserved; break;
+ case 7: ++r->Opcode; break;
+ case 8: ++r->Flags; break;
+ case 9: ++r->AllocationHandle; break;
+ case 10: ++r->ShareKey; break;
+ case 11: ++r->Size; break;
+ case 12: ++r->ResetGeneration; break;
+ case 13: ++r->Reserved; break;
+ }
+ return 0;
+}
 VIOGPU_WDDM_NATIVE_SURFACE response;
 unsigned allocations, imports, frees;
 bool allocationOk=true, importOk=true;
@@ -190,16 +218,26 @@ int main() {
   assert(frees==unsigned(scenario>0 && scenario<14));
  }
  puts("PASS native host allocation: 16 production-code scenarios");
- for (unsigned scenario=0; scenario<5; scenario++) {
-  response=good; imports=closedHandles=shareCalls=0;
+ for (unsigned scenario=0; scenario<16; scenario++) {
+  resolveCalls=0; resolveFault=scenario;
+  auto h=ResolveNativeHostSurfaceResource(&screen,scenario==14 ? 0 : 12,
+                                          good.ShareKey,good.Size,scenario==15 ? 0 : 3);
+  assert(h==(scenario==0 ? 37 : 0));
+  assert(resolveCalls==unsigned(scenario<14));
+ }
+ puts("PASS native parent resolution: 16 exact identity and malformed response scenarios");
+ for (unsigned scenario=0; scenario<8; scenario++) {
+  response=good; imports=closedHandles=shareCalls=resolveCalls=0;
+  resolveFault=scenario==5 ? 1 : scenario==7 ? 10 : 0;
   shareOk=scenario!=1; importOk=scenario!=2;
   screen.resource_from_handle=scenario==3 ? nullptr : importTexture;
-  pipe_resource *r=CreateNativeHostSurfaceTexture(&pipe,&t,scenario==4 ? 0 : 37,12,
-                                                 2,"create",good.Size,good.Stride,good.ShareKey);
-  assert((r!=nullptr)==(scenario==0));
-  assert(shareCalls==unsigned(scenario!=4));
-  assert(closedHandles==unsigned(scenario==0 || scenario==2 || scenario==3));
-  assert(imports==unsigned(scenario==0 || scenario==2));
+  pipe_resource *r=CreateNativeHostSurfaceTexture(&pipe,&t,scenario>=4 ? 0 : 37,12,
+                              2,"create",good.Size,good.Stride,good.ShareKey,scenario==6 ? 0 : 3);
+  assert((r!=nullptr)==(scenario==0 || scenario==4));
+  assert(resolveCalls==unsigned(scenario>=4 && scenario!=6));
+  assert(shareCalls==unsigned(scenario<5));
+  assert(closedHandles==unsigned(scenario==0 || scenario==2 || scenario==3 || scenario==4));
+  assert(imports==unsigned(scenario==0 || scenario==2 || scenario==4));
  }
  puts("PASS native NT import: shared handle success, failure, unavailable import and lifetime");
  assert(SharedAllocationFlags(false,false)==VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE);
@@ -256,7 +294,8 @@ int main() {
 fixture = fixture.replace('// FUNCTIONS', '\n'.join(
     extract(name) for name in ('IsValidResourceShare', 'SharedAllocationFlags',
                               'IsValidSharedAllocation', 'FreeNativeHostSurface',
-                              'AllocateNativeHostSurface', 'CreateNativeHostSurfaceTexture')))
+                              'AllocateNativeHostSurface', 'ResolveNativeHostSurfaceResource',
+                              'CreateNativeHostSurfaceTexture')))
 for function, guarded_call in (('ResourceMap', 'pipe->buffer_map('),
                                ('EnsureSharedCopy', 'pfnAllocateCb')):
     body = extract(function)
