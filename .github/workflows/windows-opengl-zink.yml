@@ -154,13 +154,22 @@ jobs:
           # while GitHub's MSVC environment can provide CC/CXX for build-machine
           # probes. Set both explicitly so every clang-cl translation unit goes
           # through sccache, including the host cross build.
-          $env:CC = 'sccache clang-cl'
-          $env:CXX = 'sccache clang-cl'
+          $env:CC = 'clang-cl'
+          $env:CXX = 'clang-cl'
+          # Meson may normalize a launcher out of its cross-file compiler
+          # display. Put a small clang-cl shim first on PATH so every actual
+          # translation-unit invocation is unambiguously routed through the
+          # pinned sccache client.
+          $clang = (Get-Command clang-cl.exe -ErrorAction Stop).Source
+          $shimDir = Join-Path $env:RUNNER_TEMP 'sccache-clang-shim'
+          New-Item -ItemType Directory -Force $shimDir | Out-Null
+          @('@echo off', "sccache.exe `\"$clang`\" %*") | Set-Content (Join-Path $shimDir 'clang-cl.cmd') -Encoding ascii
+          $env:Path = "$shimDir;$env:Path"
           $cross = Join-Path $env:RUNNER_TEMP opengl-cross.ini
           @(
             '[binaries]'
-            "c = ['sccache', 'clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
-            "cpp = ['sccache', 'clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "c = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "cpp = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
             "ar = 'llvm-lib'"
             '[host_machine]'
             "system = 'windows'"
