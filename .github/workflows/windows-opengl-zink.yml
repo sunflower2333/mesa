@@ -96,6 +96,8 @@ jobs:
           path: |
             gl-build
             loader-build
+            loader-headers
+            ${{ runner.temp }}\vulkan-headers
           key: mesa-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-${{ steps.mesa_build_identity.outputs.digest }}-${{ github.sha }}
           restore-keys: |
             mesa-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-${{ steps.mesa_build_identity.outputs.digest }}-
@@ -285,7 +287,7 @@ jobs:
       - name: Remove final binaries before generated-tree cache save
         shell: pwsh
         run: |
-          foreach ($tree in @('gl-build', 'loader-build')) {
+          foreach ($tree in @('gl-build', 'loader-build', 'loader-headers')) {
             if (Test-Path -LiteralPath $tree) {
               Get-ChildItem -LiteralPath $tree -Recurse -File -Include '*.dll', '*.pdb', '*.lib', '*.exe' |
                 Remove-Item -Force -ErrorAction SilentlyContinue
