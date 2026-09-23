@@ -163,7 +163,7 @@ jobs:
           $clang = (Get-Command clang-cl.exe -ErrorAction Stop).Source
           $shimDir = Join-Path $env:RUNNER_TEMP 'sccache-clang-shim'
           New-Item -ItemType Directory -Force $shimDir | Out-Null
-          @('@echo off', "sccache.exe `\"$clang`\" %*") | Set-Content (Join-Path $shimDir 'clang-cl.cmd') -Encoding ascii
+          @('@echo off', ('sccache.exe "' + $clang + '" %*')) | Set-Content (Join-Path $shimDir 'clang-cl.cmd') -Encoding ascii
           $env:Path = "$shimDir;$env:Path"
           $cross = Join-Path $env:RUNNER_TEMP opengl-cross.ini
           @(
