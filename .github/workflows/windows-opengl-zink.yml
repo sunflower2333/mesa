@@ -156,21 +156,22 @@ jobs:
           # through sccache, including the host cross build.
           $env:CC = 'clang-cl'
           $env:CXX = 'clang-cl'
-          # Meson may normalize a launcher out of its cross-file compiler
-          # display. Put a small clang-cl shim first on PATH so every actual
-          # translation-unit invocation is unambiguously routed through the
-          # pinned sccache client.
+          # Meson 1.9.1 drops an sccache prefix while detecting clang-cl's
+          # CL.EXE compatibility mode. Put both absolute executables in the
+          # machine-file compiler array so generated Ninja rules retain the
+          # real sccache -> clang-cl command for every source translation unit.
+          $sccache = (Get-Command sccache.exe -ErrorAction Stop).Source
           $clang = (Get-Command clang-cl.exe -ErrorAction Stop).Source
-          $shimDir = Join-Path $env:RUNNER_TEMP 'sccache-clang-shim'
-          New-Item -ItemType Directory -Force $shimDir | Out-Null
-          @('@echo off', ('sccache.exe "' + $clang + '" %*')) | Set-Content (Join-Path $shimDir 'clang-cl.cmd') -Encoding ascii
-          $env:Path = "$shimDir;$env:Path"
+          $sccache = $sccache.Replace('\', '/')
+          $clang = $clang.Replace('\', '/')
           $cross = Join-Path $env:RUNNER_TEMP opengl-cross.ini
           @(
             '[binaries]'
-            "c = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
-            "cpp = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "c = ['$sccache', '$clang', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "cpp = ['$sccache', '$clang', '--target=${{ matrix.triple }}-pc-windows-msvc']"
             "ar = 'llvm-lib'"
+            "c_ld = 'lld-link'"
+            "cpp_ld = 'lld-link'"
             '[host_machine]'
             "system = 'windows'"
             "cpu_family = '${{ matrix.family }}'"
@@ -191,13 +192,35 @@ jobs:
             -Dwindows-private-gl-arch='${{ matrix.arch }}' `
             -Db_vscrt=static_from_buildtype '-Dtools=[]' -Dbuild-tests=false -Dwerror=false
           if ($LASTEXITCODE) { throw 'OpenGL Meson configuration failed' }
+          if (!(Select-String -LiteralPath gl-build/build.ninja -SimpleMatch -Pattern 'sccache.exe' -Quiet)) {
+            throw 'Mesa source compile rules are not routed through sccache'
+          }
           # Validate the actual generated compiler configuration, not only the
           # requested platform list. A surfaceless default rejects every HWND.
           if (!(Select-String -LiteralPath gl-build/build.ninja -SimpleMatch -Pattern '_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_WINDOWS' -Quiet)) {
             throw 'EGL_DEFAULT_DISPLAY does not select the native Windows platform'
           }
+          # Count only source compilations, excluding Meson configuration probes.
+          sccache --zero-stats
+          if ($LASTEXITCODE) { throw 'Unable to reset source compiler statistics' }
           meson compile -C gl-build
           if ($LASTEXITCODE) { throw 'OpenGL compile/link failed' }
+      - name: Verify source compiler cache activity
+        shell: pwsh
+        run: |
+          $json = sccache --show-stats --stats-format=json
+          if ($LASTEXITCODE) { throw 'Unable to read sccache statistics' }
+          $json
+          $stats = ($json | ConvertFrom-Json -AsHashtable).stats
+          $hits = [long](($stats.cache_hits.counts.Values | Measure-Object -Sum).Sum)
+          $misses = [long](($stats.cache_misses.counts.Values | Measure-Object -Sum).Sum)
+          Write-Host "Source compiler cache: $hits hits, $misses misses, $($stats.cache_writes) writes"
+          if ($stats.requests_executed -le 0 -or ($hits + $misses) -le 0) {
+            throw 'sccache saw no cacheable source compilations'
+          }
+          if ($hits -le 0 -and $stats.cache_writes -le 0) {
+            throw 'sccache neither restored nor stored any source compiler objects'
+          }
       - name: Stage and validate complete candidate
         shell: pwsh
         run: |
