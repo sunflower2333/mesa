@@ -55,8 +55,12 @@
 #if defined(ZINK_USE_DMABUF) && !defined(_WIN32)
 #include "drm-uapi/drm_fourcc.h"
 #else
-/* these won't actually be used */
-#define DRM_FORMAT_MOD_INVALID 0
+/* Keep the real DRM values: a Windows winsys_handle carries them too (the
+ * D3D10 UMD imports DroidVM host surfaces as LINEAR with an explicit row
+ * pitch, legacy shares as INVALID). Defining both as 0 made every LINEAR
+ * import look like INVALID, dropping the explicit layout, and every INVALID
+ * import look like an unknown modifier. */
+#define DRM_FORMAT_MOD_INVALID ((1ULL << 56) - 1)
 #define DRM_FORMAT_MOD_LINEAR 0
 #endif
 
