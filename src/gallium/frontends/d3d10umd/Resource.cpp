@@ -1610,14 +1610,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    VIOGPU_WDDM_RESOURCE_SHARE resourceShare;
    memset(&resourceShare, 0, sizeof resourceShare);
    VIOGPU_WDDM_NATIVE_SURFACE nativeSurface = {};
-   const bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled();
+   /* The adapter answers the allocation only when the host negotiated Native
+    * AHB and the kernel opt-in is set. Without it the primary is an ordinary
+    * shared texture: refusing it would leave DWM unable to create a swapchain. */
+   bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled() &&
+      AllocateNativeHostSurface(pipe, &templat, NativeSurfaceFourcc(pCreateResource->Format),
+                                &nativeSurface);
    if (nativeHostSurface) {
-      if (!AllocateNativeHostSurface(
-             pipe, &templat, NativeSurfaceFourcc(pCreateResource->Format), &nativeSurface)) {
-         DebugPrintf("%s: native host surface allocation failed\n", __func__);
-         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
-         return;
-      }
       memcpy(pResource->native_host_surface, &nativeSurface, sizeof(nativeSurface));
       pResource->native_host_surface_live = true;
       pResource->native_host_backing = true;

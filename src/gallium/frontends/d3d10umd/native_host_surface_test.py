@@ -43,7 +43,7 @@ for text in ("VIOGPU_NATIVE_HOST_SURFACE", "CreateNativeHostSurfaceTexture(",
              "surface->Size >= (UINT64)surface->Stride * surface->Height"):
     assert text in resource
 
-assert 'const bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled();' in resource
+assert 'bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled() &&' in resource
 assert 'DefaultEnabledUnlessDisabled("VIOGPU_NATIVE_HOST_SURFACE")' in resource
 assert 'DefaultEnabledUnlessDisabled("VIOGPU_DWM_FLIP")' in resource
 assert 'viogpu-native-host-surface' not in resource
@@ -51,7 +51,9 @@ assert 'viogpu-dwm-flip' not in resource
 
 create = resource[resource.index("void APIENTRY\nCreateResource"):resource.index("SIZE_T APIENTRY\nCalcPrivateOpenedResourceSize")]
 assert create.index("if (nativeHostSurface)") < create.index("CreateSharedTextureCache")
-assert "native host surface allocation failed" in create
+# A refused native allocation falls back to the ordinary shared primary.
+assert "AllocateNativeHostSurface(pipe, &templat" in create
+assert "native host surface allocation failed" not in create
 assert create.index('pfnAllocateCb(') < create.index('CreateNativeHostSurfaceTexture(')
 assert 'if (!pResource->resource && !nativeHostSurface)' in create
 assert "SharedAllocationFlags(hostSurface != NULL, pResource->scanout_primary)" in create
