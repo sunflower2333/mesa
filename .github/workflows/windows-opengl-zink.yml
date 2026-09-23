@@ -150,6 +150,12 @@ jobs:
       - name: Build Zink WGL EGL GLES and Turnip
         shell: pwsh
         run: |
+          # Meson keeps the cross-file compiler command for the host machine,
+          # while GitHub's MSVC environment can provide CC/CXX for build-machine
+          # probes. Set both explicitly so every clang-cl translation unit goes
+          # through sccache, including the host cross build.
+          $env:CC = 'sccache clang-cl'
+          $env:CXX = 'sccache clang-cl'
           $cross = Join-Path $env:RUNNER_TEMP opengl-cross.ini
           @(
             '[binaries]'
