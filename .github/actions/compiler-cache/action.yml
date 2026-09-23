@@ -1,0 +1,61 @@
+name: Windows Mesa compiler cache
+description: Cache clang-cl object results independently of generated build trees and signed packages.
+inputs:
+  architecture:
+    description: Target architecture, separate from the x64 build host.
+    required: true
+  flavor:
+    description: Build family (opengl or d3d10).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install pinned sccache
+      uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      with:
+        version: v0.15.0
+    - name: Identify compiler and SDK cache boundary
+      id: identity
+      shell: pwsh
+      env:
+        CACHE_ARCHITECTURE: ${{ inputs.architecture }}
+        CACHE_FLAVOR: ${{ inputs.flavor }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $compiler = (Get-Command clang-cl.exe -ErrorAction Stop).Source
+        $compilerHash = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash
+        $identity = "$compilerHash|$env:VCToolsVersion|$env:WindowsSDKVersion|$env:ImageOS"
+        $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+          [Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant()
+        $prefix = "sccache-mesa-v1-$env:CACHE_FLAVOR-$env:RUNNER_OS-$env:RUNNER_ARCH-$env:CACHE_ARCHITECTURE-$digest"
+        $directory = Join-Path $env:RUNNER_TEMP "sccache-$env:CACHE_FLAVOR-$env:CACHE_ARCHITECTURE"
+        "prefix=$prefix" >> $env:GITHUB_OUTPUT
+        "directory=$directory" >> $env:GITHUB_OUTPUT
+        "SCCACHE_DIR=$directory" >> $env:GITHUB_ENV
+        "SCCACHE_CACHE_SIZE=1G" >> $env:GITHUB_ENV
+        # Always preprocess generated headers; don't reuse a direct-mode
+        # include manifest when a formerly missing header becomes available.
+        "SCCACHE_DIRECT=false" >> $env:GITHUB_ENV
+        "SCCACHE_IDLE_TIMEOUT=0" >> $env:GITHUB_ENV
+        Write-Host "Compiler object cache: $directory"
+        Write-Host "Cache identity: $prefix"
+        & $compiler --version
+        if ($LASTEXITCODE) { throw 'Unable to identify clang-cl' }
+    - name: Restore compiler objects and save successful build additions
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.identity.outputs.directory }}
+        # Cache entries are immutable. A new run saves newly compiled objects
+        # after restoring the newest compatible entry from this branch.
+        key: ${{ steps.identity.outputs.prefix }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ${{ steps.identity.outputs.prefix }}-
+    - name: Start compiler cache statistics
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $files = @(Get-ChildItem -LiteralPath $env:SCCACHE_DIR -Recurse -File -ErrorAction SilentlyContinue)
+        $bytes = ($files | Measure-Object -Property Length -Sum).Sum
+        Write-Host ("Restored compiler cache: {0} files, {1:N0} bytes" -f $files.Count, $bytes)
+        sccache --zero-stats
+        if ($LASTEXITCODE) { throw 'Unable to initialize sccache' }

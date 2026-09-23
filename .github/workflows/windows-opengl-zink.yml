@@ -73,6 +73,11 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc }}
+      - name: Cache compiled Mesa objects
+        uses: ./.github/actions/compiler-cache
+        with:
+          architecture: ${{ matrix.arch }}
+          flavor: opengl
       - uses: actions/setup-python@v5
         id: build_python
         with:
@@ -148,8 +153,8 @@ jobs:
           $cross = Join-Path $env:RUNNER_TEMP opengl-cross.ini
           @(
             '[binaries]'
-            "c = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
-            "cpp = ['clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "c = ['sccache', 'clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
+            "cpp = ['sccache', 'clang-cl', '--target=${{ matrix.triple }}-pc-windows-msvc']"
             "ar = 'llvm-lib'"
             '[host_machine]'
             "system = 'windows'"
