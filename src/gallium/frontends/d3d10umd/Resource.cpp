@@ -577,8 +577,9 @@ ResolveNativeHostSurfaceResource(struct pipe_screen *screen, D3DKMT_HANDLE alloc
 /* Open the same VidMm resource on Turnip's independent KMT device. The NT
  * handle is transient; the Vulkan import owns its own open allocation and
  * residency reference through GPU retirement. ShareObjects requires the
- * runtime resource to have NtSecuritySharing; diagnose unsupported resources
- * explicitly instead of importing a host key with no VidMm lifetime. */
+ * runtime resource to have NtSecuritySharing, which runtime primaries never
+ * have; those import the host key instead, with the creating Resource holding
+ * the VidMm allocation for the texture's lifetime. */
 static struct pipe_resource *
 CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
                                const struct pipe_resource *templat,
@@ -624,7 +625,30 @@ CreateNativeHostSurfaceTexture(struct pipe_context *pipe,
    if (!NT_SUCCESS(status) || !ntHandle) {
       if (ntHandle)
          CloseHandle(ntHandle);
-      return NULL;
+      /* Runtime-created primaries (the DWM swapchain) are never NT shareable:
+       * ShareObjects answers STATUS_INVALID_PARAMETER for them. The creating
+       * Resource keeps this VidMm allocation resident for the texture's whole
+       * lifetime, so import the host key into Turnip's context directly. The
+       * KMD pins the host surface by its allocation reference, not by this key. */
+      if (!shareKey || shareKey > UINT32_MAX)
+         return NULL;
+      struct pipe_resource keyed = *templat;
+      keyed.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;
+      struct winsys_handle key = {};
+      key.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
+      key.handle = (HANDLE)(ULONG_PTR)shareKey;
+      key.stride = stride;
+      key.offset = 0;
+      key.modifier = DROIDVM_DRM_FORMAT_MOD_LINEAR;
+      key.format = templat->format;
+      key.size = size;
+      struct pipe_resource *texture = pipe->screen->resource_from_handle
+         ? pipe->screen->resource_from_handle(pipe->screen, &keyed, &key,
+                                              PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE)
+         : NULL;
+      LogZeroCopy("native-key-import", shareKey, templat->width0, templat->height0, stride,
+                  texture != NULL);
+      return texture;
    }
    struct pipe_resource shared = *templat;
    shared.bind |= PIPE_BIND_SHARED | PIPE_BIND_LINEAR;

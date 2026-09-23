@@ -162,7 +162,8 @@ NTSTATUS NativeSurfaceEscape(pipe_screen*,void *data,unsigned size) {
  return 0;
 }
 VIOGPU_WDDM_NATIVE_SURFACE response;
-unsigned allocations, imports, frees;
+unsigned allocations, imports, frees, keyImports;
+void LogZeroCopy(const char*,UINT64,unsigned,unsigned,unsigned,bool) {}
 bool allocationOk=true, importOk=true;
 pipe_resource texture{};
 bool NativeSurfaceRequest(pipe_screen*,VIOGPU_WDDM_NATIVE_SURFACE *s) {
@@ -184,7 +185,10 @@ pipe_resource *importTexture(pipe_screen*,const pipe_resource *t,winsys_handle *
  ++imports;
  assert(h->size==response.Size && h->stride==response.Stride);
  assert(h->offset==0 && h->modifier==0 && h->format==t->format);
- assert(uintptr_t(h->handle)==42 && h->type==WINSYS_HANDLE_TYPE_WIN32_NT_HANDLE);
+ /* NT handle from ShareObjects, or the host key when the resource is not NT shareable. */
+ assert((uintptr_t(h->handle)==42 && h->type==WINSYS_HANDLE_TYPE_WIN32_NT_HANDLE) ||
+        (uintptr_t(h->handle)==response.ShareKey && h->type==WINSYS_HANDLE_TYPE_WIN32_HANDLE));
+ if (h->type==WINSYS_HANDLE_TYPE_WIN32_HANDLE) ++keyImports;
  assert((t->bind&(PIPE_BIND_SHARED|PIPE_BIND_LINEAR))==(PIPE_BIND_SHARED|PIPE_BIND_LINEAR));
  assert(usage==PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
  return importOk ? &texture : nullptr;
@@ -233,19 +237,26 @@ int main() {
  }
  puts("PASS native parent resolution: 16 exact identity and malformed response scenarios");
  for (unsigned scenario=0; scenario<8; scenario++) {
-  response=good; imports=closedHandles=shareCalls=resolveCalls=0;
+  response=good; imports=keyImports=closedHandles=shareCalls=resolveCalls=0;
   resolveFault=scenario==5 ? 1 : scenario==7 ? 10 : 0;
   shareOk=scenario!=1; importOk=scenario!=2;
   screen.resource_from_handle=scenario==3 ? nullptr : importTexture;
   pipe_resource *r=CreateNativeHostSurfaceTexture(&pipe,&t,scenario>=4 ? 0 : 37,12,
                               2,"create",good.Size,good.Stride,good.ShareKey,scenario==6 ? 0 : 3);
-  assert((r!=nullptr)==(scenario==0 || scenario==4));
+  /* 1 (share refused) and 5-7 (no authenticated parent) import the host key. */
+  const bool keyed=scenario==1 || scenario>=5;
+  assert((r!=nullptr)==(scenario==0 || scenario==4 || keyed));
   assert(resolveCalls==unsigned(scenario>=4 && scenario!=6));
   assert(shareCalls==unsigned(scenario<5));
   assert(closedHandles==unsigned(scenario==0 || scenario==2 || scenario==3 || scenario==4));
-  assert(imports==unsigned(scenario==0 || scenario==2 || scenario==4));
+  assert(imports==unsigned(scenario!=3));
+  assert(keyImports==unsigned(keyed));
  }
- puts("PASS native NT import: shared handle success, failure, unavailable import and lifetime");
+ response=good; response.ShareKey=uint64_t(1)<<32; imports=0; shareOk=false;
+ assert(!CreateNativeHostSurfaceTexture(&pipe,&t,37,12,2,"create",good.Size,good.Stride,
+                                        response.ShareKey,3) && imports==0);
+ shareOk=true;
+ puts("PASS native NT/key import: shared handle, key fallback, failure and lifetime");
  assert(SharedAllocationFlags(false,false)==VIOGPU_WDDM_ALLOCATION_CPU_VISIBLE);
  assert(SharedAllocationFlags(true,false)==0);
  assert(SharedAllocationFlags(false,true)==VIOGPU_WDDM_ALLOCATION_PRIMARY);
