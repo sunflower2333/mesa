@@ -1096,20 +1096,58 @@ FinishZeroCopyWrites(Device *device)
    return ready ? S_OK : E_FAIL;
 }
 
-/* Measurement only, off by default: publish an owner's zero-copy writes
- * without waiting for them. Unsafe -- an importer may sample an unfinished
- * frame -- and exists to size the win of a GPU-side dependency. */
+/* Recovery switch: restore the CPU wait for a zero-copy owner publish. */
 static bool
-ZeroCopyPublishSkipsWait(void)
+ZeroCopyPublishWaitsForGpu(void)
 {
    static volatile LONG cached = -1;
    LONG value = cached;
    if (value < 0) {
-      value = ZeroCopyOptIn("VIOGPU_ZC_PUBLISH_NOWAIT",
-                            "C:\\ProgramData\\DroidVM\\viogpu-zc-publish-nowait");
+      value = ZeroCopyOptIn("VIOGPU_ZC_PUBLISH_FINISH",
+                            "C:\\ProgramData\\DroidVM\\viogpu-zc-publish-finish");
       cached = value;
    }
    return value != 0;
+}
+
+/* Ask the KMD to hold every importer of this owner's texture until the
+ * owner writes it has rendered so far retire. It counts them in
+ * DxgkDdiRender, which zink's flush has already reached. */
+static bool
+PublishNativeOwnerWrites(Device *device, Resource *resource)
+{
+   if (!resource->zero_copy_key)
+      return false;
+   VIOGPU_WDDM_NATIVE_PUBLISH request = {};
+   request.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   request.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   request.Header.Size = sizeof(request);
+   request.Opcode = VIOGPU_WDDM_ESCAPE_PUBLISH_NATIVE;
+   request.ShareKey = resource->zero_copy_key;
+   return NT_SUCCESS(NativeSurfaceEscape(device->pipe->screen, &request, sizeof(request)));
+}
+
+/* Hand an owner's zero-copy writes to its importers without waiting for
+ * them: the KMD gates the importers instead. A KMD that does not speak the
+ * publish escape still gets the CPU wait, which covers every owner. */
+static HRESULT
+PublishZeroCopyOwnerWrites(Device *device, Resource *resource)
+{
+   if (ZeroCopyPublishWaitsForGpu())
+      return FinishZeroCopyWrites(device);
+   struct pipe_context *pipe = device->pipe;
+   pipe->flush(pipe, NULL, 0);
+   if (pipe->get_device_reset_status &&
+       pipe->get_device_reset_status(pipe) != PIPE_NO_RESET)
+      return D3DDDIERR_DEVICEREMOVED;
+   for (Resource *owner = resource ? resource : device->shared_resources; owner;
+        owner = resource ? NULL : owner->shared_next) {
+      if (!owner->zero_copy || !owner->zero_copy_owner || !owner->shared_dirty)
+         continue;
+      if (!PublishNativeOwnerWrites(device, owner))
+         return FinishZeroCopyWrites(device);
+   }
+   return S_OK;
 }
 
 /* Recovery switch: restore the CPU wait for a native HostSurface present. */
@@ -1165,9 +1203,8 @@ PublishSharedResource(Device *device, Resource *resource)
    // consume that backing. Fence-only publication would lose reverse writes
    // when the creator next refreshes its texture from the stale allocation.
    HRESULT hr = resource->zero_copy && (resource->zero_copy_owner || resource->native_host_backing)
-                   ? (resource->zero_copy_owner && ZeroCopyPublishSkipsWait()
-                         ? SubmitNativeHostSurfaceWrites(device)
-                         : FinishZeroCopyWrites(device))
+                   ? (resource->zero_copy_owner ? PublishZeroCopyOwnerWrites(device, resource)
+                                                : FinishZeroCopyWrites(device))
                    : TransferSharedResource(device, resource, true);
    if (SUCCEEDED(hr))
       resource->shared_dirty = false;
@@ -1197,10 +1234,11 @@ ResolveSharedResourceAccess(Device *device, Resource *resource)
 HRESULT
 PublishSharedResources(Device *device)
 {
-   bool zeroCopyDirty = false;
+   bool zeroCopyDirty = false, nativeHostDirty = false;
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {
       if (resource->zero_copy && (resource->zero_copy_owner || resource->native_host_backing)) {
          zeroCopyDirty |= resource->shared_dirty;
+         nativeHostDirty |= resource->shared_dirty && !resource->zero_copy_owner;
          continue;
       }
       HRESULT hr = PublishSharedResource(device, resource);
@@ -1210,8 +1248,8 @@ PublishSharedResources(Device *device)
    if (!zeroCopyDirty)
       return S_OK;
    /* One GPU synchronization covers every zero-copy texture of the device. */
-   HRESULT hr = ZeroCopyPublishSkipsWait() ? SubmitNativeHostSurfaceWrites(device)
-                                           : FinishZeroCopyWrites(device);
+   HRESULT hr = nativeHostDirty ? FinishZeroCopyWrites(device)
+                                : PublishZeroCopyOwnerWrites(device, NULL);
    if (FAILED(hr))
       return hr;
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {

@@ -69,6 +69,7 @@ typedef enum VIOGPU_WDDM_ESCAPE_OPCODE {
    VIOGPU_WDDM_ESCAPE_ALLOCATE_NATIVE_SURFACE = 8,
    VIOGPU_WDDM_ESCAPE_FREE_NATIVE_SURFACE = 9,
    VIOGPU_WDDM_ESCAPE_QUERY_NATIVE_SURFACE_RESOURCE = 10,
+   VIOGPU_WDDM_ESCAPE_PUBLISH_NATIVE = 11,
 } VIOGPU_WDDM_ESCAPE_OPCODE;
 
 #pragma pack(push, 4)
@@ -149,6 +150,19 @@ typedef struct VIOGPU_WDDM_FENCE_INFO {
    VIOGPU_WDDM_UINT32 ContextId;
    VIOGPU_WDDM_UINT32 Reserved;
 } VIOGPU_WDDM_FENCE_INFO;
+
+/* Additive owner publication of a native share; old KMDs reject this distinct
+ * size (40 bytes), and the owner then waits on the CPU as before. Adapter
+ * scoped: it names no context. The KMD snapshots the owner's writes to the
+ * shared allocation rendered so far; an importer submission is admitted only
+ * once those have retired, so the owner need not wait for them itself. */
+typedef struct VIOGPU_WDDM_NATIVE_PUBLISH {
+   VIOGPU_WDDM_ABI_HEADER Header;
+   VIOGPU_WDDM_UINT32 Opcode;
+   VIOGPU_WDDM_UINT32 Flags;
+   VIOGPU_WDDM_UINT64 ShareKey;
+   VIOGPU_WDDM_UINT64 Reserved;
+} VIOGPU_WDDM_NATIVE_PUBLISH;
 
 /* Additive context escape; no changes to older ABI v0 buffer prefixes/caps. */
 typedef struct VIOGPU_WDDM_TIMESTAMP_INFO {
@@ -318,6 +332,7 @@ static_assert(sizeof(VIOGPU_WDDM_RENDER_COMMAND) == 64, "WDDM render ABI layout 
 static_assert(sizeof(VIOGPU_WDDM_ALLOCATION_REFERENCE) == 32, "WDDM reference ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_IMPORTED_REFERENCE) == 40, "WDDM imported reference ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_NATIVE_SHARE) == 88, "WDDM native share ABI layout changed");
+static_assert(sizeof(VIOGPU_WDDM_NATIVE_PUBLISH) == 40, "WDDM native publish ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_RESOURCE_SHARE) == 48, "WDDM resource share ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_NATIVE_SURFACE) == 128, "WDDM native surface ABI layout changed");
 static_assert(sizeof(VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE) == 64, "WDDM native surface resource ABI layout changed");

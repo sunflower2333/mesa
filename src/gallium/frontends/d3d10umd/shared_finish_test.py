@@ -86,22 +86,47 @@ HRESULT EnsureSharedPresentContext(Device*) { return S_OK; }
 HRESULT RefreshSharedResource(Device*,Resource*) { assert(false); return E_FAIL; }
 bool waitForGpu;
 bool NativePresentWaitsForGpu() { return waitForGpu; }
-bool ZeroCopyPublishSkipsWait() { return false; }
+bool publishWait, publishOk;
+unsigned publishes;
+bool ZeroCopyPublishWaitsForGpu() { return publishWait; }
+bool PublishNativeOwnerWrites(Device*,Resource* r) {
+ assert(r->zero_copy_owner && r->shared_dirty); ++publishes; return publishOk;
+}
 // FUNCTIONS
 int main() {
  pipe_screen screen{finish,release}; pipe_context pipe{&screen,flush,reset};
  Device device{&pipe}; unsigned failures=0, ownershipFailures=0, contextFailures=0;
- for (unsigned scenario=0; scenario<4; ++scenario) {
-  ready=scenario&1; lost=scenario&2; releases=0; observed=nullptr;
-  Resource resource{true,true};
-  HRESULT hr=PublishSharedResource(&device,&resource);
-  HRESULT expected=lost ? D3DDDIERR_DEVICEREMOVED : ready ? S_OK : E_FAIL;
-  if (hr!=expected || resource.shared_dirty!=(expected!=S_OK)) ++ownershipFailures;
-  if (observed!=&pipe) ++contextFailures;
-  if (releases!=1) ++failures;
+ // Mode 0: the KMD publish escape gates importers, so the owner never
+ // waits. Mode 1: the escape fails and the CPU wait covers the owner.
+ // Mode 2: the recovery switch restores the CPU wait without an escape.
+ for (unsigned mode=0; mode<3; ++mode) {
+  for (unsigned route=0; route<2; ++route) {
+   for (unsigned scenario=0; scenario<4; ++scenario) {
+    ready=scenario&1; lost=scenario&2; releases=publishes=0; observed=nullptr;
+    publishWait=mode==2; publishOk=mode==0;
+    Resource resource{true,true}; device.shared_resources=&resource;
+    HRESULT hr=route==0 ? PublishSharedResource(&device,&resource) : PublishSharedResources(&device);
+    const bool waits=mode==2 || (mode==1 && !lost);
+    HRESULT expected=lost ? D3DDDIERR_DEVICEREMOVED : !waits || ready ? S_OK : E_FAIL;
+    const unsigned expectedPublishes=mode==2 || lost ? 0 : 1;
+    if (hr!=expected || resource.shared_dirty!=(expected!=S_OK)) ++ownershipFailures;
+    if (observed!=(waits ? &pipe : nullptr)) ++contextFailures;
+    if (releases!=(waits ? 1u : 0u) || publishes!=expectedPublishes) ++failures;
+   }
+  }
  }
+ {
+  // A dirty HostSurface beside the owner still takes the CPU wait for both.
+  ready=true; lost=false; releases=publishes=0; publishWait=false; publishOk=true;
+  Resource owner{true,true}; Resource host{true,true,false,true};
+  owner.shared_next=&host; device.shared_resources=&owner;
+  if (PublishSharedResources(&device)!=S_OK || owner.shared_dirty || host.shared_dirty ||
+      releases!=1 || publishes!=0)
+   ++failures;
+ }
+ device.shared_resources=nullptr; publishWait=true;
  failures += ownershipFailures + contextFailures;
- std::printf("shared completion: 4 scenarios, %u failures (ownership=%u, context=%u)\n",
+ std::printf("shared completion: 25 scenarios, %u failures (ownership=%u, context=%u)\n",
              failures, ownershipFailures, contextFailures);
  unsigned handoffFailures=0;
  for (unsigned scenario=0; scenario<8; ++scenario) {
@@ -159,7 +184,7 @@ int main() {
 }
 '''
 fixture = fixture.replace('// FUNCTIONS', '\n'.join(
-    extract(source, name) for name in ('FinishZeroCopyWrites', 'SubmitNativeHostSurfaceWrites', 'PublishSharedResource', 'PublishSharedResources', 'PreparePresentResource')) +
+    extract(source, name) for name in ('FinishZeroCopyWrites', 'SubmitNativeHostSurfaceWrites', 'PublishZeroCopyOwnerWrites', 'PublishSharedResource', 'PublishSharedResources', 'PreparePresentResource')) +
     (extract(source, 'ResolveSharedResourceAccess') if '\nResolveSharedResourceAccess(' in source else '') +
     extract(dxgi, '_ResolveSharedResource'))
 with tempfile.TemporaryDirectory(prefix='shared-finish-') as temporary:
