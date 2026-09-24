@@ -1096,6 +1096,39 @@ FinishZeroCopyWrites(Device *device)
    return ready ? S_OK : E_FAIL;
 }
 
+/* Recovery switch: restore the CPU wait for a native HostSurface present. */
+static bool
+NativePresentWaitsForGpu(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = ZeroCopyOptIn("VIOGPU_NATIVE_PRESENT_FINISH",
+                            "C:\\ProgramData\\DroidVM\\viogpu-native-present-finish");
+      cached = value;
+   }
+   return value != 0;
+}
+
+/* A HostSurface flip needs its writes submitted, not finished. The KMD holds
+ * the host present until every HostSurface write rendered before the flip has
+ * retired, and it counts those in DxgkDdiRender. zink's flush returns only
+ * after its submit thread has made that call, so the flip that follows cannot
+ * overtake them. Waiting here instead stalled the compositor for the whole
+ * guest-to-host GPU round trip on every frame. */
+static HRESULT
+SubmitNativeHostSurfaceWrites(Device *device)
+{
+   if (NativePresentWaitsForGpu())
+      return FinishZeroCopyWrites(device);
+   struct pipe_context *pipe = device->pipe;
+   pipe->flush(pipe, NULL, 0);
+   if (pipe->get_device_reset_status &&
+       pipe->get_device_reset_status(pipe) != PIPE_NO_RESET)
+      return D3DDDIERR_DEVICEREMOVED;
+   return S_OK;
+}
+
 HRESULT
 RefreshSharedResource(Device *device, Resource *resource)
 {
@@ -1182,7 +1215,7 @@ PreparePresentResource(Device *device, Resource *resource, bool refreshCache, bo
       HRESULT hr = EnsureSharedPresentContext(device);
       if (FAILED(hr))
          return hr;
-      hr = FinishZeroCopyWrites(device);
+      hr = SubmitNativeHostSurfaceWrites(device);
       if (SUCCEEDED(hr))
          resource->shared_dirty = false;
       return hr;

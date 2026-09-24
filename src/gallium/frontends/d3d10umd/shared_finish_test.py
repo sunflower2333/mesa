@@ -84,6 +84,8 @@ HRESULT TransferSharedResource(Device*,Resource*,bool publish) {
 HRESULT EnsureSharedCopy(Device*,Resource*) { assert(false); return E_FAIL; }
 HRESULT EnsureSharedPresentContext(Device*) { return S_OK; }
 HRESULT RefreshSharedResource(Device*,Resource*) { assert(false); return E_FAIL; }
+bool waitForGpu;
+bool NativePresentWaitsForGpu() { return waitForGpu; }
 // FUNCTIONS
 int main() {
  pipe_screen screen{finish,release}; pipe_context pipe{&screen,flush,reset};
@@ -129,30 +131,34 @@ int main() {
  std::printf("imported writes shadow publication: 6 scenarios, %u failures\n", shadowFailures);
  failures += shadowFailures;
  unsigned nativeFailures=0;
- for (unsigned route=0; route<4; ++route) {
+ for (unsigned route=0; route<5; ++route) {
   for (unsigned scenario=0; scenario<8; ++scenario) {
    ready=scenario&1; lost=scenario&2; noFence=scenario&4;
-   releases=transfers=0; observed=nullptr;
+   releases=transfers=0; observed=nullptr; waitForGpu=route==4;
    Resource native{true,true,false,true}; device.shared_resources=&native;
    DXGI_DDI_ARG_RESOLVESHAREDRESOURCE args{&device,&native};
    HRESULT hr=route==0 ? PublishSharedResource(&device,&native) :
               route==1 ? PublishSharedResources(&device) :
               route==2 ? _ResolveSharedResource(&args) :
                          PreparePresentResource(&device,&native,false,true);
-   HRESULT expected=lost ? D3DDDIERR_DEVICEREMOVED : ready && !noFence ? S_OK : E_FAIL;
-   if (hr!=expected || native.shared_dirty!=(expected!=S_OK) || transfers!=0)
+   // A HostSurface flip only submits: the KMD holds the host present until
+   // the writes retire. Route 4 is the recovery switch that still waits.
+   const bool submitOnly=route==3;
+   HRESULT expected=lost ? D3DDDIERR_DEVICEREMOVED : submitOnly || (ready && !noFence) ? S_OK : E_FAIL;
+   if (hr!=expected || native.shared_dirty!=(expected!=S_OK) || transfers!=0 ||
+       (submitOnly && (releases!=0 || observed!=nullptr)))
     ++nativeFailures;
   }
  }
  Resource native{true,true,false,true};
  assert(PreparePresentResource(&device,&native,false,false)==DXGI_DDI_ERR_UNSUPPORTED);
- std::printf("native host publication/present: 32 scenarios, %u failures\n", nativeFailures);
+ std::printf("native host publication/present: 40 scenarios, %u failures\n", nativeFailures);
  failures += nativeFailures;
  return failures ? 1 : 0;
 }
 '''
 fixture = fixture.replace('// FUNCTIONS', '\n'.join(
-    extract(source, name) for name in ('FinishZeroCopyWrites', 'PublishSharedResource', 'PublishSharedResources', 'PreparePresentResource')) +
+    extract(source, name) for name in ('FinishZeroCopyWrites', 'SubmitNativeHostSurfaceWrites', 'PublishSharedResource', 'PublishSharedResources', 'PreparePresentResource')) +
     (extract(source, 'ResolveSharedResourceAccess') if '\nResolveSharedResourceAccess(' in source else '') +
     extract(dxgi, '_ResolveSharedResource'))
 with tempfile.TemporaryDirectory(prefix='shared-finish-') as temporary:
