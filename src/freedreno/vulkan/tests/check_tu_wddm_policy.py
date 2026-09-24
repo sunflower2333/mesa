@@ -518,6 +518,11 @@ def main() -> int:
     win32 = sysmem.find("#ifdef _WIN32")
     if win32 < 0 or "view->image->vk.external_handle_types" not in canonical(sysmem[win32:]):
         fail("WDDM external render targets (DWM primaries, shared surfaces) must use sysmem rendering")
+    default = canonical(sysmem[win32:])
+    gmem_opt_in = default.find('os_get_option("TU_WDDM_GMEM")')
+    external = default.find("view->image->vk.external_handle_types")
+    if gmem_opt_in < 0 or gmem_opt_in > external or "if(!wddm_gmem){" not in default:
+        fail("WDDM must render every pass in sysmem unless TU_WDDM_GMEM=1 opts in to GMEM")
     print("Turnip WDDM pageable-memory and residency policy passed")
     return 0
 

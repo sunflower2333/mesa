@@ -14,6 +14,8 @@
 #include "vk_render_pass.h"
 #include "vk_util.h"
 
+#include "util/os_misc.h"
+
 #include "common/freedreno_gpu_event.h"
 #include "common/freedreno_lrz.h"
 #include "common/freedreno_vrs.h"
@@ -1409,6 +1411,23 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
    }
 
 #ifdef _WIN32
+   /* GMEM also corrupts the compositor's private render targets: the Start
+    * menu's acrylic backdrop filled with sheared, magnified garbage, Edge's
+    * window went black while a menu covered it, and the UAC transition left
+    * dark shadows. TU_DEBUG=sysmem removed all three on the same build, so
+    * WDDM renders every pass in sysmem. TU_WDDM_GMEM=1 opts back in to GMEM,
+    * which still keeps the external-image rule below.
+    */
+   static int wddm_gmem = -1;
+   if (wddm_gmem < 0) {
+      const char *gmem = os_get_option("TU_WDDM_GMEM");
+      wddm_gmem = gmem && gmem[0] == '1';
+   }
+   if (!wddm_gmem) {
+      cmd->state.rp.gmem_disable_reason = "WDDM renders in sysmem (TU_WDDM_GMEM=1 allows GMEM)";
+      return true;
+   }
+
    /* On WDDM the external images are the compositor's scanout primaries and
     * other processes' shared surfaces, drawn with partial render areas and
     * read back by other devices. GMEM stores to them left stale and garbage
