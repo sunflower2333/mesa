@@ -1408,6 +1408,25 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
       return true;
    }
 
+#ifdef _WIN32
+   /* On WDDM the external images are the compositor's scanout primaries and
+    * other processes' shared surfaces, drawn with partial render areas and
+    * read back by other devices. GMEM stores to them left stale and garbage
+    * pixels outside the redrawn region (DWM's desktop showed black wedges and
+    * other windows' remnants); sysmem rendering did not, and cost nothing
+    * measurable at 3040x1904 165 Hz (UFO 146 -> 144 fps, vblank-bound).
+    */
+   if (cmd->state.pass && cmd->state.attachments) {
+      for (uint32_t i = 0; i < cmd->state.pass->attachment_count; i++) {
+         const struct tu_image_view *view = cmd->state.attachments[i];
+         if (view && view->image->vk.external_handle_types) {
+            cmd->state.rp.gmem_disable_reason = "Renders into WDDM external memory";
+            return true;
+         }
+      }
+   }
+#endif
+
    const struct tu_vsc_config *vsc = tu_vsc_config(cmd, cmd->state.tiling);
 
    /* XFB is incompatible with non-hw binning GMEM rendering, see use_hw_binning */

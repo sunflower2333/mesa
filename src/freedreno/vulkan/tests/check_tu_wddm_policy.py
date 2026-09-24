@@ -510,6 +510,14 @@ def main() -> int:
     if "if(device->wddm_submit_scratch==NULL)" not in staging:
         fail("submit scratch must be allocated lazily per device")
 
+    cmd_source = (VULKAN_DIR / "tu_cmd_buffer.cc").read_text(encoding="utf-8")
+    definition = re.search(r"^use_sysmem_rendering\(", cmd_source, re.MULTILINE)
+    if definition is None:
+        fail("use_sysmem_rendering definition not found")
+    sysmem = function_body("use_sysmem_rendering", cmd_source[definition.start():])
+    win32 = sysmem.find("#ifdef _WIN32")
+    if win32 < 0 or "view->image->vk.external_handle_types" not in canonical(sysmem[win32:]):
+        fail("WDDM external render targets (DWM primaries, shared surfaces) must use sysmem rendering")
     print("Turnip WDDM pageable-memory and residency policy passed")
     return 0
 
