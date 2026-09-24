@@ -1096,6 +1096,22 @@ FinishZeroCopyWrites(Device *device)
    return ready ? S_OK : E_FAIL;
 }
 
+/* Measurement only, off by default: publish an owner's zero-copy writes
+ * without waiting for them. Unsafe -- an importer may sample an unfinished
+ * frame -- and exists to size the win of a GPU-side dependency. */
+static bool
+ZeroCopyPublishSkipsWait(void)
+{
+   static volatile LONG cached = -1;
+   LONG value = cached;
+   if (value < 0) {
+      value = ZeroCopyOptIn("VIOGPU_ZC_PUBLISH_NOWAIT",
+                            "C:\\ProgramData\\DroidVM\\viogpu-zc-publish-nowait");
+      cached = value;
+   }
+   return value != 0;
+}
+
 /* Recovery switch: restore the CPU wait for a native HostSurface present. */
 static bool
 NativePresentWaitsForGpu(void)
@@ -1149,7 +1165,9 @@ PublishSharedResource(Device *device, Resource *resource)
    // consume that backing. Fence-only publication would lose reverse writes
    // when the creator next refreshes its texture from the stale allocation.
    HRESULT hr = resource->zero_copy && (resource->zero_copy_owner || resource->native_host_backing)
-                   ? FinishZeroCopyWrites(device)
+                   ? (resource->zero_copy_owner && ZeroCopyPublishSkipsWait()
+                         ? SubmitNativeHostSurfaceWrites(device)
+                         : FinishZeroCopyWrites(device))
                    : TransferSharedResource(device, resource, true);
    if (SUCCEEDED(hr))
       resource->shared_dirty = false;
@@ -1192,7 +1210,8 @@ PublishSharedResources(Device *device)
    if (!zeroCopyDirty)
       return S_OK;
    /* One GPU synchronization covers every zero-copy texture of the device. */
-   HRESULT hr = FinishZeroCopyWrites(device);
+   HRESULT hr = ZeroCopyPublishSkipsWait() ? SubmitNativeHostSurfaceWrites(device)
+                                           : FinishZeroCopyWrites(device);
    if (FAILED(hr))
       return hr;
    for (Resource *resource = device->shared_resources; resource; resource = resource->shared_next) {

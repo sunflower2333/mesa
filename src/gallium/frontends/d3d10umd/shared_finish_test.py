@@ -86,6 +86,7 @@ HRESULT EnsureSharedPresentContext(Device*) { return S_OK; }
 HRESULT RefreshSharedResource(Device*,Resource*) { assert(false); return E_FAIL; }
 bool waitForGpu;
 bool NativePresentWaitsForGpu() { return waitForGpu; }
+bool ZeroCopyPublishSkipsWait() { return false; }
 // FUNCTIONS
 int main() {
  pipe_screen screen{finish,release}; pipe_context pipe{&screen,flush,reset};
