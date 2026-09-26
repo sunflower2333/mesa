@@ -237,6 +237,9 @@ struct Resource
     * State.h does not acquire the Turnip private-ABI include dependency. */
    uint8_t native_host_surface[128];
    bool native_host_surface_live;
+   /* Immutable profile follows the backing across RotateResourceIdentities. */
+   uint8_t native_scanout_state[176];
+   bool native_scanout_profile;
    /* Creator and every opener render directly to the host allocation. */
    bool native_host_backing;
    // Only a CPU-visible allocation created by this device can be locked

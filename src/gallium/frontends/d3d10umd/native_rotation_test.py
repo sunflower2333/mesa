@@ -148,6 +148,7 @@ struct Scenario {
    r.Format=5; r.shared_pitch=128; r.transfers=&transfers[i];
    r.native_host_backing=r.zero_copy=true; r.zero_copy_key=100+i;
    r.native_host_surface_live=!opened; memset(r.native_host_surface,i+1,128);
+   r.native_scanout_profile=false; memset(r.native_scanout_state,i+1,176);
    r.shared_dirty=i%2; r.allocation_resident=i!=1; r.allocation_lockable=i==1;
    if (!views) continue;
    for (unsigned j=0; j<2; ++j) {
@@ -180,6 +181,8 @@ struct Scenario {
    assert(r.resource==&images[identity] && r.hAllocation==10+identity && r.hKMResource==20+identity);
    assert(r.zero_copy_key==100+identity && r.native_host_surface_live==!opened);
    for (unsigned j=0; j<128; ++j) assert(r.native_host_surface[j]==identity+1);
+   assert(!r.native_scanout_profile);
+   for (unsigned j=0; j<176; ++j) assert(r.native_scanout_state[j]==identity+1);
    assert(r.shared_dirty==bool(identity%2) && r.allocation_resident==(identity!=1));
    assert(r.allocation_lockable==(identity==1));
    assert(r.hRTResourceHandle==(opened ? nullptr : reinterpret_cast<void *>(uintptr_t(30+i))));
@@ -245,7 +248,7 @@ int main() {
   }
   s.verify(0); ++scenarios;
  }
- for (unsigned invalid=0; invalid<14; ++invalid) {
+ for (unsigned invalid=0; invalid<15; ++invalid) {
   Scenario s(3); Resource saved=s.resources[1]; auto &r=s.resources[1];
   auto *oldView=s.srvs[1][1].handle;
   switch (invalid) {
@@ -263,6 +266,7 @@ int main() {
    case 11: r.Format++; break;
    case 12: s.srvs[1][1].handle=nullptr; break;
    case 13: s.handles[1]=nullptr; break;
+   case 14: r.native_scanout_profile=true; break;
   }
   Resource before[3]; memcpy(before,s.resources,sizeof before);
   assert(RotateNativeResourceIdentities(&s.device,3,s.handles)<0);
@@ -276,6 +280,15 @@ int main() {
   assert(RotateNativeResourceIdentities(&s.device,3,s.handles)==S_OK);
   assert(calls==0 && framebufferCalls==0 && samplerCalls==0);
   s.verify(1,false); ++scenarios;
+ }
+ {
+  Scenario s(3);
+  for(auto &r:s.resources) { r.native_scanout_profile=true; memset(r.native_scanout_state,0x5a,176); }
+  s.resources[1].native_scanout_state[40]++;
+  assert(RotateNativeResourceIdentities(&s.device,3,s.handles)==DXGI_DDI_ERR_UNSUPPORTED && calls==0);
+  s.resources[1].native_scanout_state[40]--;
+  assert(RotateNativeResourceIdentities(&s.device,3,s.handles)==S_OK);
+  ++scenarios;
  }
  std::printf("native rotation: %u production scenarios passed\n",scenarios);
 }

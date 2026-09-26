@@ -34,9 +34,12 @@
 #include "Resource.h"
 #include "Residency.h"
 #include "tu_wddm_abi.h"
+#include "viogpu_wddm_scanout.h"
+#include "viogpu_wddm_scanout_diagnostic.h"
 #include "Format.h"
 #include "State.h"
 #include "Query.h"
+#include "PrimaryContract.h"
 
 #include "Debug.h"
 #include <limits.h>
@@ -118,6 +121,122 @@ static bool
 NativeSurfaceRequest(struct pipe_screen *screen, VIOGPU_WDDM_NATIVE_SURFACE *surface)
 {
    return NT_SUCCESS(NativeSurfaceEscape(screen, surface, sizeof(*surface)));
+}
+
+static bool
+QueryPrimaryScanoutProfile(struct pipe_screen *screen, VIOGPU_WDDM_SCANOUT_STATE *state,
+                          DroidvmPrimaryProfile *profile)
+{
+   *state = {};
+   *profile = {};
+   state->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   state->Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   state->Header.Size = sizeof(*state);
+   state->Opcode = VIOGPU_WDDM_ESCAPE_QUERY_SCANOUT_PROFILE;
+   if (NativeSurfaceEscape(screen, state, sizeof(*state)) != 0 ||
+       state->Header.Magic != VIOGPU_WDDM_ABI_MAGIC || state->Header.Version != VIOGPU_WDDM_ABI_VERSION ||
+       state->Header.Size != sizeof(*state) || state->Header.Reserved ||
+       state->Opcode != VIOGPU_WDDM_ESCAPE_QUERY_SCANOUT_PROFILE ||
+       state->ReadyFlags != VIOGPU_WDDM_SCANOUT_READY_ALL || !state->LocalResetGeneration || state->Reserved ||
+       !VioGpuScanoutProfileMatches(&state->Profile, &state->Geometry) ||
+       !state->ModeWidth || !state->ModeHeight || state->ModeRotation < 1 || state->ModeRotation > 4)
+      return false;
+   profile->geometry = state->Geometry;
+   profile->readiness = {true, true, true, true, true, true};
+   profile->mode_width = state->ModeWidth;
+   profile->mode_height = state->ModeHeight;
+   profile->mode_rotation = state->ModeRotation;
+   return true;
+}
+
+static bool
+QueryDiagnosticPrimaryProfile(struct pipe_screen *screen, VIOGPU_WDDM_SCANOUT_STATE *state,
+                              DroidvmPrimaryProfile *profile)
+{
+   VIOGPU_WDDM_SCANOUT_DIAGNOSTIC request = {};
+   request.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   request.Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   request.Header.Size = sizeof(request);
+   request.Opcode = VIOGPU_WDDM_ESCAPE_SCANOUT_DIAGNOSTIC;
+   request.Version = VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_VERSION;
+   request.RequestFlags = VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_RESERVE;
+   if (NativeSurfaceEscape(screen, &request, sizeof(request)) != 0 ||
+       request.Header.Magic != VIOGPU_WDDM_ABI_MAGIC || request.Header.Version != VIOGPU_WDDM_ABI_VERSION ||
+       request.Header.Size != sizeof(request) || request.Header.Reserved ||
+       request.Opcode != VIOGPU_WDDM_ESCAPE_SCANOUT_DIAGNOSTIC ||
+       request.Version != VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_VERSION ||
+       request.RequestFlags != VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_RESERVE ||
+       request.Mechanisms != VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_MECHANISMS_ALL ||
+       (request.StateFlags != (VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_PROFILE_AVAILABLE |
+                              VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_CANDIDATE) &&
+        request.StateFlags != (VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_PROFILE_AVAILABLE |
+                              VIOGPU_WDDM_SCANOUT_DIAGNOSTIC_COMMITTED)) ||
+       !request.LocalResetGeneration || request.Reserved ||
+       !VioGpuScanoutProfileMatches(&request.Profile, &request.Geometry) ||
+       !request.ModeWidth || !request.ModeHeight || request.ModeRotation < 1 || request.ModeRotation > 4)
+      return false;
+   *state = {};
+   state->Header = request.Header;
+   state->Header.Size = sizeof(*state);
+   state->Opcode = VIOGPU_WDDM_ESCAPE_QUERY_SCANOUT_PROFILE;
+   state->LocalResetGeneration = request.LocalResetGeneration;
+   state->Geometry = request.Geometry;
+   state->Profile = request.Profile;
+   state->ModeWidth = request.ModeWidth;
+   state->ModeHeight = request.ModeHeight;
+   state->ModeRotation = request.ModeRotation;
+   *profile = {};
+   profile->geometry = request.Geometry;
+   profile->mode_width = request.ModeWidth;
+   profile->mode_height = request.ModeHeight;
+   profile->mode_rotation = request.ModeRotation;
+   profile->diagnostic = true;
+   profile->diagnostic_mechanisms = request.Mechanisms;
+   // Production readiness and observed-producer flags deliberately stay zero.
+   return true;
+}
+
+static LONG
+NextPrimaryCaptureSample(const VIOGPU_WDDM_SCANOUT_STATE &state)
+{
+   static SRWLOCK lock = SRWLOCK_INIT;
+   static VIOGPU_WDDM_UINT64 localReset, hostReset, mode, endpoint, profile;
+   static LONG count;
+   AcquireSRWLockExclusive(&lock);
+   if (localReset != state.LocalResetGeneration || hostReset != state.Geometry.HostResetGeneration ||
+       mode != state.Geometry.ModeGeneration || endpoint != state.Profile.EndpointGeneration ||
+       profile != state.Profile.ProfileGeneration) {
+      localReset = state.LocalResetGeneration;
+      hostReset = state.Geometry.HostResetGeneration;
+      mode = state.Geometry.ModeGeneration;
+      endpoint = state.Profile.EndpointGeneration;
+      profile = state.Profile.ProfileGeneration;
+      count = 0;
+   }
+   const LONG sample = count < 17 ? ++count : 17;
+   ReleaseSRWLockExclusive(&lock);
+   return sample;
+}
+
+static void
+LogPrimaryNativeResult(const char *stage, LONG sample, const VIOGPU_WDDM_SCANOUT_STATE &state,
+                       const VIOGPU_WDDM_NATIVE_SURFACE &surface, D3DKMT_HANDLE allocation, HRESULT result)
+{
+   if (sample <= 0 || sample > 16) return;
+   HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+   if (log == INVALID_HANDLE_VALUE) return;
+   char line[512];
+   const int length = _snprintf_s(line, sizeof line, _TRUNCATE,
+      "primary-result pid=%lu stage=%s sample=%ld localReset=%llu hostReset=%llu mode=%llu "
+      "endpoint=%llu profile=%llu resource=%u key=%llu allocation=%u extent=%ux%u stride=%u result=0x%08lx\r\n",
+      GetCurrentProcessId(), stage, sample, state.LocalResetGeneration, state.Geometry.HostResetGeneration,
+      state.Geometry.ModeGeneration, state.Profile.EndpointGeneration, state.Profile.ProfileGeneration,
+      surface.ResourceId, surface.ShareKey, allocation, surface.Width, surface.Height, surface.Stride,
+      (unsigned long)result);
+   DWORD written = 0;
+   if (length > 0) WriteFile(log, line, (DWORD)length, &written, NULL);
+   CloseHandle(log);
 }
 
 static VIOGPU_WDDM_UINT32
@@ -476,7 +595,9 @@ static bool
 AllocateNativeHostSurface(struct pipe_context *pipe,
                                const struct pipe_resource *templat,
                                VIOGPU_WDDM_UINT32 fourcc,
-                               VIOGPU_WDDM_NATIVE_SURFACE *surface)
+                               VIOGPU_WDDM_NATIVE_SURFACE *surface,
+                               const VIOGPU_WDDM_SCANOUT_STATE *profile = NULL,
+                               bool candidate = false)
 {
    memset(surface, 0, sizeof(*surface));
    surface->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
@@ -486,8 +607,31 @@ AllocateNativeHostSurface(struct pipe_context *pipe,
    surface->Width = templat->width0;
    surface->Height = templat->height0;
    surface->Fourcc = fourcc;
-   if (!fourcc || !NativeSurfaceRequest(pipe->screen, surface))
+   if (!fourcc || (candidate && !profile))
       return false;
+   if (profile) {
+      VIOGPU_WDDM_NATIVE_PROFILE_SURFACE request = {};
+      request.Header = surface->Header;
+      request.Header.Size = sizeof(request);
+      request.Opcode = VIOGPU_WDDM_ESCAPE_ALLOCATE_PROFILE_SURFACE;
+      request.Flags = candidate ? VIOGPU_WDDM_PROFILE_SURFACE_CANDIDATE : 0;
+      request.ExpectedLocalResetGeneration = profile->LocalResetGeneration;
+      request.Geometry = profile->Geometry;
+      request.Profile = profile->Profile;
+      request.Surface = *surface;
+      const auto expected = request;
+      if (NativeSurfaceEscape(pipe->screen, &request, sizeof(request)) != 0)
+         return false;
+      *surface = request.Surface;
+      if (memcmp(&request, &expected, offsetof(VIOGPU_WDDM_NATIVE_PROFILE_SURFACE, Surface)) != 0 ||
+          surface->ResetGeneration != profile->LocalResetGeneration) {
+         FreeNativeHostSurface(pipe->screen, surface);
+         memset(surface, 0, sizeof(*surface));
+         return false;
+      }
+   } else if (!NativeSurfaceRequest(pipe->screen, surface)) {
+      return false;
+   }
 
    const bool valid = surface->Header.Magic == VIOGPU_WDDM_ABI_MAGIC &&
       surface->Header.Version == VIOGPU_WDDM_ABI_VERSION &&
@@ -680,6 +824,8 @@ ReleaseNativeHostSurface(struct pipe_screen *screen, Resource *resource)
    FreeNativeHostSurface(screen, &surface);
    memset(resource->native_host_surface, 0, sizeof(resource->native_host_surface));
    resource->native_host_surface_live = false;
+   memset(resource->native_scanout_state, 0, sizeof(resource->native_scanout_state));
+   resource->native_scanout_profile = false;
 }
 
 static struct pipe_resource *
@@ -1504,18 +1650,33 @@ FlipOptionalPrimaries(void)
 }
 
 static bool
-OptionalPrimaryCanScanOut(const Device *device, const D3D10DDIARG_CREATERESOURCE *create)
+PrimaryCanScanOut(const Device *device, const D3D10DDIARG_CREATERESOURCE *create,
+                 const DroidvmPrimaryProfile *profile = NULL)
 {
+   static_assert(DXGI_DDI_PRIMARY_OPTIONAL == 1 && DXGI_DDI_PRIMARY_NONPREROTATED == 2,
+                 "primary policy flags");
+   static_assert(DXGI_DDI_MODE_ROTATION_IDENTITY == 1, "primary policy identity");
    const DXGI_DDI_PRIMARY_DESC *primary = create->pPrimaryDesc;
-   return FlipOptionalPrimaries() && device->runtime_present && primary->VidPnSourceId == 0 &&
-          (primary->Flags & ~(DXGI_DDI_PRIMARY_OPTIONAL | DXGI_DDI_PRIMARY_NONPREROTATED)) == 0 &&
-          primary->ModeDesc.Rotation == DXGI_DDI_MODE_ROTATION_IDENTITY &&
-          primary->ModeDesc.Width == create->pMipInfoList[0].TexelWidth &&
-          primary->ModeDesc.Height == create->pMipInfoList[0].TexelHeight &&
-          primary->ModeDesc.Format == create->Format &&
-          primary->ModeDesc.RefreshRate.Numerator != 0 &&
-          primary->ModeDesc.RefreshRate.Denominator != 0 &&
-          create->MipLevels == 1 && create->ArraySize == 1 && create->SampleDesc.Count == 1;
+   if (!primary || !create->pMipInfoList || !create->MipLevels)
+      return false;
+   const DroidvmPrimaryDescription description = {
+      primary->Flags, primary->VidPnSourceId,
+      primary->ModeDesc.Width, primary->ModeDesc.Height, (unsigned)primary->ModeDesc.Rotation,
+      (unsigned)primary->ModeDesc.Format,
+      primary->ModeDesc.RefreshRate.Numerator, primary->ModeDesc.RefreshRate.Denominator,
+      create->pMipInfoList[0].TexelWidth, create->pMipInfoList[0].TexelHeight,
+      create->pMipInfoList[0].TexelDepth, (unsigned)create->Format,
+      create->MipLevels, create->ArraySize, create->SampleDesc.Count, create->SampleDesc.Quality,
+      create->ResourceDimension == D3D10DDIRESOURCE_TEXTURE2D, device->runtime_present != NULL,
+   };
+   return DroidvmPrimaryCanScanOut(description, profile);
+}
+
+static bool
+OptionalPrimaryCanScanOut(const Device *device, const D3D10DDIARG_CREATERESOURCE *create,
+                         const DroidvmPrimaryProfile *profile = NULL)
+{
+   return FlipOptionalPrimaries() && PrimaryCanScanOut(device, create, profile);
 }
 
 
@@ -1594,6 +1755,19 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
    memset(pResource, 0, sizeof *pResource);
 
+   VIOGPU_WDDM_SCANOUT_STATE scanoutState = {};
+   DroidvmPrimaryProfile scanoutProfile = {};
+   const DroidvmPrimaryProfile *primaryProfile = NULL;
+   if (pCreateResource->pPrimaryDesc && NativeHostSurfaceEnabled()) {
+      if (QueryPrimaryScanoutProfile(screen, &scanoutState, &scanoutProfile) ||
+          (pCreateResource->pPrimaryDesc->ModeDesc.Rotation != DXGI_DDI_MODE_ROTATION_IDENTITY &&
+           QueryDiagnosticPrimaryProfile(screen, &scanoutState, &scanoutProfile)))
+         primaryProfile = &scanoutProfile;
+   }
+   const bool profileModeActive = scanoutState.LocalResetGeneration &&
+      VioGpuScanoutGeometryValid(&scanoutState.Geometry);
+   LONG primarySample = 0;
+
    if (pCreateResource->pPrimaryDesc) {
       DXGI_DDI_PRIMARY_DESC *primary = pCreateResource->pPrimaryDesc;
       const bool optional = (primary->Flags & DXGI_DDI_PRIMARY_OPTIONAL) != 0;
@@ -1601,11 +1775,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       // buffers stay copy-only unless they match
       // the primary's mode exactly (see FlipOptionalPrimaries).
       const bool scanout =
-         !optional || OptionalPrimaryCanScanOut(CastDevice(hDevice), pCreateResource);
+         !optional || OptionalPrimaryCanScanOut(CastDevice(hDevice), pCreateResource, primaryProfile);
       primary->DriverFlags = scanout ? 0 : DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
       pResource->scanout_primary = scanout;
-      static volatile LONG primaryCount;
-      const LONG sample = InterlockedIncrement(&primaryCount);
+      const LONG sample = primarySample = NextPrimaryCaptureSample(scanoutState);
       if (sample <= 16) {
          HANDLE log = CreateFileA("C:\\Users\\Public\\umd_dxgi.log", FILE_APPEND_DATA,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
@@ -1615,13 +1788,14 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
             // ModeDesc alone does not establish the primary's actual storage
             // extent or whether the producer has already oriented its pixels.
             // Retain the existing bounded sample count and all admission rules.
-            char line[768];
+            char line[1024];
             int len = _snprintf_s(line, sizeof line, _TRUNCATE,
                                   "primary pid=%lu flags=0x%x driverFlags=0x%x optional=%u size=%ux%u "
                                   "stage=prevalidation sample=%ld source=%u runtimePresent=%u "
                                   "rotation=%u modeFormat=%u refresh=%u/%u scaling=%u scanline=%u "
                                   "texel=%ux%ux%u resourceFormat=%u dimension=%u mips=%u array=%u "
-                                  "samples=%u quality=%u bind=0x%x misc=0x%x resource=%p\r\n",
+                                  "samples=%u quality=%u bind=0x%x misc=0x%x resource=%p "
+                                  "localReset=%llu hostReset=%llu mode=%llu endpoint=%llu profile=%llu diagnostic=%u\r\n",
                                   GetCurrentProcessId(), primary->Flags, primary->DriverFlags,
                                   optional ? 1u : 0u, primary->ModeDesc.Width, primary->ModeDesc.Height,
                                   sample, primary->VidPnSourceId,
@@ -1639,22 +1813,21 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                   pCreateResource->MipLevels, pCreateResource->ArraySize,
                                   pCreateResource->SampleDesc.Count, pCreateResource->SampleDesc.Quality,
                                   pCreateResource->BindFlags, pCreateResource->MiscFlags,
-                                  hResource.pDrvPrivate);
+                                  hResource.pDrvPrivate, scanoutState.LocalResetGeneration,
+                                  scanoutState.Geometry.HostResetGeneration, scanoutState.Geometry.ModeGeneration,
+                                  scanoutState.Profile.EndpointGeneration, scanoutState.Profile.ProfileGeneration,
+                                  scanoutProfile.diagnostic ? 1U : 0U);
             DWORD written;
             if (len > 0)
                WriteFile(log, line, (DWORD)len, &written, NULL);
             CloseHandle(log);
          }
       }
-      if (!optional &&
-          (!CastDevice(hDevice)->runtime_present || primary->VidPnSourceId != 0 ||
-           (primary->Flags & ~DXGI_DDI_PRIMARY_NONPREROTATED) != 0 ||
-           primary->ModeDesc.Rotation != DXGI_DDI_MODE_ROTATION_IDENTITY ||
-           primary->ModeDesc.Width != pCreateResource->pMipInfoList[0].TexelWidth ||
-           primary->ModeDesc.Height != pCreateResource->pMipInfoList[0].TexelHeight ||
-           primary->ModeDesc.Format != pCreateResource->Format ||
-           primary->ModeDesc.RefreshRate.Numerator == 0 ||
-           primary->ModeDesc.RefreshRate.Denominator == 0)) {
+      /* A rotated or profiled primary cannot become a NO_SCANOUT proxy.
+       * The same immutable query drives required and optional admission. */
+      if ((profileModeActive && !primaryProfile) ||
+          ((!optional || primaryProfile || primary->ModeDesc.Rotation != DXGI_DDI_MODE_ROTATION_IDENTITY) &&
+           !PrimaryCanScanOut(CastDevice(hDevice), pCreateResource, primaryProfile))) {
          SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
          return;
       }
@@ -1729,11 +1902,22 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
     * shared texture: refusing it would leave DWM unable to create a swapchain. */
    bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled() &&
       AllocateNativeHostSurface(pipe, &templat, NativeSurfaceFourcc(pCreateResource->Format),
-                                &nativeSurface);
+                                &nativeSurface, primaryProfile ? &scanoutState : NULL, scanoutProfile.diagnostic);
+   if (pResource->scanout_primary && NativeHostSurfaceEnabled())
+      LogPrimaryNativeResult("native-create", primarySample, scanoutState, nativeSurface, 0,
+                             nativeHostSurface ? S_OK : DXGI_DDI_ERR_UNSUPPORTED);
+   if (primaryProfile && !nativeHostSurface) {
+      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+      return;
+   }
    if (nativeHostSurface) {
       memcpy(pResource->native_host_surface, &nativeSurface, sizeof(nativeSurface));
       pResource->native_host_surface_live = true;
       pResource->native_host_backing = true;
+      if (primaryProfile) {
+         memcpy(pResource->native_scanout_state, &scanoutState, sizeof(scanoutState));
+         pResource->native_scanout_profile = true;
+      }
       resourceShare.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
       resourceShare.Header.Version = VIOGPU_WDDM_ABI_VERSION;
       resourceShare.Header.Size = sizeof(resourceShare);
@@ -1832,6 +2016,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       const D3DDDICB_ALLOCATE allocateInput = allocate;
       const D3DKMT_HANDLE allocationInput = allocationInfo.hAllocation;
       HRESULT ahr = pDevice->KTCallbacks.pfnAllocateCb(pDevice->hDevice, &allocate);
+      if (nativeHostSurface)
+         LogPrimaryNativeResult("vidmm-allocate", primarySample, scanoutState, nativeSurface,
+                                allocationInfo.hAllocation, ahr);
 
       /* Preserve both sides of the runtime callback: a successful shared
        * allocation can still return no kernel resource handle. Give native
@@ -1903,6 +2090,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          if (!pResource->resource)
             rhr = DXGI_DDI_ERR_UNSUPPORTED;
       }
+      if (nativeHostSurface)
+         LogPrimaryNativeResult("resident-import", primarySample, scanoutState, nativeSurface,
+                                pResource->hAllocation, rhr);
       if (FAILED(rhr)) {
          DebugPrintf("%s: residency failed hr=0x%08lx\n", __func__, (unsigned long)rhr);
          ReleaseResourceAllocations(pDevice, pResource);

@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 import ctypes
+try:
+    import resource as process_resource
+except ImportError:  # Windows has no POSIX resource limits.
+    process_resource = None
 from pathlib import Path
 import subprocess
 import tempfile
+
+if process_resource is not None:
+    process_resource.setrlimit(process_resource.RLIMIT_CORE, (0, 0))
 
 root = Path(__file__).resolve().parents[3]
 abi = (root / "freedreno/vulkan/tu_wddm_abi.h").read_text()
@@ -80,6 +87,9 @@ def extract(name):
 # response, including padded host allocations and malformed layouts.
 fixture = r'''
 #include "tu_wddm_abi.h"
+#include "viogpu_wddm_scanout.h"
+#include "viogpu_wddm_scanout_diagnostic.h"
+#include "PrimaryContract.h"
 #include <cassert>
 #include <climits>
 #include <cstdint>
@@ -93,6 +103,10 @@ using D3DKMT_HANDLE=unsigned;
 using NTSTATUS=int32_t;
 using DWORD=unsigned long;
 using LONG=long;
+using SRWLOCK=bool;
+#define SRWLOCK_INIT false
+void AcquireSRWLockExclusive(SRWLOCK *lock) { assert(!*lock); *lock=true; }
+void ReleaseSRWLockExclusive(SRWLOCK *lock) { assert(*lock); *lock=false; }
 struct OBJECT_ATTRIBUTES {
  unsigned Length; HANDLE RootDirectory; void *ObjectName; unsigned Attributes;
  void *SecurityDescriptor, *SecurityQualityOfService;
@@ -136,7 +150,37 @@ struct pipe_screen {
 };
 struct pipe_context { pipe_screen *screen; };
 unsigned resolveCalls, resolveFault;
-NTSTATUS NativeSurfaceEscape(pipe_screen*,void *data,unsigned size) {
+VIOGPU_WDDM_SCANOUT_STATE profileResponse{};
+VIOGPU_WDDM_SCANOUT_DIAGNOSTIC diagnosticResponse{};
+bool expectedCandidate=false;
+unsigned profileFault;
+bool NativeSurfaceRequest(pipe_screen*,VIOGPU_WDDM_NATIVE_SURFACE*);
+NTSTATUS NativeSurfaceEscape(pipe_screen *screen,void *data,unsigned size) {
+ if(size==sizeof(VIOGPU_WDDM_SCANOUT_STATE)) {
+  auto *state=static_cast<VIOGPU_WDDM_SCANOUT_STATE*>(data);
+  assert(state->Opcode==VIOGPU_WDDM_ESCAPE_QUERY_SCANOUT_PROFILE && state->ReadyFlags==0);
+  *state=profileResponse; return 0;
+ }
+ if(size==sizeof(VIOGPU_WDDM_NATIVE_PROFILE_SURFACE)) {
+  auto *request=static_cast<VIOGPU_WDDM_NATIVE_PROFILE_SURFACE*>(data);
+  assert(request->Opcode==VIOGPU_WDDM_ESCAPE_ALLOCATE_PROFILE_SURFACE && request->Flags==unsigned(expectedCandidate));
+  assert(request->ExpectedLocalResetGeneration==3 && request->Geometry.ModeGeneration==31);
+  assert(request->Profile.EndpointGeneration==23 && request->Profile.ProfileGeneration==29);
+  if(!NativeSurfaceRequest(screen,&request->Surface))return -1;
+  switch(profileFault) {
+  case 1: ++request->Profile.ProfileGeneration; break;
+  case 2: ++request->Geometry.ModeGeneration; break;
+  case 3: ++request->ExpectedLocalResetGeneration; break;
+  case 4: ++request->Surface.ResetGeneration; break;
+  }
+  return 0;
+ }
+ if(size==sizeof(VIOGPU_WDDM_SCANOUT_DIAGNOSTIC)) {
+  auto *request=static_cast<VIOGPU_WDDM_SCANOUT_DIAGNOSTIC*>(data);
+  assert(request->Opcode==VIOGPU_WDDM_ESCAPE_SCANOUT_DIAGNOSTIC &&
+         request->Version==1 && request->RequestFlags==1 && !request->Mechanisms && !request->StateFlags);
+  *request=diagnosticResponse; return 0;
+ }
  assert(size==sizeof(VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE));
  auto *r=static_cast<VIOGPU_WDDM_NATIVE_SURFACE_RESOURCE*>(data);
  assert(r->Header.Magic==VIOGPU_WDDM_ABI_MAGIC && r->Header.Size==sizeof(*r));
@@ -172,7 +216,7 @@ bool NativeSurfaceRequest(pipe_screen*,VIOGPU_WDDM_NATIVE_SURFACE *s) {
  if (s->Opcode==VIOGPU_WDDM_ESCAPE_FREE_NATIVE_SURFACE) {
   ++frees;
   assert(s->ShareKey==response.ShareKey && s->ResourceId==response.ResourceId);
-  assert(s->ExpectedResetGeneration==response.ResetGeneration);
+  assert(s->ExpectedResetGeneration==response.ResetGeneration+(profileFault==4 ? 1 : 0));
   return true;
  }
  ++allocations;
@@ -205,6 +249,69 @@ int main() {
  good.ShareKey=11; good.Size=20480; good.ResetGeneration=3; good.ResourceId=5;
  good.Width=101; good.Height=37; good.Fourcc=0x34325241;
  good.Stride=512; good.PlaneCount=1; good.LayoutFlags=1;
+ VIOGPU_WDDM_SCANOUT_STATE committed{};
+ committed.Header={VIOGPU_WDDM_ABI_MAGIC,0,sizeof(committed),0};
+ committed.Opcode=VIOGPU_WDDM_ESCAPE_QUERY_SCANOUT_PROFILE;
+ committed.ReadyFlags=VIOGPU_WDDM_SCANOUT_READY_ALL; committed.LocalResetGeneration=3;
+ committed.Geometry={1,64,101,37,101,37,0,0,83,31,{0,0}};
+ committed.Profile={1,64,7,0,101,37,101,37,23,29,{0,0}};
+ committed.ModeWidth=101; committed.ModeHeight=37; committed.ModeRotation=1;
+ for(LONG n=1;n<23;++n)assert(NextPrimaryCaptureSample(committed)==(n<17 ? n : 17));
+ auto capture=committed; ++capture.Geometry.ModeGeneration;
+ assert(NextPrimaryCaptureSample(capture)==1);
+ ++capture.Profile.ProfileGeneration; assert(NextPrimaryCaptureSample(capture)==1);
+ ++capture.Profile.EndpointGeneration; assert(NextPrimaryCaptureSample(capture)==1);
+ ++capture.Geometry.HostResetGeneration; assert(NextPrimaryCaptureSample(capture)==1);
+ ++capture.LocalResetGeneration; assert(NextPrimaryCaptureSample(capture)==1);
+ for(unsigned fault=0;fault<8;++fault) {
+  profileResponse=committed;
+  switch(fault) {
+  case 1: profileResponse.ReadyFlags=0; break;
+  case 2: profileResponse.ReadyFlags=31; break;
+  case 3: ++profileResponse.Header.Size; break;
+  case 4: profileResponse.LocalResetGeneration=0; break;
+  case 5: profileResponse.Profile.ProfileGeneration=0; break;
+  case 6: profileResponse.ModeRotation=0; break;
+  case 7: profileResponse.Geometry.StorageWidth=37; break;
+  }
+  VIOGPU_WDDM_SCANOUT_STATE observed{}; DroidvmPrimaryProfile policy{};
+  assert(QueryPrimaryScanoutProfile(&screen,&observed,&policy)==(fault==0));
+ }
+ for(profileFault=0;profileFault<5;++profileFault) {
+  response=good; frees=0;
+  assert(AllocateNativeHostSurface(&pipe,&t,good.Fourcc,&result,&committed)==(profileFault==0));
+  assert(frees==unsigned(profileFault!=0));
+ }
+ profileFault=0;
+ VIOGPU_WDDM_SCANOUT_DIAGNOSTIC diagnostic{};
+ diagnostic.Header={VIOGPU_WDDM_ABI_MAGIC,0,sizeof(diagnostic),0};
+ diagnostic.Opcode=VIOGPU_WDDM_ESCAPE_SCANOUT_DIAGNOSTIC; diagnostic.Version=1;
+ diagnostic.RequestFlags=1; diagnostic.Mechanisms=63; diagnostic.StateFlags=3;
+ diagnostic.ModeWidth=101; diagnostic.ModeHeight=37; diagnostic.ModeRotation=1;
+ diagnostic.LocalResetGeneration=3; diagnostic.Geometry=committed.Geometry; diagnostic.Profile=committed.Profile;
+ for(unsigned fault=0;fault<10;++fault) {
+  diagnosticResponse=diagnostic;
+  switch(fault) {
+  case 1: diagnosticResponse.Mechanisms=7; break;
+  case 2: diagnosticResponse.StateFlags=1; break;
+  case 3: diagnosticResponse.StateFlags=7; break;
+  case 4: diagnosticResponse.Version=2; break;
+  case 5: diagnosticResponse.LocalResetGeneration=0; break;
+  case 6: diagnosticResponse.Reserved=1; break;
+  case 7: diagnosticResponse.ModeWidth=0; break;
+  case 8: diagnosticResponse.Profile.ProfileGeneration=0; break;
+  case 9: diagnosticResponse.RequestFlags=0; break;
+  }
+  VIOGPU_WDDM_SCANOUT_STATE observed{}; DroidvmPrimaryProfile policy{};
+  assert(QueryDiagnosticPrimaryProfile(&screen,&observed,&policy)==(fault==0));
+  if(fault==0)assert(policy.diagnostic && policy.diagnostic_mechanisms==63 &&
+                     !observed.ReadyFlags && !VioGpuScanoutReady(policy.readiness));
+ }
+ expectedCandidate=true; response=good;
+ assert(AllocateNativeHostSurface(&pipe,&t,good.Fourcc,&result,&committed,true));
+ assert(!AllocateNativeHostSurface(&pipe,&t,good.Fourcc,&result,nullptr,true));
+ expectedCandidate=false;
+ puts("PASS profile query admission and immutable allocation request/response");
  for (unsigned scenario=0; scenario<16; ++scenario) {
   response=good; imports=frees=0; allocationOk=importOk=true;
   switch(scenario) {
@@ -313,6 +420,7 @@ int main() {
 fixture = fixture.replace('// FUNCTIONS', '\n'.join(
     extract(name) for name in ('IsValidResourceShare', 'SharedAllocationFlags',
                               'IsValidSharedAllocation', 'FreeNativeHostSurface',
+                              'QueryPrimaryScanoutProfile', 'QueryDiagnosticPrimaryProfile', 'NextPrimaryCaptureSample',
                               'AllocateNativeHostSurface', 'ResolveNativeHostSurfaceResource',
                               'CreateNativeHostSurfaceTexture')))
 for function, guarded_call in (('ResourceMap', 'pipe->buffer_map('),
@@ -326,7 +434,7 @@ with tempfile.TemporaryDirectory(prefix='native-host-surface-') as temporary:
     out = Path(temporary)
     (out / 'test.cpp').write_text(fixture)
     subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                    '-I', str(root / 'freedreno/vulkan'), str(out / 'test.cpp'),
+                    '-I', str(root / 'freedreno/vulkan'), '-I', str(root / 'gallium/frontends/d3d10umd'), str(out / 'test.cpp'),
                     '-o', str(out / 'test')], check=True)
     subprocess.run([str(out / 'test')], check=True)
 
