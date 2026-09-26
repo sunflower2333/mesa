@@ -1611,11 +1611,35 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
                                   FILE_ATTRIBUTE_NORMAL, NULL);
          if (log != INVALID_HANDLE_VALUE) {
-            char line[192];
+            // This record precedes required-primary validation and allocation.
+            // ModeDesc alone does not establish the primary's actual storage
+            // extent or whether the producer has already oriented its pixels.
+            // Retain the existing bounded sample count and all admission rules.
+            char line[768];
             int len = _snprintf_s(line, sizeof line, _TRUNCATE,
-                                  "primary pid=%lu flags=0x%x driverFlags=0x%x optional=%u size=%ux%u\r\n",
+                                  "primary pid=%lu flags=0x%x driverFlags=0x%x optional=%u size=%ux%u "
+                                  "stage=prevalidation sample=%ld source=%u runtimePresent=%u "
+                                  "rotation=%u modeFormat=%u refresh=%u/%u scaling=%u scanline=%u "
+                                  "texel=%ux%ux%u resourceFormat=%u dimension=%u mips=%u array=%u "
+                                  "samples=%u quality=%u bind=0x%x misc=0x%x resource=%p\r\n",
                                   GetCurrentProcessId(), primary->Flags, primary->DriverFlags,
-                                  optional ? 1u : 0u, primary->ModeDesc.Width, primary->ModeDesc.Height);
+                                  optional ? 1u : 0u, primary->ModeDesc.Width, primary->ModeDesc.Height,
+                                  sample, primary->VidPnSourceId,
+                                  CastDevice(hDevice)->runtime_present ? 1u : 0u,
+                                  (unsigned)primary->ModeDesc.Rotation, (unsigned)primary->ModeDesc.Format,
+                                  primary->ModeDesc.RefreshRate.Numerator,
+                                  primary->ModeDesc.RefreshRate.Denominator,
+                                  (unsigned)primary->ModeDesc.Scaling,
+                                  (unsigned)primary->ModeDesc.ScanlineOrdering,
+                                  pCreateResource->pMipInfoList[0].TexelWidth,
+                                  pCreateResource->pMipInfoList[0].TexelHeight,
+                                  pCreateResource->pMipInfoList[0].TexelDepth,
+                                  (unsigned)pCreateResource->Format,
+                                  (unsigned)pCreateResource->ResourceDimension,
+                                  pCreateResource->MipLevels, pCreateResource->ArraySize,
+                                  pCreateResource->SampleDesc.Count, pCreateResource->SampleDesc.Quality,
+                                  pCreateResource->BindFlags, pCreateResource->MiscFlags,
+                                  hResource.pDrvPrivate);
             DWORD written;
             if (len > 0)
                WriteFile(log, line, (DWORD)len, &written, NULL);
