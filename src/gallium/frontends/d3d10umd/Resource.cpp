@@ -34,9 +34,11 @@
 #include "Resource.h"
 #include "Residency.h"
 #include "tu_wddm_abi.h"
+#include "viogpu_wddm_scanout.h"
 #include "Format.h"
 #include "State.h"
 #include "Query.h"
+#include "PrimaryContract.h"
 
 #include "Debug.h"
 #include <limits.h>
@@ -118,6 +120,32 @@ static bool
 NativeSurfaceRequest(struct pipe_screen *screen, VIOGPU_WDDM_NATIVE_SURFACE *surface)
 {
    return NT_SUCCESS(NativeSurfaceEscape(screen, surface, sizeof(*surface)));
+}
+
+static bool
+QueryPrimaryScanoutProfile(struct pipe_screen *screen, VIOGPU_WDDM_SCANOUT_STATE *state,
+                          DroidvmPrimaryProfile *profile)
+{
+   *state = {};
+   *profile = {};
+   state->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
+   state->Header.Version = VIOGPU_WDDM_ABI_VERSION;
+   state->Header.Size = sizeof(*state);
+   state->Opcode = VIOGPU_WDDM_ESCAPE_QUERY_SCANOUT_PROFILE;
+   if (NativeSurfaceEscape(screen, state, sizeof(*state)) != 0 ||
+       state->Header.Magic != VIOGPU_WDDM_ABI_MAGIC || state->Header.Version != VIOGPU_WDDM_ABI_VERSION ||
+       state->Header.Size != sizeof(*state) || state->Header.Reserved ||
+       state->Opcode != VIOGPU_WDDM_ESCAPE_QUERY_SCANOUT_PROFILE ||
+       state->ReadyFlags != VIOGPU_WDDM_SCANOUT_READY_ALL || !state->LocalResetGeneration || state->Reserved ||
+       !VioGpuScanoutProfileMatches(&state->Profile, &state->Geometry) ||
+       !state->ModeWidth || !state->ModeHeight || state->ModeRotation < 1 || state->ModeRotation > 4)
+      return false;
+   profile->geometry = state->Geometry;
+   profile->readiness = {true, true, true, true, true, true};
+   profile->mode_width = state->ModeWidth;
+   profile->mode_height = state->ModeHeight;
+   profile->mode_rotation = state->ModeRotation;
+   return true;
 }
 
 static VIOGPU_WDDM_UINT32
@@ -476,7 +504,8 @@ static bool
 AllocateNativeHostSurface(struct pipe_context *pipe,
                                const struct pipe_resource *templat,
                                VIOGPU_WDDM_UINT32 fourcc,
-                               VIOGPU_WDDM_NATIVE_SURFACE *surface)
+                               VIOGPU_WDDM_NATIVE_SURFACE *surface,
+                               const VIOGPU_WDDM_SCANOUT_STATE *profile = NULL)
 {
    memset(surface, 0, sizeof(*surface));
    surface->Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
@@ -486,8 +515,30 @@ AllocateNativeHostSurface(struct pipe_context *pipe,
    surface->Width = templat->width0;
    surface->Height = templat->height0;
    surface->Fourcc = fourcc;
-   if (!fourcc || !NativeSurfaceRequest(pipe->screen, surface))
+   if (!fourcc)
       return false;
+   if (profile) {
+      VIOGPU_WDDM_NATIVE_PROFILE_SURFACE request = {};
+      request.Header = surface->Header;
+      request.Header.Size = sizeof(request);
+      request.Opcode = VIOGPU_WDDM_ESCAPE_ALLOCATE_PROFILE_SURFACE;
+      request.ExpectedLocalResetGeneration = profile->LocalResetGeneration;
+      request.Geometry = profile->Geometry;
+      request.Profile = profile->Profile;
+      request.Surface = *surface;
+      const auto expected = request;
+      if (NativeSurfaceEscape(pipe->screen, &request, sizeof(request)) != 0)
+         return false;
+      *surface = request.Surface;
+      if (memcmp(&request, &expected, offsetof(VIOGPU_WDDM_NATIVE_PROFILE_SURFACE, Surface)) != 0 ||
+          surface->ResetGeneration != profile->LocalResetGeneration) {
+         FreeNativeHostSurface(pipe->screen, surface);
+         memset(surface, 0, sizeof(*surface));
+         return false;
+      }
+   } else if (!NativeSurfaceRequest(pipe->screen, surface)) {
+      return false;
+   }
 
    const bool valid = surface->Header.Magic == VIOGPU_WDDM_ABI_MAGIC &&
       surface->Header.Version == VIOGPU_WDDM_ABI_VERSION &&
@@ -680,6 +731,8 @@ ReleaseNativeHostSurface(struct pipe_screen *screen, Resource *resource)
    FreeNativeHostSurface(screen, &surface);
    memset(resource->native_host_surface, 0, sizeof(resource->native_host_surface));
    resource->native_host_surface_live = false;
+   memset(resource->native_scanout_state, 0, sizeof(resource->native_scanout_state));
+   resource->native_scanout_profile = false;
 }
 
 static struct pipe_resource *
@@ -1504,18 +1557,33 @@ FlipOptionalPrimaries(void)
 }
 
 static bool
-OptionalPrimaryCanScanOut(const Device *device, const D3D10DDIARG_CREATERESOURCE *create)
+PrimaryCanScanOut(const Device *device, const D3D10DDIARG_CREATERESOURCE *create,
+                 const DroidvmPrimaryProfile *profile = NULL)
 {
+   static_assert(DXGI_DDI_PRIMARY_OPTIONAL == 1 && DXGI_DDI_PRIMARY_NONPREROTATED == 2,
+                 "primary policy flags");
+   static_assert(DXGI_DDI_MODE_ROTATION_IDENTITY == 1, "primary policy identity");
    const DXGI_DDI_PRIMARY_DESC *primary = create->pPrimaryDesc;
-   return FlipOptionalPrimaries() && device->runtime_present && primary->VidPnSourceId == 0 &&
-          (primary->Flags & ~(DXGI_DDI_PRIMARY_OPTIONAL | DXGI_DDI_PRIMARY_NONPREROTATED)) == 0 &&
-          primary->ModeDesc.Rotation == DXGI_DDI_MODE_ROTATION_IDENTITY &&
-          primary->ModeDesc.Width == create->pMipInfoList[0].TexelWidth &&
-          primary->ModeDesc.Height == create->pMipInfoList[0].TexelHeight &&
-          primary->ModeDesc.Format == create->Format &&
-          primary->ModeDesc.RefreshRate.Numerator != 0 &&
-          primary->ModeDesc.RefreshRate.Denominator != 0 &&
-          create->MipLevels == 1 && create->ArraySize == 1 && create->SampleDesc.Count == 1;
+   if (!primary || !create->pMipInfoList || !create->MipLevels)
+      return false;
+   const DroidvmPrimaryDescription description = {
+      primary->Flags, primary->VidPnSourceId,
+      primary->ModeDesc.Width, primary->ModeDesc.Height, (unsigned)primary->ModeDesc.Rotation,
+      (unsigned)primary->ModeDesc.Format,
+      primary->ModeDesc.RefreshRate.Numerator, primary->ModeDesc.RefreshRate.Denominator,
+      create->pMipInfoList[0].TexelWidth, create->pMipInfoList[0].TexelHeight,
+      create->pMipInfoList[0].TexelDepth, (unsigned)create->Format,
+      create->MipLevels, create->ArraySize, create->SampleDesc.Count, create->SampleDesc.Quality,
+      create->ResourceDimension == D3D10DDIRESOURCE_TEXTURE2D, device->runtime_present != NULL,
+   };
+   return DroidvmPrimaryCanScanOut(description, profile);
+}
+
+static bool
+OptionalPrimaryCanScanOut(const Device *device, const D3D10DDIARG_CREATERESOURCE *create,
+                         const DroidvmPrimaryProfile *profile = NULL)
+{
+   return FlipOptionalPrimaries() && PrimaryCanScanOut(device, create, profile);
 }
 
 
@@ -1594,6 +1662,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
    memset(pResource, 0, sizeof *pResource);
 
+   VIOGPU_WDDM_SCANOUT_STATE scanoutState = {};
+   DroidvmPrimaryProfile scanoutProfile = {};
+   const DroidvmPrimaryProfile *primaryProfile = NULL;
+   if (pCreateResource->pPrimaryDesc && NativeHostSurfaceEnabled() &&
+       QueryPrimaryScanoutProfile(screen, &scanoutState, &scanoutProfile))
+      primaryProfile = &scanoutProfile;
+
    if (pCreateResource->pPrimaryDesc) {
       DXGI_DDI_PRIMARY_DESC *primary = pCreateResource->pPrimaryDesc;
       const bool optional = (primary->Flags & DXGI_DDI_PRIMARY_OPTIONAL) != 0;
@@ -1601,7 +1676,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       // buffers stay copy-only unless they match
       // the primary's mode exactly (see FlipOptionalPrimaries).
       const bool scanout =
-         !optional || OptionalPrimaryCanScanOut(CastDevice(hDevice), pCreateResource);
+         !optional || OptionalPrimaryCanScanOut(CastDevice(hDevice), pCreateResource, primaryProfile);
       primary->DriverFlags = scanout ? 0 : DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
       pResource->scanout_primary = scanout;
       static volatile LONG primaryCount;
@@ -1646,15 +1721,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
             CloseHandle(log);
          }
       }
-      if (!optional &&
-          (!CastDevice(hDevice)->runtime_present || primary->VidPnSourceId != 0 ||
-           (primary->Flags & ~DXGI_DDI_PRIMARY_NONPREROTATED) != 0 ||
-           primary->ModeDesc.Rotation != DXGI_DDI_MODE_ROTATION_IDENTITY ||
-           primary->ModeDesc.Width != pCreateResource->pMipInfoList[0].TexelWidth ||
-           primary->ModeDesc.Height != pCreateResource->pMipInfoList[0].TexelHeight ||
-           primary->ModeDesc.Format != pCreateResource->Format ||
-           primary->ModeDesc.RefreshRate.Numerator == 0 ||
-           primary->ModeDesc.RefreshRate.Denominator == 0)) {
+      /* A rotated or profiled primary cannot become a NO_SCANOUT proxy.
+       * The same immutable query drives required and optional admission. */
+      if ((!optional || primaryProfile || primary->ModeDesc.Rotation != DXGI_DDI_MODE_ROTATION_IDENTITY) &&
+          !PrimaryCanScanOut(CastDevice(hDevice), pCreateResource, primaryProfile)) {
          SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
          return;
       }
@@ -1729,11 +1799,19 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
     * shared texture: refusing it would leave DWM unable to create a swapchain. */
    bool nativeHostSurface = pResource->scanout_primary && NativeHostSurfaceEnabled() &&
       AllocateNativeHostSurface(pipe, &templat, NativeSurfaceFourcc(pCreateResource->Format),
-                                &nativeSurface);
+                                &nativeSurface, primaryProfile ? &scanoutState : NULL);
+   if (primaryProfile && !nativeHostSurface) {
+      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+      return;
+   }
    if (nativeHostSurface) {
       memcpy(pResource->native_host_surface, &nativeSurface, sizeof(nativeSurface));
       pResource->native_host_surface_live = true;
       pResource->native_host_backing = true;
+      if (primaryProfile) {
+         memcpy(pResource->native_scanout_state, &scanoutState, sizeof(scanoutState));
+         pResource->native_scanout_profile = true;
+      }
       resourceShare.Header.Magic = VIOGPU_WDDM_ABI_MAGIC;
       resourceShare.Header.Version = VIOGPU_WDDM_ABI_VERSION;
       resourceShare.Header.Size = sizeof(resourceShare);

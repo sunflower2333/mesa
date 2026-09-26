@@ -674,6 +674,9 @@ AssignNativeBacking(Resource *destination, const Resource *source)
    destination->native_host_surface_live = source->native_host_surface_live;
    memcpy(destination->native_host_surface, source->native_host_surface,
           sizeof destination->native_host_surface);
+   destination->native_scanout_profile = source->native_scanout_profile;
+   memcpy(destination->native_scanout_state, source->native_scanout_state,
+          sizeof destination->native_scanout_state);
 }
 
 static HRESULT
@@ -693,6 +696,10 @@ RotateNativeResourceIdentities(Device *device, UINT count,
           current->NumSubResources != 1 || current->resource->array_size != 1 ||
           current->Format != first->Format || current->shared_pitch != first->shared_pitch ||
           current->scanout_primary != first->scanout_primary ||
+          current->native_scanout_profile != first->native_scanout_profile ||
+          (current->native_scanout_profile &&
+           memcmp(current->native_scanout_state, first->native_scanout_state,
+                  sizeof current->native_scanout_state) != 0) ||
           bool(current->hRTResourceHandle) != bool(first->hRTResourceHandle) ||
           current->shared_staging_allocation || current->so_target ||
           !RotationScratchMatches(current->resource, first->resource))
