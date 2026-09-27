@@ -53,9 +53,15 @@ def main():
     args = parser.parse_args()
     source = (VULKAN / 'tu_knl_wddm.cc').read_text(encoding='utf-8')
     header = (VULKAN / 'tu_knl_wddm.h').read_text(encoding='utf-8')
+    abi = (VULKAN / 'tu_wddm_abi.h').read_text(encoding='utf-8')
     records = '\n'.join(extract(header, f'struct {name} {{') + ';' for name in (
         'tu_wddm_allocation', 'tu_wddm_render_reference'))
     records += '\n' + source[source.index('enum : uint32_t {'):source.index('/* Native-context fences')]
+    # Keep the imported-reference packet tied to the exact private ABI.
+    records += '\nusing VIOGPU_WDDM_UINT32 = uint32_t; using VIOGPU_WDDM_UINT64 = uint64_t;\n'
+    records += '#define VIOGPU_WDDM_MAX_IMPORTED_REFERENCES 256U\n'
+    records += extract(abi, 'typedef struct VIOGPU_WDDM_IMPORTED_REFERENCE {') + \
+        ' VIOGPU_WDDM_IMPORTED_REFERENCE;\n'
     for name in ('tu_wddm_submit_entry', 'tu_wddm_submit_reference', 'tu_wddm_submit_scratch', 'tu_wddm_submit'):
         records += '\n' + extract(source, f'struct {name} {{') + ';'
     functions = (

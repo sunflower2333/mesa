@@ -251,6 +251,17 @@ bool tu_wddm_context_render(tu_wddm_context *c, const void *packet, uint32_t siz
    d->packet.assign(bytes, bytes + size); d->refs.assign(refs, refs + count);
    return d->render_ok;
 }
+bool tu_wddm_context_render_imports(
+   tu_wddm_context *c, const void *packet, uint32_t size,
+   const tu_wddm_render_reference *refs, uint32_t count,
+   const VIOGPU_WDDM_IMPORTED_REFERENCE *, uint32_t,
+   const tu_wddm_allocation *const *)
+{
+   return tu_wddm_context_render(c, packet, size, refs, count);
+}
+/* Native-import ownership has a dedicated fixture; this test only exercises
+ * the final-BO cleanup boundary that invokes it. */
+bool tu_wddm_allocation_release_import(tu_wddm_allocation *) { return true; }
 // INSERT_PRODUCTION
 
 // Only the synchronous boundary is faked; the single-attempt destroy is production code.
