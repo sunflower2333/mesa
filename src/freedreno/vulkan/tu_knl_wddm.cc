@@ -50,7 +50,14 @@ static_assert(sizeof(D3DKMT_DRIVERVERSION) == sizeof(uint32_t),
  * Use a per-wait one-shot timer without changing the process/global timer
  * resolution. Create it only after observing pending work and checking the
  * deadline, so completed fences and nonblocking queries need no handle.
- * Waking up is only a reason to query again, never evidence of completion. */
+ * Waking up is only a reason to query again, never evidence of completion.
+ *
+ * A flat 1 ms poll left the GPU idle between dependent submissions: in
+ * Geekbench 7 the next submission followed a retirement by 2.4 ms (p50) while
+ * the host side of that path took 0.14 ms, and the GPU was 48-74 % busy at its
+ * top clock. Most waits end within a few hundred microseconds, so re-query at
+ * once a few times (each query is itself a kernel escape of tens of
+ * microseconds), then sleep 100 us doubling to the original 1 ms ceiling. */
 class tu_wddm_fence_poll_wait {
 public:
    tu_wddm_fence_poll_wait() = default;
@@ -67,6 +74,11 @@ public:
    {
       if (remaining_ns == 0)
          return;
+      if (immediate_polls < max_immediate_polls) {
+         ++immediate_polls;
+         YieldProcessor();
+         return;
+      }
       if (!initialized) {
          initialized = true;
          timer = CreateWaitableTimerExW(NULL, NULL,
@@ -74,8 +86,9 @@ public:
                                        TIMER_MODIFY_STATE | SYNCHRONIZE);
       }
       if (timer != NULL) {
-         const uint64_t interval_ns = remaining_ns < UINT64_C(1000000)
-                                        ? remaining_ns : UINT64_C(1000000);
+         const uint64_t interval_ns = remaining_ns < step_ns ? remaining_ns : step_ns;
+         if (step_ns < UINT64_C(1000000))
+            step_ns = step_ns * 2 < UINT64_C(1000000) ? step_ns * 2 : UINT64_C(1000000);
          LARGE_INTEGER due;
          /* Relative time is negative, in 100ns units; round up, never to 0. */
          due.QuadPart = -static_cast<LONGLONG>((interval_ns + 99) / 100);
@@ -92,8 +105,11 @@ public:
    }
 
 private:
+   static constexpr unsigned max_immediate_polls = 8;
    HANDLE timer = NULL;
    bool initialized = false;
+   unsigned immediate_polls = 0;
+   uint64_t step_ns = UINT64_C(100000);
 };
 
 static bool
