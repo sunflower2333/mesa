@@ -55,9 +55,10 @@ static_assert(sizeof(D3DKMT_DRIVERVERSION) == sizeof(uint32_t),
  * A flat 1 ms poll left the GPU idle between dependent submissions: in
  * Geekbench 7 the next submission followed a retirement by 2.4 ms (p50) while
  * the host side of that path took 0.14 ms, and the GPU was 48-74 % busy at its
- * top clock. Most waits end within a few hundred microseconds, so re-query at
- * once a few times (each query is itself a kernel escape of tens of
- * microseconds), then sleep 100 us doubling to the original 1 ms ceiling. */
+ * top clock. A count of immediate re-queries ended too early (the host answer
+ * reaches the guest ~0.2 ms after retirement) and the sleeps that followed were
+ * quantised by the clock tick (1.77 ms p50 afterwards), so spin on the query
+ * for a bounded ~600 us, then sleep 500 us doubling to a 1 ms ceiling. */
 class tu_wddm_fence_poll_wait {
 public:
    tu_wddm_fence_poll_wait() = default;
