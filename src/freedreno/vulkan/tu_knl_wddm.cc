@@ -3988,6 +3988,19 @@ tu_wddm_submit_add_bos(struct tu_device *device, void *_submit,
       tu_wddm_submit_add_reference(device, submit, bos[i], access_flags);
 }
 
+/* EXPERIMENT (do not pin): TU_WDDM_SKIP_LIVE_BOS=1 stops listing every live BO in every
+ * submit.  Residency is explicit in WDDM 2.0 (one MakeResident per allocation) and the KMD
+ * maps each allocation at creation, so the list is only a conservative copy of the msm
+ * behaviour; this measures what it costs per Render. */
+static bool
+tu_wddm_skip_live_bos(void)
+{
+   static int cached = -1;
+   if (cached < 0)
+      cached = debug_get_bool_option("TU_WDDM_SKIP_LIVE_BOS", false) ? 1 : 0;
+   return cached == 1;
+}
+
 static bool
 tu_wddm_submit_add_live_bos(struct tu_device *device,
                             struct tu_wddm_submit *submit)
@@ -4248,7 +4261,7 @@ tu_wddm_queue_submit_locked(struct tu_queue *queue,
     * and its submission lock, so inherit its last transferred fence. */
    uint32_t fence = device->wddm_context.last_submitted_fence;
    if (entry_count != 0) {
-      if (!tu_wddm_submit_add_live_bos(device, submit))
+      if (!tu_wddm_skip_live_bos() && !tu_wddm_submit_add_live_bos(device, submit))
          return vk_device_set_lost(
             &device->vk, "WDDM submit exceeds the allocation-list capacity");
 
