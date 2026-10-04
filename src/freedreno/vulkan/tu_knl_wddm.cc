@@ -74,8 +74,25 @@ public:
    {
       if (remaining_ns == 0)
          return;
-      if (immediate_polls < max_immediate_polls) {
-         ++immediate_polls;
+      /* Spin on the caller's fence query for a bounded wall-clock window
+       * before sleeping.  Measured in Geekbench 7: the host retires a batch
+       * and has a vCPU running in ~0.1 ms, but a count of back-to-back
+       * queries ends after a few tens of microseconds, and a "100 us"
+       * high-resolution timer actually fires on a much coarser tick, so the
+       * next submission followed a retirement by ~1.8 ms.  Each query is a
+       * kernel escape, so a time-bounded spin costs little CPU for the short
+       * waits it covers and nothing for long ones. */
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      if (!spin_started) {
+         spin_started = true;
+         LARGE_INTEGER freq;
+         QueryPerformanceFrequency(&freq);
+         spin_ticks = static_cast<LONGLONG>(
+            static_cast<double>(freq.QuadPart) * spin_us / 1e6);
+         spin_end = now.QuadPart + spin_ticks;
+      }
+      if (now.QuadPart < spin_end) {
          YieldProcessor();
          return;
       }
@@ -105,11 +122,13 @@ public:
    }
 
 private:
-   static constexpr unsigned max_immediate_polls = 8;
+   static constexpr double spin_us = 600.0;
    HANDLE timer = NULL;
    bool initialized = false;
-   unsigned immediate_polls = 0;
-   uint64_t step_ns = UINT64_C(100000);
+   bool spin_started = false;
+   LONGLONG spin_ticks = 0;
+   LONGLONG spin_end = 0;
+   uint64_t step_ns = UINT64_C(500000);
 };
 
 static bool
