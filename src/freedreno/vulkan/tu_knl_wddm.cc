@@ -123,7 +123,7 @@ public:
    }
 
 private:
-   static constexpr double spin_us = 600.0;
+   static constexpr double spin_us = 20000.0;
    HANDLE timer = NULL;
    bool initialized = false;
    bool spin_started = false;
