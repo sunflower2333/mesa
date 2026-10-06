@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 #include "tu_wddm_abi.h"
+#include "mesa_wddm_runtime.h"
 #include "tu_wddm_residency.h"
 
 /* ---- Minimal D3DKMT surface with the SDK field names production uses ---- */
@@ -35,6 +36,8 @@ enum D3DKMT_DEVICESTATE_TYPE { D3DKMT_DEVICESTATE_EXECUTION = 1 };
 enum D3DKMT_DEVICEEXECUTION_STATE { D3DKMT_DEVICEEXECUTION_ACTIVE = 1, D3DKMT_DEVICEEXECUTION_RESET = 2 };
 enum D3DDDI_PAGINGQUEUE_PRIORITY { D3DDDI_PAGINGQUEUE_PRIORITY_NORMAL = 0 };
 struct D3DKMT_QUERYADAPTERINFO { D3DKMT_HANDLE hAdapter; KMTQUERYADAPTERINFOTYPE Type; void *pPrivateDriverData; UINT PrivateDriverDataSize; };
+enum { D3DKMT_ESCAPE_DRIVERPRIVATE = 0 };
+struct D3DKMT_ESCAPE { D3DKMT_HANDLE hAdapter, hDevice; UINT Type; void *pPrivateDriverData; UINT PrivateDriverDataSize; D3DKMT_HANDLE hContext; };
 struct D3DKMT_OPENADAPTERFROMLUID { LUID AdapterLuid; D3DKMT_HANDLE hAdapter; };
 struct D3DKMT_CLOSEADAPTER { D3DKMT_HANDLE hAdapter; };
 struct D3DDDI_ALLOCATIONLIST { D3DKMT_HANDLE hAllocation; UINT WriteOperation; };
@@ -90,6 +93,7 @@ struct tu_wddm_dispatch {
    NTSTATUS (*DestroyAllocation2)(const D3DKMT_DESTROYALLOCATION2 *);
    NTSTATUS (*Render)(D3DKMT_RENDER *);
    NTSTATUS (*GetDeviceState)(D3DKMT_GETDEVICESTATE *);
+   NTSTATUS (*Escape)(const D3DKMT_ESCAPE *);
    NTSTATUS (*CreatePagingQueue)(D3DKMT_CREATEPAGINGQUEUE *);
    NTSTATUS (*DestroyPagingQueue)(D3DDDI_DESTROYPAGINGQUEUE *);
    NTSTATUS (*MakeResident)(D3DDDI_MAKERESIDENT *);
@@ -254,6 +258,11 @@ static NTSTATUS fake_state(D3DKMT_GETDEVICESTATE *state)
    state->ExecutionState = D3DKMT_DEVICEEXECUTION_ACTIVE;
    return kSuccess;
 }
+static NTSTATUS fake_escape(const D3DKMT_ESCAPE *)
+{
+   kmt->calls.push_back("Escape");
+   return kInvalid;
+}
 static NTSTATUS fake_create_queue(D3DKMT_CREATEPAGINGQUEUE *create)
 {
    kmt->calls.push_back("CreatePagingQueue");
@@ -377,6 +386,7 @@ static tu_wddm_runtime make_runtime()
    runtime.dispatch.DestroyAllocation2 = fake_destroy_allocation;
    runtime.dispatch.Render = fake_render;
    runtime.dispatch.GetDeviceState = fake_state;
+   runtime.dispatch.Escape = fake_escape;
    runtime.dispatch.CreatePagingQueue = fake_create_queue;
    runtime.dispatch.DestroyPagingQueue = fake_destroy_queue;
    runtime.dispatch.MakeResident = fake_make_resident;

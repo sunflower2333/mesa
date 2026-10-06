@@ -25,9 +25,11 @@ TRANSPORT_FUNCTIONS = [
     'tu_wddm_query_driver_version', 'tu_wddm_device_requires_residency', 'tu_wddm_adapter_open',
     'tu_wddm_adapter_close', 'tu_wddm_device_note_paging_fence', 'tu_wddm_device_wait_paging_fence',
     'tu_wddm_device_residency_init', 'tu_wddm_device_residency_finish', 'tu_wddm_device_open',
-    'tu_wddm_device_close', 'tu_wddm_device_execution_active', 'tu_wddm_allocation_desc_valid',
+    'tu_wddm_device_close', 'tu_wddm_device_execution_active', 'tu_wddm_context_get_info',
+    'tu_wddm_allocation_desc_valid',
     'tu_wddm_destroy_allocation_handle', 'tu_wddm_allocation_make_resident_attempt',
-    'tu_wddm_allocation_make_resident', 'tu_wddm_allocation_evict', 'tu_wddm_allocation_create',
+    'tu_wddm_allocation_make_resident', 'tu_wddm_allocation_evict', 'tu_wddm_shared_allocation',
+    'tu_wddm_allocation_create',
     'tu_wddm_allocation_destroy', 'tu_wddm_fence_after', 'tu_wddm_render_reference_valid',
     'tu_wddm_render_references_unique', 'tu_wddm_native_submit_valid',
     'tu_wddm_render_replacements_valid', 'tu_wddm_context_render',
@@ -68,10 +70,10 @@ NEGATIVE_CONTROLS = {
 
 def extract(source, name):
     """Return the full column-zero definition of a production function."""
-    match = re.search(r'(?m)^' + re.escape(name) + r'\(', source)
+    match = re.search(r'(?m)^(?:static inline bool )?' + re.escape(name) + r'\(', source)
     if not match:
         raise ValueError('Missing production function: ' + name)
-    start = source.rfind('\n', 0, match.start() - 1) + 1  # return-type line
+    start = match.start() if match.group().startswith('static ') else source.rfind('\n', 0, match.start() - 1) + 1
     brace = source.index('{', match.end())
     depth = 0
     for index in range(brace, len(source)):
@@ -113,7 +115,8 @@ def build_fixture(here, work, control):
         for name in ['tu_wddm_runtime', 'tu_wddm_adapter_info', 'tu_wddm_adapter', 'tu_wddm_device',
                      'tu_wddm_context', 'tu_wddm_allocation_desc', 'tu_wddm_allocation',
                      'tu_wddm_render_reference'])
-    functions = '\n\n'.join(extract(source, name) for name in TRANSPORT_FUNCTIONS)
+    functions = extract(header, 'tu_wddm_shared_context') + '\n\n'
+    functions += '\n\n'.join(extract(source, name) for name in TRANSPORT_FUNCTIONS)
     fixture = (here / 'tu_wddm_residency_test.cpp').read_text()
     for marker, text in (('// PRODUCTION_CONSTANTS', constants + '\n' + msm),
                          ('// PRODUCTION_STRUCTS', limits + '\n\n' + structs),

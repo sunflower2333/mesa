@@ -30,6 +30,19 @@ jobs:
           if ($LASTEXITCODE) { throw 'Turnip WDDM 2.0 residency regression failed' }
           python src/freedreno/vulkan/tests/check_tu_wddm_policy.py
           if ($LASTEXITCODE) { throw 'Turnip WDDM residency policy failed' }
+      - name: Validate actual shared runtime ownership and failed-create teardown
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++17 /W4 /WX /EHsc /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000C /I src/freedreno/vulkan src/freedreno/vulkan/tu_knl_wddm.cc src/freedreno/vulkan/tests/tu_wddm_render_test.cpp /Fe:tu_wddm_runtime_test.exe
+          if ($LASTEXITCODE) { throw 'Shared runtime transport compilation failed' }
+          ./tu_wddm_runtime_test.exe
+          if ($LASTEXITCODE) { throw 'Shared runtime transport checks failed' }
+          python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py
+          if ($LASTEXITCODE) { throw 'Runtime allocation and failed-create teardown checks failed' }
+          foreach ($negative in @('oom','rollback-status','alignment')) {
+            python src/freedreno/vulkan/tests/tu_wddm_allocation_status_test.py "--negative-control-$negative"
+            if ($LASTEXITCODE) { throw "Allocation semantic negative failed: $negative" }
+          }
   candidate:
     needs: source-regressions
     runs-on: windows-2025-vs2026
